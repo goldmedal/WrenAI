@@ -1,0 +1,20 @@
+// Live equivalent of blueprint/agents.yaml for an already-onboarded sandbox:
+// `openclaw config patch --file <this>`. Arrays replace, so the whole agents.list is given.
+{
+  agents: {
+    list: [
+      { id: "main", default: true },
+      {
+        id: "genbi_answer", name: "genbi_answer",
+        workspace: "/sandbox/.openclaw/workspace-genbi_answer",
+        agentDir: "/sandbox/.openclaw/agents/genbi_answer/agent",
+        model: "inference/nvidia/nemotron-3-super-120b-a12b",
+        tools: {
+          profile: "minimal",
+          allow: ["wren__run_sql","wren__dry_run","wren__dry_plan","wren__list_models","wren__describe_model","wren__describe_schema","wren__get_context","wren__get_instructions","wren__list_cubes","wren__describe_cube","wren__query_cube","wren__recall_queries"],
+          deny: ["write","edit","exec","read","apply_patch","browser","sessions_spawn","message","web_fetch","web_search"]
+        }
+      }
+    ]
+  }
+}

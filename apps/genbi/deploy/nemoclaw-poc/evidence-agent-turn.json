@@ -1,0 +1,26 @@
+{
+  "status": "ok",
+  "summary": "completed",
+  "result": {
+    "payloads": [
+      {
+        "text": "Total completed order amount by region (USD): East leads with $86,696, followed closely by South ($86,567), then West ($60,605) and North ($58,331).\n\n| region | total_completed_amount |\n|--------|------------------------|\n| East   | 86696.0                |\n| South  | 86567.0                |\n| West   | 60605.0                |\n| North  | 58331.0                |\n\nSQL:\n```sql\nSELECT c.region, SUM(o.amount) AS total_completed_amount\nFROM orders o\nJOIN customers c ON o.customer_id = c.customer_id\nWHERE o.status = 'completed'\nGROUP BY c.region\nORDER BY total_completed_amount DESC;\n```",
+        "mediaUrl": null
+      }
+    ],
+    "meta": {
+      "durationMs": 8765,
+      "agentMeta": {
+        "provider": "inference",
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "usage": {
+          "input": 52614,
+          "output": 658,
+          "cacheRead": 25344,
+          "total": 16371
+        },
+        "agentHarnessId": "openclaw"
+      }
+    }
+  }
+}
