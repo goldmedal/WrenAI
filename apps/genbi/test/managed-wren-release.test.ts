@@ -27,6 +27,9 @@ function fixture() {
 afterEach(() => { while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true }); });
 
 describe("managed Wren protected publish exactness", () => {
+  it("uses the shared relocation and tamper contracts for release and installed runtimes", () => {
+    expect(() => execFileSync(process.execPath, ["--test", path.resolve("scripts/managed-wren-release-tree.test.mjs")], { stdio: "pipe" })).not.toThrow();
+  });
   it("accepts the candidate's complete exact inventory and re-fetches only its approved source bytes", async () => {
     const value = fixture(); const target = mkdtempSync(path.join(tmpdir(), "genbi-managed-wren-publish-")); roots.push(target);
     const fetched: string[] = [];

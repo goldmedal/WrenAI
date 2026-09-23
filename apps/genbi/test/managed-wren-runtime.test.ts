@@ -54,9 +54,9 @@ afterEach(() => {
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
-function provisionFixture(version = "0.13.0") {
+function provisionFixture(version = "0.13.0", directory = "runtime") {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), "genbi-managed-wren-provision-"))); roots.push(root);
-  const packageRoot = path.join(root, "installed-package"); const runtimeRoot = path.join(root, "runtime"); const source = path.join(root, "python-source");
+  const packageRoot = path.join(root, "installed-package"); const runtimeRoot = path.join(root, directory); const source = path.join(root, "python-source");
   mkdirSync(path.join(packageRoot, "managed-wren"), { recursive: true, mode: 0o700 }); mkdirSync(runtimeRoot, { mode: 0o700 }); mkdirSync(path.join(source, "python", "install", "bin"), { recursive: true, mode: 0o700 }); chmodSync(runtimeRoot, 0o700);
   const python = path.join(source, "python", "install", "bin", "python3.11");
   const fakePython = [
@@ -188,6 +188,14 @@ describe("managed Wren runtime", () => {
     await expect(provisionManagedWrenRuntime({ packageRoot: value.packageRoot, runtimeRoot: value.runtimeRoot })).resolves.toMatchObject({ generation_root: first.generation_root });
     expect(value.requests).toHaveLength(requestCount);
   }, 20_000);
+
+  it("relocates and revalidates a managed launcher under a root containing spaces", async () => {
+    const value = provisionFixture("0.13.0", "Application Support"); value.installFetch();
+    const installed = await provisionManagedWrenRuntime({ packageRoot: value.packageRoot, runtimeRoot: value.runtimeRoot });
+    expect(readFileSync(installed.launcher, "utf8")).toMatch(/^#!\/bin\/sh\n/);
+    expect(readFileSync(installed.launcher, "utf8")).not.toContain(".staging-");
+    expect(resolveManagedWrenRuntime({ packageRoot: value.packageRoot, runtimeRoot: value.runtimeRoot })).toEqual(installed);
+  });
 
   it("waits for a concurrent first-use owner and both callers receive the same generation", async () => {
     const value = provisionFixture(); let release!: () => void; const paused = new Promise<void>((resolve) => { release = resolve; }); let firstFetch = true;
