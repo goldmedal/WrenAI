@@ -1,12 +1,28 @@
 import { normalizeComponentResult, type ComponentInvocationResult, type RenderBlock } from "@warble/claude-agent-sdk";
 import { z } from "zod";
 import { checkSemanticGuards, querySemantics, type QuerySemantics } from "./semantic-guards.js";
+import { namedAnswerSql, selectAnsweringCandidate, sqlKey } from "../render/answering-query.js";
 import type { ComponentEvidence, ComponentPlan } from "./runner.js";
 
 const definitionSchema = z.object({ sql: z.string(), source_tables: z.array(z.string()), filters: z.array(z.string()) }).strict();
 const table = z.object({ columns: z.array(z.string()).min(1), rows: z.array(z.record(z.string(), z.unknown())) });
 const blocks = z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict());
 const capabilities = z.array(z.string());
+interface GroundedQuery { readonly sql: string; readonly table: z.infer<typeof table>; readonly output: unknown }
+/** The observed definition for an executed query, or the bare SQL when the tool returned none. */
+function definitionOf(query: GroundedQuery): z.infer<typeof definitionSchema> | { sql: string } {
+  const parsed = definitionSchema.safeParse((query.output as { definition?: unknown } | null)?.definition);
+  return parsed.success && parsed.data.sql === query.sql ? parsed.data : { sql: query.sql };
+}
+function groundedQueries(observations: readonly { readonly input: unknown; readonly output: unknown }[]): GroundedQuery[] {
+  const grounded: GroundedQuery[] = [];
+  for (const call of observations) {
+    const sql = (call.input as { sql?: unknown } | null)?.sql;
+    const parsed = table.safeParse(call.output);
+    if (typeof sql === "string" && parsed.success) grounded.push({ sql, table: parsed.data, output: call.output });
+  }
+  return grounded;
+}
 function refused(): ComponentInvocationResult {
   return { status: "refused", code: "callee_refused", message: "The component did not produce a grounded result." };
 }
@@ -53,13 +69,24 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // is never read, and an entry no executed query backs is returned as unanswerable.
   if (render.length === 0 && Array.isArray(terminalValue)) return normalizeBatchTerminal(terminalValue, observations);
   if (render.length === 0 && data.length > 0) {
-    const last = observations[observations.length - 1]!;
-    const actual = table.safeParse(last.output);
-    if (!actual.success) return refused();
-    const parsedDefinition = definitionSchema.safeParse((last.output as { definition?: unknown })?.definition);
-    const definition = parsedDefinition.success && parsedDefinition.data.sql === (last.input as { sql?: unknown }).sql
-      ? parsedDefinition.data : { sql: (last.input as { sql?: unknown }).sql };
-    return { status: "ok", output: { kind: "value", value: { ...actual.data, verified: true, summary: "Query completed.", definition } },
+    const grounded = groundedQueries(observations);
+    // The answer is the query the terminal value names, never simply the last table: a model
+    // that runs a stray check after the right query must not turn that check into the answer.
+    // A value naming no query keeps the historical last-observation rule; a value naming a
+    // query that never ran is refused rather than answered with another table.
+    let chosen: GroundedQuery | undefined;
+    if (namedAnswerSql(terminalValue) === undefined) {
+      const last = observations[observations.length - 1]!;
+      const actual = table.safeParse(last.output);
+      if (!actual.success) return refused();
+      const sql = (last.input as { sql?: unknown }).sql;
+      chosen = { sql: typeof sql === "string" ? sql : "", table: actual.data, output: last.output };
+    } else {
+      chosen = selectAnsweringCandidate(grounded, terminalValue);
+    }
+    if (!chosen) return refused();
+    const definition = definitionOf(chosen);
+    return { status: "ok", output: { kind: "value", value: { ...chosen.table, verified: true, summary: "Query completed.", definition } },
       provenance: { verified: true, definition } };
   }
   const result = normalizeComponentResult(typeof lastProduct === "string" ? lastProduct : JSON.stringify(lastProduct), render).value;
@@ -137,7 +164,8 @@ function normalizeBatchTerminal(entries: readonly unknown[], observations: reado
     }
     const claimed = item.definition && typeof item.definition === "object" ? item.definition as Record<string, unknown> : undefined;
     const sql = typeof claimed?.sql === "string" ? claimed.sql : undefined;
-    const observed = sql === undefined ? undefined : observations.find((call) => (call.input as { sql?: unknown } | null)?.sql === sql && table.safeParse(call.output).success);
+    // Whitespace- and terminator-insensitive, like the single-answer selection: the model may reformat the SQL it names.
+    const observed = sql === undefined ? undefined : [...observations].reverse().find((call) => { const ran = (call.input as { sql?: unknown } | null)?.sql; return typeof ran === "string" && sqlKey(ran) === sqlKey(sql) && table.safeParse(call.output).success; });
     const actual = observed ? table.safeParse(observed.output) : undefined;
     if (!observed || !actual?.success) {
       value.push({ slot_id: item.slot_id, status: "unanswerable", reason: "no executed query backs this answer" });

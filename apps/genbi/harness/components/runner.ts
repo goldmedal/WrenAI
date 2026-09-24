@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { normalizeComponentRequest, type ComponentInvocationResult } from "@warble/claude-agent-sdk";
-import type { EgressDecision, EgressProvenance } from "./egress.js";
+import { readSlots, type EgressDecision, type EgressProvenance } from "./egress.js";
 
 export interface ComponentTool { readonly name: string; readonly source: string }
 export interface ComponentStep {
@@ -97,6 +97,14 @@ export interface StepRun {
   readonly toolSchemas: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly toolDescriptions: Readonly<Record<string, string>>;
   readonly signal: AbortSignal;
+  /**
+   * True when the alias-call request declares per-slot answers (`input.slots`, the same
+   * declaration the egress seam verifies against). A tool error is then one slot's outcome,
+   * which the model reports as `{slot_id, status: "unanswerable"}` while answering the other
+   * slots, not a step failure. A request without slots keeps the single-answer rule: any tool
+   * error fails the step, its repair step runs, and an unrepaired failure ends the child.
+   */
+  readonly perSlot?: boolean;
 }
 export interface RunnerHost {
   prepare(component: ComponentPlan, signal: AbortSignal): Promise<ComponentBinding>;
@@ -160,6 +168,11 @@ function freeze<T>(value: T): T {
   return value;
 }
 function object<T>(): Record<string, T> { return Object.create(null) as Record<string, T>; }
+/** Per-slot semantics come from a well-formed slot declaration only; a malformed one keeps the strict rule. */
+function isPerSlotRequest(request: { readonly request: string; readonly input: Readonly<Record<string, unknown>> }): boolean {
+  const read = readSlots(request);
+  return !("error" in read) && !read.implicit;
+}
 function unique(values: readonly string[]): boolean {
   return values.every((value) => /^[A-Za-z0-9_-]+$/.test(value) && !["__proto__", "constructor", "prototype"].includes(value))
     && new Set(values).size === values.length;
@@ -293,6 +306,7 @@ export class ComponentRunner {
     }
     const component = this.plan.components[id]!;
     const binding = this.bindings.get(id)!;
+    const perSlot = isPerSlotRequest(request.value);
     const invocation = randomUUID();
     const event = { invocation, parent, component: id, depth };
     this.host.onEvent?.({ ...event, kind: "call.start" });
@@ -317,6 +331,7 @@ export class ComponentRunner {
         }
         let active = true;
         let accepting = true;
+        let toolErrored = false;
         // Each invocation has its own queue: siblings serialize, nested children do not deadlock.
         let queue: Promise<unknown> = Promise.resolve();
         const queued: Promise<unknown>[] = [];
@@ -352,8 +367,14 @@ export class ComponentRunner {
               tools.push(freeze({ step: step.name, tool: grant.name, input: saved, output }));
               return copy(output, COMPONENT_LIMITS.resultBytes);
             })();
-            queued.push(pending);
-            void pending.catch(() => {});
+            // The model sees the rejection as a tool error and may recover within the step. For
+            // the host, a failed tool call fails the *step* (so a declared repair step can run and
+            // an unrepaired failure is still callee_failed), not the whole invocation; a per-slot
+            // request treats it as one slot's outcome instead. Cancellation, budget and result
+            // limits keep propagating.
+            const tracked = pending.catch((error: unknown) => { if (error instanceof ExecutionFailure) throw error; toolErrored = true; });
+            queued.push(tracked);
+            void tracked.catch(() => {});
             return pending;
           };
         }
@@ -406,7 +427,7 @@ export class ComponentRunner {
             prompt: step.prompt, consumes: freeze(copy(consumes, COMPONENT_LIMITS.resultBytes)),
             children: freeze(copy(children, COMPONENT_LIMITS.resultBytes)),
             tools: Object.freeze(scoped), signal: this.controller.signal,
-            toolSchemas: Object.freeze(schemas), toolDescriptions: Object.freeze(descriptions),
+            toolSchemas: Object.freeze(schemas), toolDescriptions: Object.freeze(descriptions), perSlot,
           }, binding);
           // Keep observed usage even if cancellation makes a completion unusable.
           void pending.then((result) => {
@@ -419,14 +440,15 @@ export class ComponentRunner {
           accepting = false;
           // A transport cannot return while unobserved child calls still run.
           await this.wait(Promise.all(queued));
-          if (response.failed) {
+          const stepFailed = response.failed === true || (toolErrored && !perSlot);
+          if (stepFailed) {
             products[step.produces] = { status: "error", code: "step_failed" };
             failed = step.name;
           } else {
             products[step.produces] = freeze(copy(response.value, COMPONENT_LIMITS.resultBytes));
             failed = undefined;
           }
-          this.host.onEvent?.({ ...event, kind: "step.finish", step: step.name, status: response.failed ? "error" : "ok" });
+          this.host.onEvent?.({ ...event, kind: "step.finish", step: step.name, status: stepFailed ? "error" : "ok" });
         } catch (error) {
           this.host.onEvent?.({ ...event, kind: "step.finish", step: step.name, status: this.controller.signal.aborted ? "cancelled" : "error" });
           throw error;

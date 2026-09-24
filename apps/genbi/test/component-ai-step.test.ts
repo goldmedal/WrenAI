@@ -1,6 +1,7 @@
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import { runAiComponentStep } from "../harness/components/ai-step.js";
+import { GovernedWrenError } from "../harness/components/wren-access.js";
 import type { StepRun } from "../harness/components/runner.js";
 
 const usage = { inputTokens: { total: 2, noCache: 2, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } };
@@ -40,5 +41,29 @@ describe("fresh AI SDK governed steps", () => {
       expect(abortSignal).toBeDefined(); controller.abort(); abortSignal!.throwIfAborted(); return text("late");
     } });
     await expect(runAiComponentStep({ ...run(), signal: controller.signal }, model)).rejects.toThrow();
+  });
+  it("shows the model the governed error class, and only the class", async () => {
+    const model = new MockLanguageModelV4({ doGenerate: [call("answer"), text("recovered")] });
+    const failing = { ...run(), tools: { answer: async () => { throw new GovernedWrenError("model_not_found"); } } };
+    const result = await runAiComponentStep(failing, model);
+    expect(result.failed).toBe(true);
+    const shown = JSON.stringify(model.doGenerateCalls[1]!.prompt);
+    expect(shown).toContain("model_not_found");
+    expect(shown).toContain("not a model in the bound semantic context");
+    expect(shown).not.toMatch(/\/Users|\/private|Traceback|password/);
+  });
+  it("treats a tool error as one slot's outcome in a per-slot run, and as a step failure otherwise", async () => {
+    const script = () => new MockLanguageModelV4({ doGenerate: [call("answer", "a"), call("answer", "b"), text(JSON.stringify([{ slot_id: "a" }, { slot_id: "b", status: "unanswerable", reason: "model_not_found" }]))] });
+    let calls = 0;
+    const tools = { answer: async () => { calls++; if (calls % 2 === 0) throw new GovernedWrenError("policy_rejected"); return { ok: true }; } };
+    const perSlot = await runAiComponentStep({ ...run(), tools, perSlot: true }, script());
+    expect(perSlot.failed).toBe(false);
+    expect(JSON.parse(perSlot.value as string)).toHaveLength(2);
+    const single = await runAiComponentStep({ ...run(), tools }, script());
+    expect(single.failed).toBe(true);
+    // The loop itself not completing still fails a per-slot step.
+    let count = 0;
+    const runaway = new MockLanguageModelV4({ doGenerate: async () => call("answer", `call-${count++}`) });
+    expect((await runAiComponentStep({ ...run(), perSlot: true }, runaway)).failed).toBe(true);
   });
 });

@@ -17,9 +17,15 @@ export async function runAiComponentStep(run: StepRun, model: LanguageModel): Pr
     instructions: [run.brief, run.prompt].filter(Boolean).join("\n\n"),
   });
   const result = await agent.generate({ prompt, abortSignal: run.signal });
+  const toolErrors = result.steps.some((step) => step.content.some((part) => part.type === "tool-error"));
+  // A single-answer step fails on any tool error, so the declared repair step runs and an
+  // unrepaired failure ends the child. In a per-slot invocation a tool error is one slot's
+  // outcome (the model reports it as `{slot_id, status: "unanswerable"}` and answers the rest);
+  // the step itself fails only when the loop did not complete. Normalization still grounds
+  // every answered slot in an observed query, so the leniency cannot promote a claim to data.
   return {
     value: result.text,
-    failed: result.finishReason !== "stop" || result.steps.some((step) => step.content.some((part) => part.type === "tool-error")),
+    failed: result.finishReason !== "stop" || (!run.perSlot && toolErrors),
     usage: { inputTokens: result.totalUsage.inputTokens ?? 0, outputTokens: result.totalUsage.outputTokens ?? 0 },
   };
 }

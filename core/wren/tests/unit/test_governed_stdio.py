@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from wren import cli
 from wren import governed_stdio as transport
 from wren.cli import app
+from wren.model.error import ErrorCode, ErrorPhase, WrenError
 
 pytestmark = pytest.mark.unit
 
@@ -62,7 +63,7 @@ def test_captures_once_and_always_queries_read_only(bound_transport):
         b'{"id":1,"operation":"inspect"}\n{"id":2,"operation":"query","sql":"SELECT 1 AS n","limit":5}\n'
     )
     assert frames == [
-        {"id": 0, "protocol": "wren-governed/1"},
+        {"id": 0, "protocol": "wren-governed/2"},
         {"id": 1, "result": {"models": [{"name": "orders"}]}},
         {
             "id": 2,
@@ -95,7 +96,13 @@ def test_captures_once_and_always_queries_read_only(bound_transport):
 )
 def test_rejects_authority_inputs(bound_transport, payload):
     frames = bound_transport.run((json.dumps({"id": 1, **payload}) + "\n").encode())
-    assert frames[-1] == {"id": 1, "error": "Governed operation failed"}
+    assert frames[-1] == {
+        "id": 1,
+        "error": {
+            "class": "invalid_request",
+            "message": transport.ERROR_MESSAGES["invalid_request"],
+        },
+    }
     bound_transport.engine.query.assert_not_called()
 
 
@@ -120,7 +127,10 @@ def test_sanitizes_query_failure_and_oversized_output(bound_transport):
     frames = bound_transport.run(
         b'{"id":1,"operation":"query","sql":"SELECT 1","limit":1}\n'
     )
-    assert frames[-1] == {"id": 1, "error": "Governed operation failed"}
+    assert frames[-1] == {
+        "id": 1,
+        "error": {"class": "internal", "message": transport.ERROR_MESSAGES["internal"]},
+    }
     bound_transport.engine.query.side_effect = None
     bound_transport.engine.query.return_value = SimpleNamespace(
         column_names=["n"], to_pylist=lambda: [{"n": "x" * transport.MAX_RESULT}]
@@ -128,7 +138,102 @@ def test_sanitizes_query_failure_and_oversized_output(bound_transport):
     frames = bound_transport.run(
         b'{"id":1,"operation":"query","sql":"SELECT 1","limit":1}\n'
     )
-    assert frames[-1] == {"id": 1, "error": "Governed operation failed"}
+    assert frames[-1] == {
+        "id": 1,
+        "error": {
+            "class": "result_too_large",
+            "message": transport.ERROR_MESSAGES["result_too_large"],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            WrenError(
+                ErrorCode.MODEL_NOT_FOUND,
+                "Table 'revenue' is not defined in /private/manifest.json",
+                phase=ErrorPhase.SQL_POLICY_CHECK,
+            ),
+            "model_not_found",
+        ),
+        (
+            WrenError(
+                ErrorCode.INVALID_SQL,
+                "SQL is not supported by the read-only analytical query policy.",
+                phase=ErrorPhase.SQL_POLICY_CHECK,
+            ),
+            "policy_rejected",
+        ),
+        (
+            WrenError(
+                ErrorCode.BLOCKED_FUNCTION,
+                "read_csv",
+                phase=ErrorPhase.SQL_POLICY_CHECK,
+            ),
+            "policy_rejected",
+        ),
+        (
+            WrenError(ErrorCode.INVALID_SQL, "syntax", phase=ErrorPhase.SQL_PARSING),
+            "invalid_sql",
+        ),
+        (
+            WrenError(
+                ErrorCode.GENERIC_USER_ERROR,
+                'Binder Error: column "ltv" not found; SELECT secret FROM tenant_b',
+                phase=ErrorPhase.SQL_EXECUTION,
+            ),
+            "execution_failed",
+        ),
+        (WrenError(ErrorCode.DATABASE_TIMEOUT, "slow"), "timeout"),
+        (
+            WrenError(ErrorCode.GET_CONNECTION_ERROR, "password=hunter2 host=10.0.0.9"),
+            "datasource_unavailable",
+        ),
+        (WrenError(ErrorCode.GENERIC_INTERNAL_ERROR, "boom"), "internal"),
+        (
+            RuntimeError("Traceback (most recent call last): /home/x/.wren/.env"),
+            "internal",
+        ),
+    ],
+)
+def test_query_failures_surface_a_bounded_class_and_nothing_else(
+    bound_transport, error, expected
+):
+    bound_transport.engine.query.side_effect = error
+    sql = "SELECT ltv FROM customers_of_tenant_a"
+    raw = bound_transport.run(
+        (
+            json.dumps({"id": 1, "operation": "query", "sql": sql, "limit": 1}) + "\n"
+        ).encode()
+    )
+    frame = raw[-1]
+    assert frame == {
+        "id": 1,
+        "error": {"class": expected, "message": transport.ERROR_MESSAGES[expected]},
+    }
+    serialized = json.dumps(frame)
+    for leak in (
+        str(error),
+        sql,
+        "/private",
+        "/Users",
+        "Traceback",
+        "hunter2",
+        "tenant",
+    ):
+        assert leak not in serialized
+    assert set(frame["error"]) == {"class", "message"}
+    assert frame["error"]["class"] in transport.ERROR_MESSAGES
+
+
+def test_sqlglot_parse_failure_after_execution_is_invalid_sql(bound_transport):
+    # engine.query is mocked to succeed; the definition parse then fails.
+    frames = bound_transport.run(
+        b'{"id":1,"operation":"query","sql":"SELECT FROM WHERE ((","limit":1}\n'
+    )
+    assert frames[-1]["error"]["class"] == "invalid_sql"
 
 
 def test_cli_sanitizes_malformed_transport_failure(monkeypatch, tmp_path):

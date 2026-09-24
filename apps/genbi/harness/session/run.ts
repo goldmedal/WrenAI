@@ -8,6 +8,7 @@ import { deriveEnforcement } from "../guardrails/index.js";
 import { executeAgent, summarizeToolOutput } from "../loop/index.js";
 import type { GuardEvaluator } from "../loop/index.js";
 import { getAllowedBlockTypes, renderEnvelope } from "../render/index.js";
+import { selectAnsweringCandidate } from "../render/answering-query.js";
 import type { DashboardSeed, ToolTableSeed } from "../render/index.js";
 import type { ProviderRegistry, TierBinding } from "../providers/index.js";
 import type { McpServerConfigMap, NativeToolRegistry } from "../tools/index.js";
@@ -113,15 +114,16 @@ export async function runAgent(
         let sawSuccessfulDataAccessCall = false;
         const requiresDataAccess = agent.capabilities.some((entry) => entry.capability.startsWith("sql_execution:"));
 
-        // Deterministic table capture: the most recent *successful* `query`
-        // tool result, kept as a flat table payload (columns + positional
-        // rows + the SQL that produced it). This is the agent's real data —
-        // `renderEnvelope` builds the table/definition blocks straight from
-        // it instead of asking the render model to re-emit structure it tends
-        // to summarize away (leaving a bare `{type:"table"}`). The last
-        // success wins because, in the answer_query flow, it is the query
-        // whose rows are the answer.
-        let toolTable: ToolTableSeed | undefined;
+        // Deterministic table capture: every *successful* `query` tool result,
+        // kept as a flat table payload (columns + positional rows + the SQL that
+        // produced it). This is the agent's real data — `renderEnvelope` builds
+        // the table/definition blocks straight from it instead of asking the
+        // render model to re-emit structure it tends to summarize away (leaving
+        // a bare `{type:"table"}`). Which capture is the answer is decided after
+        // the loop (see `selectAnsweringCandidate`): the one whose SQL the
+        // terminal artifact names, because a model that runs a stray check after
+        // the right query must not turn that check into a verified answer.
+        const toolTables: ToolTableSeed[] = [];
 
         // Deterministic dashboard-envelope capture: the most recent
         // *successful* `build_dashboard` tool result, kept as-is (it's
@@ -177,7 +179,7 @@ export async function runAgent(
             if (outcome.tool === WREN_QUERY_TOOL_NAME && outcome.outcome === "success") {
               sawSuccessfulDataAccessCall = true;
               const seed = toToolTableSeed(outcome.output, outcome.input);
-              if (seed !== undefined) toolTable = seed;
+              if (seed !== undefined) toolTables.push(seed);
             }
             if (outcome.tool === BUILD_DASHBOARD_TOOL_NAME && outcome.outcome === "success") {
               const seed = toDashboardSeed(outcome.output);
@@ -193,6 +195,7 @@ export async function runAgent(
           onEvent: emitter.emit,
         });
 
+        const toolTable = selectAnsweringCandidate(toolTables, terminalArtifactValue(artifacts));
         const envelope = await renderEnvelope(agent, artifacts, {
           binding: ctx.binding,
           registry: ctx.registry,
@@ -359,6 +362,13 @@ export async function runAgent(
     emitter.emit({ kind: "run.finish", status: "error" });
     throw error;
   }
+}
+
+/** The last dataflow artifact as a value: JSON text is parsed so a named `definition.sql` is visible. */
+function terminalArtifactValue(artifacts: ReadonlyMap<string, unknown>): unknown {
+  const last = [...artifacts.values()].at(-1);
+  if (typeof last !== "string") return last;
+  try { return JSON.parse(last); } catch { return last; }
 }
 
 function describeRunError(error: unknown): string {

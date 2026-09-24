@@ -10,6 +10,8 @@ from sqlglot import exp, parse
 
 from wren.model.error import ErrorCode, ErrorPhase, WrenError
 
+# Keys are sqlglot ``Expression.key`` values (the lower-cased class name), not
+# SQL spellings: ``COUNT_IF`` is ``countif``, ``DATE_TRUNC`` is ``datetrunc``.
 _FUNCTIONS = frozenset(
     "abs avg sum count min max round ceil floor coalesce nullif if case cast "
     "trycast extract date dateadd datesub datediff datetrunc timestamptrunc "
@@ -18,7 +20,13 @@ _FUNCTIONS = frozenset(
     "row_number rownumber rank denserank lag lead firstvalue lastvalue "
     "stddev stddevpop stddevsamp variance variancepop percentilecont "
     "percentiledisc greatest least power sqrt year month day dayofmonth "
-    "dayofweek dayofyear week quarter hour minute second".split()
+    "dayofweek dayofyear week quarter hour minute second "
+    # sqlglot models the boolean connectors and the EXISTS predicate as
+    # ``Func`` nodes. They are syntax, not callable functions: without them
+    # every ``WHERE a AND b`` is rejected.
+    "and or xor exists "
+    # Read-only aggregates and predicates analytical SQL commonly uses.
+    "countif anyvalue median approxdistinct regexplike".split()
 )
 
 
@@ -45,5 +53,5 @@ def validate_read_only_query(sql: str, dialect: str | None) -> None:
         raise WrenError(
             ErrorCode.INVALID_SQL,
             "SQL is not supported by the read-only analytical query policy.",
-            phase=ErrorPhase.SQL_PLANNING,
+            phase=ErrorPhase.SQL_POLICY_CHECK,
         ) from error

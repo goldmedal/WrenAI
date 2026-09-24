@@ -81,3 +81,32 @@ describe("batch-shaped callee normalization (answer_batch)", () => {
     expect(normalizeComponentEvidence(component, { steps: { batch_result: JSON.stringify([{ slot_id: "total", status: "unanswerable", reason: "x" }]) }, tools: [], children: [] }).status).toBe("refused");
   });
 });
+
+/** A callee returning reusable data: the value is the observed table the terminal value names. */
+const answerComponent: ComponentPlan = { id: "answer", declaration: { required_capabilities: ["sql_execution:read_only"], effect: { render_blocks: [] } },
+  steps: [{ name: "generate_sql", tier: "strong", prompt: "", consumes: [], produces: "query_result", tools: [{ name: "query", source: "native" }], calls: [] }] };
+const CORRECT = "SELECT COUNT(*) AS n FROM orders";
+const STRAY = "SELECT COUNT(*) AS n FROM orders WHERE status = 'completed'";
+function observed(sql: string, n: number) {
+  return { step: "generate_sql", tool: "query", input: { sql }, output: { columns: ["n"], rows: [{ n }], definition: { sql, source_tables: ["orders"], filters: [] } } };
+}
+function answer(terminal: unknown, tools: ReturnType<typeof observed>[]) {
+  return normalizeComponentEvidence(answerComponent, { steps: { query_result: typeof terminal === "string" ? terminal : JSON.stringify(terminal) }, tools, children: [] });
+}
+describe("the answering query is the one the terminal value names, not the last table", () => {
+  const twoQueries = [observed(CORRECT, 99), observed(STRAY, 67)];
+  it("a correct query followed by a stray second query still answers with the correct table", () => {
+    const result = answer({ columns: ["n"], rows: [[99]], summary: "99 orders", verified: true, definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } }, twoQueries);
+    expect(result).toMatchObject({ status: "ok", output: { kind: "value", value: { rows: [{ n: 99 }], verified: true, definition: { sql: CORRECT } } }, provenance: { verified: true, definition: { sql: CORRECT } } });
+  });
+  it("matches the named query up to whitespace and a trailing terminator, and takes the rows from the observation", () => {
+    const result = answer({ columns: ["n"], rows: [[12345]], verified: true, definition: { sql: `${CORRECT.replace(" AS ", "\n  AS ")};` } }, twoQueries);
+    expect(result).toMatchObject({ status: "ok", output: { value: { rows: [{ n: 99 }] } } });
+  });
+  it("refuses a terminal value that names a query which never ran, rather than answering with another table", () => {
+    expect(answer({ columns: ["n"], rows: [[5]], verified: true, definition: { sql: "SELECT COUNT(*) AS n FROM customers" } }, twoQueries).status).toBe("refused");
+  });
+  it("keeps the last observation only for a value that names no query at all", () => {
+    expect(answer("done", twoQueries)).toMatchObject({ status: "ok", output: { value: { rows: [{ n: 67 }], definition: { sql: STRAY } } } });
+  });
+});
