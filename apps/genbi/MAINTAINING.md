@@ -105,7 +105,7 @@ cargo build --release --manifest-path core/wren-context-loader/Cargo.toml
 
 # 2. Regenerate the document for each profile that binds `kind: prepared`.
 #    (genbi-setup is excluded: it binds `kind: raw_source` and has no document.)
-for p in genbi-default genbi-monitor genbi-enrich-context; do
+for p in genbi-default genbi-report genbi-monitor genbi-enrich-context; do
   ./core/wren-context-loader/target/release/wren-context-loader \
     examples/v5-jaffle -o "apps/genbi/profiles/$p/context/context.json"
 done
@@ -113,7 +113,7 @@ done
 # 3. Recompile each golden with the *pinned* `@warble/cli`, so the committed IR matches the
 #    compiler this package actually depends on rather than whatever `warble` is on PATH.
 cd apps/genbi
-for p in genbi-default genbi-monitor genbi-enrich-context genbi-setup; do
+for p in genbi-default genbi-report genbi-monitor genbi-enrich-context genbi-setup; do
   pnpm exec warble compile "profiles/$p" -o "profiles/$p/ir.golden.json"
 done
 ```

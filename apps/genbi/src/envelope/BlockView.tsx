@@ -4,6 +4,7 @@ import { TableBlock } from './blocks/TableBlock';
 import { ChartBlock } from './blocks/ChartBlock';
 import { DefinitionBlock } from './blocks/DefinitionBlock';
 import { NarrativeBlock } from './blocks/NarrativeBlock';
+import { UnavailableBlock } from './blocks/UnavailableBlock';
 import { UnknownBlock } from './blocks/UnknownBlock';
 
 interface Props {
@@ -26,5 +27,7 @@ export function BlockView({ block }: Props) {
       return <DefinitionBlock block={block} />;
     case 'narrative':
       return <NarrativeBlock block={block} />;
+    case 'unavailable':
+      return <UnavailableBlock block={block} />;
   }
 }

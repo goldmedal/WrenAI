@@ -34,7 +34,8 @@ export type ZoneGateViolationCode =
   | "judge_public"
   | "render_public"
   | "missing_judge"
-  | "missing_policy";
+  | "missing_policy"
+  | "render_unbound";
 
 export interface ZoneGateViolation {
   readonly code: ZoneGateViolationCode;
@@ -95,7 +96,11 @@ function dataToolNames(step: ComponentStep): string[] {
  * 5. a tier referenced by any of the above without a `zone` fails — no default zone;
  * 6. a caller step without data tools may be public, private, or leave zone unset;
  * 7. a public (or zone-unset) caller step that calls a callee needs a `disclosure_policy`,
- *    because that is the only way child results are verified before they cross.
+ *    because that is the only way child results are verified before they cross;
+ * 8. an entry that renders a contract must name `roles.render` explicitly whenever the stage's
+ *    default tier (the entry's last independent step, which is where `render/envelope.ts`
+ *    would run a render model) is not private: rows reach the render stage, so leaving it on an
+ *    inherited public tier is rejected rather than assumed.
  *
  * A binding with no zone information anywhere is not zone-aware: the gate is
  * not armed and the result carries no violations, only the step report.
@@ -155,6 +160,18 @@ export function evaluateZoneGate(plan: ExecutionPlan, entry: string, binding: Ti
       if (report.role === "caller" && report.calls.length > 0 && report.zone !== "private") {
         violations.push({ code: "missing_policy", component: report.component, step: report.step, tier: report.tier, zone: report.zone,
           message: `step ${report.component}.${report.step} (tier ${report.tier}, zone ${report.zone}) calls ${report.calls.map((edge) => edge.component).join(", ")} but the binding has no disclosure_policy; child results would cross unverified` });
+      }
+    }
+  }
+  if (armed && binding.roles?.render === undefined) {
+    const node = plan.components[entry]!;
+    const render = (node.declaration.effect as { render_blocks?: unknown } | undefined)?.render_blocks;
+    const terminal = node.steps.filter((step) => !step.repairOf).at(-1);
+    if (Array.isArray(render) && render.length > 0 && terminal) {
+      const zone = resolveTierSpec(binding, terminal.tier, entry)?.spec.zone ?? "unbound";
+      if (zone !== "private") {
+        violations.push({ code: "render_unbound", component: entry, step: terminal.name, tier: terminal.tier, zone,
+          message: `entry ${entry} renders a contract but roles.render names no tier; the render stage sees rows and would inherit step ${entry}.${terminal.name} (tier ${terminal.tier}, zone ${zone}); bind it to a private tier explicitly` });
       }
     }
   }

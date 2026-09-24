@@ -18,11 +18,15 @@ export type EgressStatus = "ok" | "refused" | "partial";
 export type EgressReason =
   | "shape_mismatch" | "row_limit" | "sensitive_column" | "pii_pattern" | "group_size"
   | "judge_refused" | "judge_unavailable" | "judge_invalid"
-  | "callee_refused" | "callee_error" | "invalid_answer" | "invalid_request" | "policy_missing";
+  | "callee_refused" | "callee_error" | "invalid_answer" | "invalid_request" | "policy_missing"
+  /** The callee itself reported the slot as unanswerable (or refused it); its reason text does not cross. */
+  | "unanswerable";
 export type JudgeVerdict = "pass" | "redact" | "refuse";
 
 export const slotDeclarationSchema = z.object({
   slot_id: z.string().min(1).max(128),
+  /** The planner's layout hint; carried in the Hub `plan_report` call, ignored by verification. */
+  block_type: z.string().max(64).optional(),
   expected_shape: answerShapeSchema,
   question: z.string().min(1),
   unit: z.string().optional(),
@@ -63,6 +67,8 @@ export interface EgressProvenance {
   readonly source_tables?: readonly string[];
   readonly row_count: number;
   readonly columns: readonly string[];
+  /** The callee's own deterministic-gate flag on the entry, when it carried one. */
+  readonly verified?: boolean;
 }
 
 export interface EgressOutcome {
@@ -112,10 +118,13 @@ const tableSchema = z.object({
   slot_id: z.string().optional(),
 }).passthrough();
 type TableAnswer = z.infer<typeof tableSchema>;
-const narrativeSchema = z.object({ text: z.string().min(1), slot_id: z.string().optional(), definition: z.unknown().optional(), unit: z.string().optional() }).passthrough();
+const narrativeSchema = z.object({ text: z.string().min(1), slot_id: z.string().optional(), definition: z.unknown().optional(), unit: z.string().optional(), verified: z.boolean().optional() }).passthrough();
+/** A per-slot entry the callee declined itself: `{slot_id, status: "unanswerable" | "refused", reason?}`. */
+const unavailableEntrySchema = z.object({ slot_id: z.string().min(1), status: z.enum(["unanswerable", "refused"]) }).passthrough();
+/** A batch is an array of per-slot entries, or `{answers: [...]}`; entries are classified one by one, so an unanswerable entry does not invalidate its neighbours. */
 const batchSchema = z.union([
-  z.array(z.union([tableSchema, narrativeSchema])),
-  z.object({ answers: z.array(z.union([tableSchema, narrativeSchema])) }).passthrough(),
+  z.array(z.unknown()),
+  z.object({ answers: z.array(z.unknown()) }).passthrough(),
 ]);
 
 /** Built-in PII patterns applied to every string cell, in addition to the policy's own. */
@@ -149,7 +158,9 @@ function actualShapeFits(expected: AnswerShape, table: TableAnswer): boolean {
     case "scalar": return table.rows.length === 1 && table.columns.length === 1;
     case "series": return table.columns.length >= 2;
     case "table": return true;
-    case "narrative": return false;
+    // A batch callee answers a narrative slot with the rows it grounded the prose in plus the prose
+    // as `summary`; the prose is what crosses (see the table branch of `verifyEgress`).
+    case "narrative": return typeof table.summary === "string" && table.summary.trim().length > 0;
   }
 }
 function identifierLikeKeys(table: TableAnswer): string[] {
@@ -248,21 +259,25 @@ function discloseTable(slot: SlotDeclaration, table: TableAnswer, status: Egress
     ...(value !== undefined ? { value } : {}), ...(slot.unit !== undefined ? { unit: slot.unit } : table.unit !== undefined ? { unit: table.unit } : {}),
     ...(table.summary !== undefined ? { summary: table.summary } : {}) };
 }
-function provenanceOf(slot: SlotDeclaration, table: { definition?: unknown; columns?: readonly string[]; rows?: readonly unknown[] }): EgressProvenance {
+function provenanceOf(slot: SlotDeclaration, table: { definition?: unknown; columns?: readonly string[]; rows?: readonly unknown[]; verified?: boolean | undefined }): EgressProvenance {
   const definition = table.definition && typeof table.definition === "object" ? table.definition as Record<string, unknown> : undefined;
   return { slot_id: slot.slot_id, ...(table.definition !== undefined ? { definition: structuredClone(table.definition) } : {}),
     ...(typeof definition?.sql === "string" ? { sql: definition.sql } : {}),
     ...(Array.isArray(definition?.source_tables) ? { source_tables: definition.source_tables as string[] } : {}),
-    row_count: table.rows?.length ?? 0, columns: [...(table.columns ?? [])] };
+    row_count: table.rows?.length ?? 0, columns: [...(table.columns ?? [])], ...(typeof table.verified === "boolean" ? { verified: table.verified } : {}) };
 }
 
 /** Reads the slot declarations from the alias-call input; absent slots mean one implicit table slot for the request text. */
 export function readSlots(request: { readonly request: string; readonly input: Readonly<Record<string, unknown>> }): { slots: SlotDeclaration[]; implicit: boolean; preamble?: string } | { error: EgressReason } {
-  const preamble = typeof request.input["preamble"] === "string" ? request.input["preamble"] : undefined;
-  if (request.input["slots"] === undefined) {
+  // The preamble is untrusted planner text either way; an object (the Hub `plan_report` shape) is serialised for the judge.
+  const rawPreamble = request.input["preamble"];
+  const preamble = typeof rawPreamble === "string" ? rawPreamble : rawPreamble !== undefined && rawPreamble !== null ? JSON.stringify(rawPreamble) : undefined;
+  // `input.slots` is this harness's declaration key; `input.questions` is the Hub `plan_report` call shape. Same entries.
+  const declared = request.input["slots"] !== undefined ? request.input["slots"] : request.input["questions"];
+  if (declared === undefined) {
     return { slots: [{ slot_id: "answer", expected_shape: "table", question: request.request }], implicit: true, ...(preamble !== undefined ? { preamble } : {}) };
   }
-  const parsed = slotsSchema.safeParse(request.input["slots"]);
+  const parsed = slotsSchema.safeParse(declared);
   if (!parsed.success) return { error: "invalid_request" };
   return { slots: parsed.data, implicit: false, ...(preamble !== undefined ? { preamble } : {}) };
 }
@@ -287,10 +302,22 @@ function answersOf(value: unknown, slots: readonly SlotDeclaration[]): Map<strin
   const list = Array.isArray(batch.data) ? batch.data : batch.data.answers;
   list.forEach((item, index) => {
     const answer = classify(item);
-    const id = item.slot_id ?? slots[index]?.slot_id;
+    const claimed = item && typeof item === "object" ? (item as { slot_id?: unknown }).slot_id : undefined;
+    const id = typeof claimed === "string" ? claimed : slots[index]?.slot_id;
     if (answer && id !== undefined && slots.some((slot) => slot.slot_id === id) && !map.has(id)) map.set(id, answer);
   });
   return map;
+}
+
+/** Slot ids the callee itself marked unanswerable or refused; only the category crosses, never the callee's reason text. */
+function declinedOf(value: unknown): Set<string> {
+  const list = Array.isArray(value) ? value : value && typeof value === "object" && Array.isArray((value as { answers?: unknown }).answers) ? (value as { answers: unknown[] }).answers : [];
+  const declined = new Set<string>();
+  for (const item of list) {
+    const parsed = unavailableEntrySchema.safeParse(item);
+    if (parsed.success) declined.add(parsed.data.slot_id);
+  }
+  return declined;
 }
 
 /**
@@ -319,14 +346,16 @@ export async function verifyEgress(
     return { disclosed: result, decisions: slots.map((slot) => ({ slot_id: slot.slot_id, status: "refused", reason_category: "callee_error", judge: "skipped", row_count: 0 })), provenance: [] };
   }
   const answers = result.output.kind === "value" ? answersOf(result.output.value, slots) : undefined;
+  const declinedByCallee = result.output.kind === "value" ? declinedOf(result.output.value) : new Set<string>();
   const decisions: EgressDecision[] = [];
   const provenance: EgressProvenance[] = [];
   const disclosed: DisclosedAnswer[] = [];
   for (const slot of slots) {
     const answer = answers?.get(slot.slot_id);
     if (!answer) {
-      decisions.push({ slot_id: slot.slot_id, status: "refused", reason_category: "invalid_answer", judge: "skipped", row_count: 0 });
-      disclosed.push(refusedAnswer(slot, "invalid_answer"));
+      const reason: EgressReason = declinedByCallee.has(slot.slot_id) ? "unanswerable" : "invalid_answer";
+      decisions.push({ slot_id: slot.slot_id, status: "refused", reason_category: reason, judge: "skipped", row_count: 0 });
+      disclosed.push(refusedAnswer(slot, reason));
       continue;
     }
     if (answer.kind === "narrative") {
@@ -365,6 +394,15 @@ export async function verifyEgress(
       }
       table = redacted;
       status = "partial";
+    }
+    if (slot.expected_shape === "narrative") {
+      // Narrowing: only the prose crosses for a narrative slot, never the rows it was grounded in.
+      const text = table.summary!.trim();
+      const textReason = deterministicNarrative(slot, text, options.policy);
+      if (textReason) { decisions.push({ slot_id: slot.slot_id, status: "refused", reason_category: textReason, judge: judged.verdict, row_count: table.rows.length }); disclosed.push(refusedAnswer(slot, textReason)); continue; }
+      decisions.push({ slot_id: slot.slot_id, status, judge: judged.verdict, row_count: table.rows.length });
+      disclosed.push({ slot_id: slot.slot_id, status, shape: "narrative", text, ...(slot.unit !== undefined ? { unit: slot.unit } : {}) });
+      continue;
     }
     decisions.push({ slot_id: slot.slot_id, status, judge: judged.verdict, row_count: table.rows.length });
     disclosed.push(discloseTable(slot, table, status));

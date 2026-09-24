@@ -1,0 +1,38 @@
+# genbi-report — the two-stage hybrid report profile (cloud planner, local oracle).
+#
+# Mounts the Hub's report pair as one behavior surface bound to one semantic context. `plan_report`
+# is the entry: a planner that lays the report out as typed placeholders, obtains every answer
+# through ONE composition call to `answer_batch`, and narrates over the values the host has
+# materialised. It holds no data authority of its own. `answer_batch` is callee-only: a session
+# cannot start it directly, only the planner's `ask` edge reaches it, and it alone owns query
+# execution. The harness runs the pair on a zone-aware tier binding (see RUNNING.md, "Zone-aware
+# tier binding"): the planner's steps may sit on a public tier, the callee, the judge and the
+# render role must be private, and every callee answer crosses the egress verification step.
+#
+# Like genbi-default, this profile mounts Hub components by id and owns no component library.
+
+profile: genbi-report
+
+context:
+  project: ./context/binding.yml
+
+components:
+  # The planner's brief is its charter, not a data-access framing: it reaches data only through the
+  # `ask` alias, and the composition contract denies it any query surface regardless of the brief.
+  # Nothing here names the `wren` CLI, so the public-tier prompt carries no deployment detail.
+  - use: plan_report
+    brief: |
+      You plan reports for business readers who want the figures laid out and explained, not the
+      queries behind them. Keep every cell's question self-contained and answerable from the
+      capability card in your context, keep the preamble (period, currency, shared filters)
+      explicit, ask for the smallest series or table that still answers a cell, and keep the
+      report readable when a cell is unavailable.
+  # Callee-only mount. Its brief carries this deployment's concrete data-access framing, exactly
+  # like the neutralised Hub components mounted in genbi-default.
+  - use: answer_batch
+    entrypoint: false
+    brief: |
+      Data access in this deployment goes through the `wren` CLI. If you need to introspect the
+      schema, run `wren context show`. Query the semantic layer with `wren -q -o json -s '<SQL>'`,
+      which returns JSON; object-shaped rows are also valid — preserve their values exactly. Never
+      hand-write SQL against raw tables outside the model.

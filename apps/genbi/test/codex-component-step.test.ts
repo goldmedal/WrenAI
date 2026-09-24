@@ -57,7 +57,7 @@ class Peer implements RpcTransport {
   }
 }
 function step(): StepRun {
-  return { tier: "fast", request: "synthetic request", input: {}, prompt: "only this step", consumes: {},
+  return { tier: "fast", request: "synthetic request", input: {}, prompt: "only this step", consumes: {}, children: [],
     tools: { query: vi.fn(async () => ({ rows: [{ count: 1 }] })) },
     toolSchemas: { query: { type: "object", properties: { sql: { type: "string" } }, required: ["sql"], additionalProperties: false } },
     toolDescriptions: { query: "Query governed data" }, signal: new AbortController().signal };

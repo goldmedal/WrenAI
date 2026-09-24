@@ -135,19 +135,33 @@ wren-harness "annual revenue report" --project /path/to/project \
 ```json
 {
   "tiers": {
-    "plan_report/plan":    { "adapter": "anthropic", "config": { "model": "claude-sonnet" }, "zone": "public" },
-    "answer_query/strong": { "adapter": "openai-compatible", "zone": "private",
+    "plan_report/strong":  { "adapter": "anthropic", "config": { "model": "claude-sonnet" }, "zone": "public" },
+    "plan_report/cheap":   { "adapter": "anthropic", "config": { "model": "claude-sonnet" }, "zone": "public" },
+    "answer_batch/strong": { "adapter": "openai-compatible", "zone": "private",
                              "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-super-120b-a12b",
-                                         "extraBody": { "chat_template_kwargs": { "enable_thinking": true } } } },
-    "cheap":               { "adapter": "openai-compatible", "zone": "private",
-                             "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-nano-30b-a3b" } },
+                                         "extraBody": { "chat_template_kwargs": { "enable_thinking": false } } } },
+    "answer_batch/cheap":  { "adapter": "openai-compatible", "zone": "private",
+                             "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-super-120b-a12b",
+                                         "extraBody": { "chat_template_kwargs": { "enable_thinking": false } } } },
     "judge":               { "adapter": "openai-compatible", "zone": "private",
-                             "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-nano-30b-a3b" } }
+                             "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-super-120b-a12b",
+                                         "extraBody": { "chat_template_kwargs": { "enable_thinking": false } } } },
+    "render":              { "adapter": "openai-compatible", "zone": "private",
+                             "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-super-120b-a12b" } }
   },
   "disclosure_policy": { "max_rows": 50, "min_group_size": 5, "sensitive_column_patterns": ["email", "phone"] },
-  "roles": { "judge": "judge" }
+  "roles": { "judge": "judge", "render": "render" }
 }
 ```
+
+The Hub report pair binds by the tier names its components declare, `strong` and
+`cheap`, on both mounts; the `<mount>/<tier>` keys are what keep the planner's
+`strong` and the callee's `strong` on different models. The private tiers above
+are the shape measured for Nemotron 3 Super with thinking off: one model for the
+callee, the judge and the render role. A hosted, shared endpoint is by definition
+a **public** zone; if you point a private tier at one for a rehearsal on fixture
+data, say so in the binding file (a comment field is fine) and never report that
+run as a private-zone result.
 
 `extraBody` is merged into every request the `openai-compatible` adapter sends,
 for serving runtimes whose switches live in the body (Nemotron's reasoning
@@ -159,9 +173,12 @@ a pure check that runs before any model, tool or child session starts and fails
 loudly instead of degrading: every step of a callee component and every step
 holding a data tool must resolve to `private`; so must the `judge` and `render`
 role tiers; a zone-relevant tier without a `zone` is rejected; a
-`disclosure_policy` without a `judge` role is rejected. A caller step with no
-data tools may be `public`. A binding with no zone information anywhere is the
-pre-existing single-zone binding and is not gated.
+`disclosure_policy` without a `judge` role is rejected; an entry that renders a
+contract must name `roles.render` whenever the stage's default tier (the entry's
+last step, which is where a render model would otherwise run) is not private,
+because rows reach the render stage. A caller step with no data tools may be
+`public`. A binding with no zone information anywhere is the pre-existing
+single-zone binding and is not gated.
 
 When a `disclosure_policy` is bound, every callee result passes through the
 **egress verification step** on its way back to the caller: host
@@ -210,6 +227,45 @@ which host context it would receive (card or snapshot, with the card's digest),
 adapter, model, endpoint host and thinking setting, every alias call edge, the
 role tiers and the gate verdict, then exits `0` (ok) or `1` (violation). No
 model is constructed, no network connection is opened and no credential is read.
+
+### The two-stage report (`profiles/genbi-report`)
+
+`profiles/genbi-report` mounts the Hub report pair: `plan_report` (the entry; a
+planner on the public tier that lays the report out as typed `{slot_id}`
+placeholders and asks every question in **one** `ask` call) and `answer_batch`
+(callee-only; one private child run answers the whole batch in one context so
+the figures foot). It is the M1 shape of the hybrid privacy split:
+
+1. `plan_layout` runs with the capability card in context and calls `ask` once
+   with `{preamble, questions}`; the child runs `answer_batch`, whose terminal
+   array is rebuilt per slot from the query results it actually executed (a
+   value the model retyped is never read; an entry no executed query backs is
+   `unanswerable`).
+2. Every entry passes the egress verification step. A refused slot crosses as
+   `{status: refused, reason_category}` only.
+3. The host materialises the verified answers into the layout for `narrate`:
+   filled cells carry their values, refused or unanswered cells carry
+   `status: unavailable` and the category, and no provenance is included.
+4. `narrate` contributes text only. The host synthesises the final envelope from
+   the slot table plus the narrator's summary, notes and titles, appends one
+   `definition` block per filled slot from the child run's provenance, and
+   validates it against the component's render contract. The narrator cannot
+   change a value, add a block or see a query.
+
+Run it with the zone-aware binding above; the render role must be bound:
+
+```bash
+wren-harness "Build the fiscal 2025 annual revenue report" --project /path/to/project \
+  --profile ./profiles/genbi-report --mode api-key --adapter anthropic \
+  --tier-binding ./tier-binding.json
+```
+
+A profile with a single entry runs that entry when none is named, so no agent
+flag is needed. The result's `trace.surfaces` fingerprints every public-tier
+prompt per surface, including the request/input and the consumed (materialised)
+layout, so an audit can check what the cloud received: the card, the slot
+questions and the verified values, never the snapshot, the SQL or the `wren`
+brief. The UI renders an `unavailable` cell as N/A with its reason category.
 
 ## The UI
 

@@ -48,6 +48,10 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   if (terminalValue && typeof terminalValue === "object" && "status" in terminalValue
     && ["refused", "error"].includes(String(terminalValue.status))) return refused();
   if (declared.includes("sql_execution:read_only") && data.length === 0) return refused();
+  // A batch-shaped callee (answer_batch) ends in an array with one entry per slot. Each tabular
+  // entry is rebuilt from the observed query result its SQL names; the model's copy of the rows
+  // is never read, and an entry no executed query backs is returned as unanswerable.
+  if (render.length === 0 && Array.isArray(terminalValue)) return normalizeBatchTerminal(terminalValue, observations);
   if (render.length === 0 && data.length > 0) {
     const last = observations[observations.length - 1]!;
     const actual = table.safeParse(last.output);
@@ -101,4 +105,55 @@ function grounded(render: readonly Record<string, unknown>[], data: readonly z.i
       return sources.some((source) => source.rows.some((observed) => Object.entries(values).every(([name, value]) => Object.hasOwn(observed, name) && JSON.stringify(observed[name]) === JSON.stringify(value))));
     });
   });
+}
+
+const batchEntry = z.object({ slot_id: z.string().min(1).max(128) }).passthrough();
+const stringList = z.array(z.string()).max(64);
+const REASON_LIMIT = 200;
+function sanitizedReason(value: unknown, fallback: string): string {
+  const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  return (text.length > 0 ? text : fallback).slice(0, REASON_LIMIT);
+}
+/**
+ * One entry per slot, first entry per slot id wins. A tabular entry is
+ * accepted only when its `definition.sql` names a query this run executed
+ * with a table-shaped result; its columns and rows are then the observed
+ * ones. The model contributes `summary` and the lineage strings of
+ * `definition`; every value comes from the tool. Entries the model marked
+ * `unanswerable` (or `refused`) pass through with a bounded reason.
+ */
+function normalizeBatchTerminal(entries: readonly unknown[], observations: readonly ComponentEvidence["tools"][number][]): ComponentInvocationResult {
+  const seen = new Set<string>();
+  const value: Record<string, unknown>[] = [];
+  let answered = 0;
+  for (const raw of entries) {
+    const entry = batchEntry.safeParse(raw);
+    if (!entry.success || seen.has(entry.data.slot_id)) continue;
+    seen.add(entry.data.slot_id);
+    const item = entry.data;
+    if (item.status === "unanswerable" || item.status === "refused") {
+      value.push({ slot_id: item.slot_id, status: "unanswerable", reason: sanitizedReason(item.reason, "the callee could not answer this slot") });
+      continue;
+    }
+    const claimed = item.definition && typeof item.definition === "object" ? item.definition as Record<string, unknown> : undefined;
+    const sql = typeof claimed?.sql === "string" ? claimed.sql : undefined;
+    const observed = sql === undefined ? undefined : observations.find((call) => (call.input as { sql?: unknown } | null)?.sql === sql && table.safeParse(call.output).success);
+    const actual = observed ? table.safeParse(observed.output) : undefined;
+    if (!observed || !actual?.success) {
+      value.push({ slot_id: item.slot_id, status: "unanswerable", reason: "no executed query backs this answer" });
+      continue;
+    }
+    const proven = definitionSchema.safeParse((observed.output as { definition?: unknown }).definition);
+    const definition = proven.success && proven.data.sql === sql ? proven.data : {
+      sql: sql!,
+      source_tables: stringList.safeParse(claimed?.source_tables).success ? claimed!.source_tables as string[] : [],
+      filters: stringList.safeParse(claimed?.filters).success ? claimed!.filters as string[] : [],
+    };
+    answered += 1;
+    value.push({ slot_id: item.slot_id, columns: actual.data.columns, rows: actual.data.rows, verified: true,
+      summary: typeof item.summary === "string" ? item.summary : "Query completed.", definition });
+  }
+  if (value.length === 0) return refused();
+  // Spec §6.2: an array value is preserved as-is with no outer provenance; per-entry `verified`/`definition` stay on the entries.
+  return { status: "ok", output: { kind: "value", value }, ...(answered > 0 ? { provenance: { verified: true } } : {}) };
 }

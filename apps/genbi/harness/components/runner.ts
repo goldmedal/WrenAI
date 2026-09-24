@@ -91,6 +91,8 @@ export interface StepRun {
   readonly brief?: string;
   readonly prompt: string;
   readonly consumes: Readonly<Record<string, unknown>>;
+  /** Child results of this invocation so far, exactly as the caller saw them (after egress); host material for consumed artifacts. */
+  readonly children: readonly ComponentInvocationResult[];
   readonly tools: Readonly<Record<string, (input: unknown) => Promise<unknown>>>;
   readonly toolSchemas: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
   readonly toolDescriptions: Readonly<Record<string, string>>;
@@ -402,6 +404,7 @@ export class ComponentRunner {
             input: freeze(copy(request.value.input, COMPONENT_LIMITS.requestBytes)),
             ...(component.brief !== undefined ? { brief: component.brief } : {}),
             prompt: step.prompt, consumes: freeze(copy(consumes, COMPONENT_LIMITS.resultBytes)),
+            children: freeze(copy(children, COMPONENT_LIMITS.resultBytes)),
             tools: Object.freeze(scoped), signal: this.controller.signal,
             toolSchemas: Object.freeze(schemas), toolDescriptions: Object.freeze(descriptions),
           }, binding);

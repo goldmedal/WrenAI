@@ -63,13 +63,29 @@ export interface NarrativeBlock {
   title?: string | null;
 }
 
-/** The v1 typed block union (kpi_card / table / chart / definition / narrative). */
+/**
+ * A report cell whose answer was refused by the egress verification step or
+ * could not be given by the data oracle (the two-stage `plan_report` contract).
+ * `block_type` is the cell's original type; `reason_category` is the only thing
+ * that crossed the zone boundary about why.
+ */
+export interface UnavailableBlock {
+  type: 'unavailable';
+  label: string;
+  block_type: 'kpi_card' | 'table' | 'chart' | 'narrative';
+  reason_category: string;
+  note?: string | null;
+  slot_id?: string | null;
+}
+
+/** The typed block union (kpi_card / table / chart / definition / narrative / unavailable). */
 export type KnownBlock =
   | KpiCardBlock
   | TableBlock
   | ChartBlock
   | DefinitionBlock
-  | NarrativeBlock;
+  | NarrativeBlock
+  | UnavailableBlock;
 
 /** Any block, known or not — the extension point for future/unknown types. */
 export interface UnknownBlock {
@@ -85,6 +101,7 @@ export const KNOWN_BLOCK_TYPES = [
   'chart',
   'definition',
   'narrative',
+  'unavailable',
 ] as const;
 
 export function isKnownBlock(block: AnyBlock): block is KnownBlock {
