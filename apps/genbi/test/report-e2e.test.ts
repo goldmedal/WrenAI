@@ -8,7 +8,7 @@ import type { AgentEvent } from "../harness/events/types.js";
 import { runAiComponentStep } from "../harness/components/ai-step.js";
 import { buildCapabilityCard } from "../harness/components/capability-card.js";
 import { describeComponentPlan } from "../harness/components/display.js";
-import type { StepRun } from "../harness/components/runner.js";
+import type { StepRun, StepUsage } from "../harness/components/runner.js";
 import { COMPONENT_LIMITS } from "../harness/components/runner.js";
 import { GovernedWrenError, openWrenComponentAccess } from "../harness/components/wren-access.js";
 import { ZoneGateError } from "../harness/components/zone-gate.js";
@@ -88,7 +88,11 @@ const LAYOUT = {
 };
 
 vi.mock("../harness/components/ai-step.js", () => ({ runAiComponentStep: vi.fn() }));
-vi.mock("../harness/components/egress-judge.js", () => ({ createModelJudge: () => async () => JSON.stringify({ verdict: "pass", reason_category: "aggregate" }) }));
+// Each judge call reports its usage the way the real judge does (egress-verification.test.ts covers the real wiring).
+vi.mock("../harness/components/egress-judge.js", () => ({ createModelJudge: (_model: unknown, onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void) => async () => {
+  onUsage?.({ inputTokens: 21, outputTokens: 3 });
+  return JSON.stringify({ verdict: "pass", reason_category: "aggregate" });
+} }));
 vi.mock("../harness/components/wren-access.js", async (original) => ({ ...await original<typeof import("../harness/components/wren-access.js")>(), openWrenComponentAccess: vi.fn() }));
 vi.mock("../harness/tools/index.js", async (original) => ({ ...await original<typeof import("../harness/tools/index.js")>(), resolveWrenBinary: vi.fn() }));
 const SNAPSHOT_PATH = path.join(REPORT_PROFILE, "context", "context.json");
@@ -114,13 +118,14 @@ const roles = { judge: "judge", render: "render" };
 interface Captured { readonly step: string; readonly tier: string; readonly modelId: string; readonly brief?: string; readonly prompt: string; readonly request: string; readonly input: unknown; readonly consumes: unknown; readonly output: string }
 
 /** The fake models, one behaviour per step, dispatched on what the host hands the step (tools, consumes). */
-function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: string }) {
+function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: string; usage?: Readonly<Record<string, StepUsage>> }) {
   const calls: Captured[] = [];
   const askRequests: unknown[] = [];
   const askResults: unknown[] = [];
   vi.mocked(runAiComponentStep).mockImplementation(async (run: StepRun, model) => {
     const modelId = (model as { modelId: string }).modelId;
-    const record = (step: string, output: string) => { calls.push({ step, tier: run.tier, modelId, ...(run.brief !== undefined ? { brief: run.brief } : {}), prompt: run.prompt, request: run.request, input: run.input, consumes: run.consumes, output }); return { value: output }; };
+    const usage = options.usage?.[modelId];
+    const record = (step: string, output: string) => { calls.push({ step, tier: run.tier, modelId, ...(run.brief !== undefined ? { brief: run.brief } : {}), prompt: run.prompt, request: run.request, input: run.input, consumes: run.consumes, output }); return { value: output, ...(usage ? { usage } : {}) }; };
     if (run.tools["ask"]) {
       const request = { request: "Answer every question in input.questions for the fiscal 2025 annual revenue report under input.preamble; one entry per slot_id.", input: { preamble: PREAMBLE, questions: SLOTS } };
       askRequests.push(request);
@@ -166,9 +171,9 @@ function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: 
   return { calls, askRequests, askResults };
 }
 
-async function runReport(project: string, options: { mutateNarration?: boolean; toolErrorSlot?: string; zoneRoles?: Record<string, string>; tierBinding?: Record<string, AdapterSpec> } = {}) {
+async function runReport(project: string, options: { mutateNarration?: boolean; toolErrorSlot?: string; usage?: Record<string, StepUsage>; zoneRoles?: Record<string, string>; tierBinding?: Record<string, AdapterSpec> } = {}) {
   const { plan, ir } = await loadReportPlan(project);
-  const fakes = installFakeModels({ mutateNarration: options.mutateNarration ?? false, ...(options.toolErrorSlot ? { toolErrorSlot: options.toolErrorSlot } : {}) });
+  const fakes = installFakeModels({ mutateNarration: options.mutateNarration ?? false, ...(options.toolErrorSlot ? { toolErrorSlot: options.toolErrorSlot } : {}), ...(options.usage ? { usage: options.usage } : {}) });
   vi.mocked(openWrenComponentAccess).mockResolvedValue({
     async query(input) { if (input.sql === CUBE_AS_TABLE) throw new GovernedWrenError("model_not_found"); const table = TABLES[input.sql]; if (!table) throw new Error(`unexpected SQL: ${input.sql}`); return structuredClone(table); },
     async inspect() { return {}; }, async close() {},
@@ -366,6 +371,51 @@ describe("M1: the annual revenue report end to end, offline", () => {
         expect(call.brief).toContain("wren -q");
         expect(Object.values(record.surfaces)).not.toContain(card.digest);
       }
+    } finally { await rm(project, { recursive: true, force: true }); }
+  });
+
+  it("usage: every root step, child step and judge call is attributed to the provider and zone that served it, counts only", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "genbi-report-usage-"));
+    try {
+      // Distinct counts per model so a record attributed to the wrong tier or zone shows up in the totals. The narrator reports nothing.
+      const { result } = await runReport(project, { usage: {
+        "cloud-planner": { inputTokens: 1200, outputTokens: 300 },
+        "local-super-cheap": { inputTokens: 40, outputTokens: 4 },
+        "local-super": { inputTokens: 5000, outputTokens: 700 },
+      } });
+      if (result.kind !== "answer") throw new Error("expected an answer");
+      const usage = result.trace?.usage;
+      if (!usage) throw new Error("expected usage on the trace");
+      const judged = result.trace!.steps.filter((step) => step.tool === "egress" && step.outcome === "success").length;
+      expect(judged).toBe(7);
+      const at = (component: string, step: string, tier: string, depth: number, zone: string, model: string, inputTokens: number, outputTokens: number) =>
+        ({ component, step, tier, depth, zone, adapter: "mock", model, inputTokens, outputTokens });
+      // In completion order: the child's two steps, the judge on each slot that reached it, then the planner and the narrator.
+      expect(usage.steps).toStrictEqual([
+        at("answer_batch", "resolve_intent", "cheap", 1, "private", "local-super-cheap", 40, 4),
+        at("answer_batch", "generate_sql", "strong", 1, "private", "local-super", 5000, 700),
+        ...Array.from({ length: judged }, () => at("answer_batch", "egress_judge", "judge", 1, "private", "local-judge", 21, 3)),
+        at("plan_report", "plan_layout", "strong", 0, "public", "cloud-planner", 1200, 300),
+        // An adapter that reports no usage is recorded as explicit zeros, not left out.
+        at("plan_report", "narrate", "cheap", 0, "public", "cloud-narrator", 0, 0),
+      ]);
+      expect(usage.providers).toStrictEqual([
+        { zone: "private", adapter: "mock", model: "local-super-cheap", calls: 1, inputTokens: 40, outputTokens: 4 },
+        { zone: "private", adapter: "mock", model: "local-super", calls: 1, inputTokens: 5000, outputTokens: 700 },
+        { zone: "private", adapter: "mock", model: "local-judge", calls: judged, inputTokens: 21 * judged, outputTokens: 3 * judged },
+        { zone: "public", adapter: "mock", model: "cloud-planner", calls: 1, inputTokens: 1200, outputTokens: 300 },
+        { zone: "public", adapter: "mock", model: "cloud-narrator", calls: 1, inputTokens: 0, outputTokens: 0 },
+      ]);
+      // Per zone, the totals are exactly the zone's own models: nothing private is charged to public or the reverse.
+      const zoneTotal = (zone: string) => usage.providers.filter((provider) => provider.zone === zone)
+        .reduce((sum, provider) => [sum[0]! + provider.inputTokens, sum[1]! + provider.outputTokens], [0, 0]);
+      expect(zoneTotal("public")).toEqual([1200, 300]);
+      expect(zoneTotal("private")).toEqual([5040 + 21 * judged, 704 + 3 * judged]);
+      // Counts and identities only: no question, preamble, slot text, SQL, row value or model output in the records.
+      const text = JSON.stringify(usage);
+      for (const sql of Object.values(SQL)) expect(text).not.toContain(sql);
+      for (const slot of SLOTS) expect(text).not.toContain(slot.question);
+      expect(text).not.toMatch(/SELECT|fiscal|Northwind|revenue|USD|verdict/i);
     } finally { await rm(project, { recursive: true, force: true }); }
   });
 
