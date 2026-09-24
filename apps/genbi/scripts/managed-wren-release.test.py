@@ -1,6 +1,7 @@
 """Offline contracts for the actual metadata script used by the release workflow."""
 
 import hashlib
+import copy
 import io
 import json
 import os
@@ -164,6 +165,91 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertEqual((self.release / "requirements.txt").read_text(),
                          "wrenai==0.13.0 --hash=sha256:" + "a" * 64 + "\n"
                          + "other_pkg==1.2.3 --hash=sha256:" + "b" * 64 + "\n")
+
+    def test_fork_source_identity_requires_exact_receipt_source_and_wheel(self):
+        helper = runpy.run_path(str(SCRIPT))
+        spec = json.loads((SCRIPT.parent.parent / "managed-wren/source-inputs.json").read_text())
+        filename = "wrenai-" + spec["version"] + "-py3-none-any.whl"
+        base = "https://github.com/goldmedal/WrenAI/releases/download/wren-source-fixture/"
+        wheel = {"filename": filename, "version": spec["version"], "sha256": "a" * 64}
+        receipt = {"schema": 1, "source": spec, "wheel": wheel}
+        raw = json.dumps(receipt).encode()
+        root = {**wheel, "url": base + filename,
+                "sourceBuild": {"url": base + "source-provenance.json", "sha256": hashlib.sha256(raw).hexdigest()}}
+        meta = {"Name": "wrenai", "Version": spec["version"]}
+        def run(value, response=raw):
+            with patch("urllib.request.urlopen", return_value=io.BytesIO(response)):
+                return helper["source_wheel_identity"](Path(filename), "a" * 64, meta, {"wrenai": value})
+        self.assertEqual(run(root), (root["url"], root["sourceBuild"]))
+        for key, value in (("filename", "other.whl"), ("sha256", "b" * 64),
+                           ("url", base.replace("goldmedal", "Canner") + filename)):
+            bad = copy.deepcopy(root); bad[key] = value
+            with self.assertRaises(SystemExit):
+                run(bad)
+        with self.assertRaises(SystemExit):
+            run(root, b"changed receipt")
+        altered = copy.deepcopy(receipt); altered["source"]["commit"] = "b" * 40
+        altered_raw = json.dumps(altered).encode()
+        bad = copy.deepcopy(root); bad["sourceBuild"]["sha256"] = hashlib.sha256(altered_raw).hexdigest()
+        with self.assertRaises(SystemExit):
+            run(bad, altered_raw)
+
+    def test_missing_source_proof_fails_before_any_download(self):
+        inputs = json.loads((SCRIPT.parent.parent / "managed-wren/release-inputs.json").read_text())
+        for proof in (None, {}, {"url": "https://example.test/receipt", "sha256": "a" * 64}):
+            broken = copy.deepcopy(inputs)
+            if proof is None:
+                broken["wrenai"].pop("sourceBuild")
+            else:
+                broken["wrenai"]["sourceBuild"] = proof
+            path = self.release / "inputs.json"
+            path.write_text(json.dumps(broken))
+            with patch("urllib.request.urlopen", side_effect=AssertionError("must not fetch")), patch.object(
+                sys, "argv", [str(SCRIPT), "download", "--inputs", str(path), "--release-dir", str(self.release)]
+            ), self.assertRaisesRegex(SystemExit, "sourceBuild"):
+                runpy.run_path(str(SCRIPT), run_name="__main__")
+
+    def test_overview_without_apache_text_cannot_become_redistribution_notices(self):
+        inputs = json.loads((SCRIPT.parent.parent / "managed-wren/release-inputs.json").read_text())
+        with zipfile.ZipFile(self.release / "wheels" / inputs["wrenai"]["filename"], "w") as archive:
+            archive.writestr("wrenai.dist-info/licenses/LICENSE", "See LICENSE-APACHE-2.0")
+        raw = [json.dumps({"archiveSha256": inputs["python"]["sha256"]}).encode(), b"retained notices", b'{"wheels":[]}']
+        (self.release / "wheel-license-inventory.json").write_text('{"wheels":[{"distribution":"wrenai"}]}')
+        for item, data in zip(inputs["licenseEvidence"]["retained"], raw):
+            item["sha256"] = hashlib.sha256(data).hexdigest()
+        helper = runpy.run_path(str(SCRIPT))
+        with patch("urllib.request.urlopen", side_effect=[io.BytesIO(data) for data in raw]), self.assertRaisesRegex(SystemExit, "license missing"):
+            helper["notices"](self.release, inputs)
+        self.assertFalse((self.release / "THIRD_PARTY_NOTICES.txt").exists())
+
+    def test_retained_documents_and_new_wheel_documents_bind_complete_notices(self):
+        inputs = json.loads((SCRIPT.parent.parent / "managed-wren/release-inputs.json").read_text())
+        dependency = {"distribution": "fixture", "filename": "fixture-1.0.whl",
+                      "version": "1.0", "sourceUrl": "https://example.test/fixture-1.0.whl",
+                      "sha256": "b" * 64, "license": "MIT"}
+        old = {**dependency, "documents": [{"path": "LICENSE", "sha256": "c" * 64, "source": {"url": "https://example.test/LICENSE"}}]}
+        raw = [json.dumps({"archiveSha256": inputs["python"]["sha256"]}).encode(),
+               b"retained notices", json.dumps({"wheels": [old]}).encode()]
+        for item, data in zip(inputs["licenseEvidence"]["retained"], raw):
+            item["sha256"] = hashlib.sha256(data).hexdigest()
+        with zipfile.ZipFile(self.release / "wheels" / inputs["wrenai"]["filename"], "w") as archive:
+            archive.writestr("wrenai.dist-info/licenses/LICENSE", "overview")
+            archive.writestr("wrenai.dist-info/licenses/LICENSE-APACHE-2.0", "Apache fixture")
+        helper = runpy.run_path(str(SCRIPT))
+        inventory = self.release / "wheel-license-inventory.json"
+        inventory.write_text(json.dumps({"wheels": [dependency, {"distribution": "wrenai"}]}))
+        with patch("urllib.request.urlopen", side_effect=[io.BytesIO(data) for data in raw]):
+            helper["notices"](self.release, inputs)
+        result = json.loads(inventory.read_text())
+        self.assertEqual(result["wheels"][0], old)
+        self.assertEqual(result["wheels"][1]["documents"][1]["sha256"], hashlib.sha256(b"Apache fixture").hexdigest())
+        self.assertEqual(result["wheels"][1]["documents"][1]["source"]["wheelSha256"], inputs["wrenai"]["sha256"])
+        self.assertEqual(result["noticesSha256"], hashlib.sha256((self.release / "THIRD_PARTY_NOTICES.txt").read_bytes()).hexdigest())
+        for key in ("filename", "version", "sourceUrl", "sha256", "license"):
+            changed = {**dependency, key: "different"}
+            inventory.write_text(json.dumps({"wheels": [changed, {"distribution": "wrenai"}]}))
+            with patch("urllib.request.urlopen", side_effect=[io.BytesIO(data) for data in raw]), self.assertRaisesRegex(SystemExit, "differs"):
+                helper["notices"](self.release, inputs)
 
 
 if __name__ == "__main__":

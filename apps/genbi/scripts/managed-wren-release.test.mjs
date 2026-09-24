@@ -92,6 +92,7 @@ test("actual publication commands target only the fork even with an upstream amb
   await mkdir(bin); await mkdir(path.join(root, "release/assets"), { recursive: true });
   await writeFile(path.join(root, "release/assets/fixture.whl"), "fixture");
   await writeFile(path.join(root, "release/review.json"), "{}");
+  await writeFile(path.join(root, "release/THIRD_PARTY_NOTICES.txt"), "fixture notices");
   const capture = path.join(root, "argv");
   await writeFile(path.join(bin, "gh"), '#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\n', { mode: 0o755 });
   const workflow = await readFile(path.join(repo, ".github/workflows/managed-wren-runtime.yml"), "utf8");
@@ -144,9 +145,10 @@ test("workflow is manual-only, data-binds user input and exposes no raw pre-appr
   }
   const [stage, publish] = workflow.split("  publish-approved-runtime:");
   assert.match(stage, /permissions:\n  contents: read/);
-  assert.match(stage, /path: release\/\*\.json/);
+  assert.match(stage, /release\/\*\.json/);
+  assert.match(stage, /release\/THIRD_PARTY_NOTICES\.txt/);
   assert.doesNotMatch(stage, /GH_TOKEN|contents: write|gh release/);
-  assert.ok(stage.indexOf('validate-tag "$RUNTIME_TAG"') < stage.indexOf("pip download"));
+  assert.ok(stage.indexOf('validate-tag "$RUNTIME_TAG"') < stage.indexOf("managed-wren-release.py download"));
   assert.match(publish, /needs: stage/);
   assert.match(publish, /environment: managed-wren-license-approved/);
   assert.match(publish, /secrets.MANAGED_WREN_APPROVAL_SHA256/);
@@ -155,10 +157,10 @@ test("workflow is manual-only, data-binds user input and exposes no raw pre-appr
   assert.ok(publish.indexOf("verify-publish") < publish.indexOf("GH_TOKEN:"));
 });
 
-test("actual workflow approval commands reject missing or stale approval and bind all three review files", async (t) => {
+test("actual workflow approval commands reject missing or stale approval and bind inventories and redistribution notices", async (t) => {
   const root = await temp(t);
   await mkdir(path.join(root, "release"));
-  const names = ["managed-wren-manifest.candidate.json", "pbs-license-inventory.json", "wheel-license-inventory.json"];
+  const names = ["managed-wren-manifest.candidate.json", "pbs-license-inventory.json", "wheel-license-inventory.json", "THIRD_PARTY_NOTICES.txt"];
   const bytes = names.map((name) => JSON.stringify({ fixture: name }) + "\n");
   for (let i = 0; i < names.length; i++) await writeFile(path.join(root, "release", names[i]), bytes[i]);
   const workflow = await readFile(path.join(repo, ".github/workflows/managed-wren-runtime.yml"), "utf8");
@@ -186,9 +188,10 @@ test("actual staging commands derive source identities from the exact input file
   const workflow = await readFile(path.join(repo, ".github/workflows/managed-wren-runtime.yml"), "utf8");
   const prelude = workflow.slice(workflow.indexOf("          set -euo pipefail"), workflow.indexOf("          mkdir -p release/wheels"));
   assert.ok(prelude.includes("release-inputs.json"));
-  const output = execFileSync("/bin/bash", ["-c", prelude + '\nnode -e \'console.log(JSON.stringify(process.argv.slice(1)))\' "$PYTHON_URL" "$PYTHON_SHA256" "$WRENAI_VERSION"'], { cwd: root, encoding: "utf8" });
-  assert.deepEqual(JSON.parse(output), [changed.python.url, changed.python.sha256, changed.wrenai.version]);
-  assert.match(workflow, /--dest release\/wheels "wrenai==\$WRENAI_VERSION"/);
+  const output = execFileSync("/bin/bash", ["-c", prelude + '\nnode -e \'console.log(JSON.stringify(process.argv.slice(1)))\' "$PYTHON_URL" "$PYTHON_SHA256"'], { cwd: root, encoding: "utf8" });
+  assert.deepEqual(JSON.parse(output), [changed.python.url, changed.python.sha256]);
+  assert.match(workflow, /managed-wren-release\.py download/);
+  assert.doesNotMatch(workflow, /pip download/);
   assert.match(workflow, /-o release\/python.tar.gz "\$PYTHON_URL"/);
   assert.match(workflow, /= "\$PYTHON_SHA256"/);
   assert.match(workflow, /export PYTHON_SHA256/);
@@ -201,6 +204,7 @@ test("actual staging commands derive source identities from the exact input file
 
 test("standalone Python metadata helper passes its offline contracts", () => {
   execFileSync("python3", ["-B", path.join(here, "managed-wren-release.test.py")], { stdio: "pipe" });
+  execFileSync("python3", ["-B", path.join(here, "managed-wren-source.test.py")], { stdio: "pipe" });
 });
 
 test("staging prepares extracted Python permissions before executing or attesting it", async () => {

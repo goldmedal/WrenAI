@@ -172,7 +172,7 @@ jobs:
           GENBI_VENDOR_TOOL_ROOT: ${{ runner.temp }}/genbi-vendor-tools
         run: |
           npm install --prefix "$GENBI_VENDOR_TOOL_ROOT" --no-audit --no-fund --no-save \
-            @openai/codex@0.146.0 \
+            @openai/codex@0.156.1 \
             @anthropic-ai/claude-code@2.1.259 \
             @anthropic-ai/sandbox-runtime@0.0.75
 

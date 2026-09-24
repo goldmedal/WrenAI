@@ -13,9 +13,33 @@
     "sha256": "50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9"
   },
   "wrenai": {
-    "version": "0.13.0",
-    "filename": "wrenai-0.13.0-py3-none-any.whl",
-    "url": "https://files.pythonhosted.org/packages/7f/40/2de81f1a3fe332ebfb8ec5db0161ce4b521dee5c1d0d4adf9c5693651b51/wrenai-0.13.0-py3-none-any.whl",
-    "sha256": "1cb14927c9a1e1925a7295c2772e5852254c6cc370db640ccc33b6cd04e95dae"
+    "filename": "wrenai-0.13.0+genbi.1-py3-none-any.whl",
+    "sha256": "cb15e82122a298e462e52d482d0903ad8881bb25caf27752811b2959499cbf36",
+    "version": "0.13.0+genbi.1",
+    "url": "https://github.com/goldmedal/WrenAI/releases/download/wrenai-genbi-v0.13.0-genbi.1/wrenai-0.13.0+genbi.1-py3-none-any.whl",
+    "sourceBuild": {
+      "url": "https://github.com/goldmedal/WrenAI/releases/download/wrenai-genbi-v0.13.0-genbi.1/source-provenance.json",
+      "sha256": "156a9f6df6b8d5d0fa48130a2cacc0e2723322873e2a234650fc498e1079445b"
+    }
+  },
+  "licenseEvidence": {
+    "pythonSha256": "50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9",
+    "retained": [
+      {
+        "filename": "pbs-license-inventory.json",
+        "url": "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-v0.0.4/pbs-license-inventory.json",
+        "sha256": "23c57f67db068ff50ce2edfb1c8c7a3f8bf2ead2904345dc47d61e4ef228a062"
+      },
+      {
+        "filename": "THIRD_PARTY_NOTICES.txt",
+        "url": "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-v0.0.4/THIRD_PARTY_NOTICES.txt",
+        "sha256": "05067752be36fad8a9b659d6b5516af016f4bcf5b939f84c87ff9e5a4c0841dc"
+      },
+      {
+        "filename": "wheel-license-inventory.json",
+        "url": "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-v0.0.4/wheel-license-inventory.json",
+        "sha256": "a397aa74484e439b94b2262d42bbb7f05b3356adbb671604a92e8d0e1af5d870"
+      }
+    ]
   }
 }
