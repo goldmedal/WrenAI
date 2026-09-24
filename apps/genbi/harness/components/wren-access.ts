@@ -7,7 +7,42 @@ import { z } from "zod";
 import { hashDirectory } from "../compile/fingerprint.js";
 import type { ComponentAccess } from "./broker.js";
 
-const reply = z.object({ id: z.number().int().nonnegative(), protocol: z.literal("wren-governed/1").optional(), result: z.unknown().optional(), error: z.string().optional() }).strict();
+/**
+ * The closed vocabulary of governed query failures a model may see. The wire carries the
+ * class; the sentence shown to the model is owned here, so nothing a `wren` process writes
+ * (exception text, SQL, paths, credentials) can reach a model even if that process is stale
+ * or compromised. `transport` is host-only: the channel itself failed or closed.
+ */
+export const GOVERNED_ERROR_CLASSES = ["invalid_request", "model_not_found", "policy_rejected", "invalid_sql", "execution_failed",
+  "timeout", "datasource_unavailable", "result_too_large", "internal", "transport"] as const;
+export type GovernedErrorClass = (typeof GOVERNED_ERROR_CLASSES)[number];
+const GOVERNED_ERROR_TEXT: Readonly<Record<GovernedErrorClass, string>> = Object.freeze({
+  invalid_request: "The request did not match the governed operation contract.",
+  model_not_found: "The query references a table that is not a model in the bound semantic context; query only the models it defines.",
+  policy_rejected: "The read-only analytical policy rejected the query: use one SELECT over the bound models with standard analytical functions only.",
+  invalid_sql: "The SQL could not be parsed or planned against the semantic context.",
+  execution_failed: "The data source rejected the query at execution time, for example an unknown column or a type mismatch.",
+  timeout: "The query exceeded the statement time limit.",
+  datasource_unavailable: "The bound data source could not be reached.",
+  result_too_large: "The result exceeded the governed byte limit; narrow the query.",
+  internal: "The governed operation failed for an unclassified reason.",
+  transport: "Governed Wren operation is unavailable.",
+});
+export class GovernedWrenError extends Error {
+  constructor(readonly errorClass: GovernedErrorClass) {
+    super(`Governed Wren query failed [${errorClass}]: ${GOVERNED_ERROR_TEXT[errorClass]}`);
+    this.name = "GovernedWrenError";
+  }
+}
+/** Only the class crosses; a message from the wire is never forwarded, and an unknown class is `internal`. */
+function governedError(wire: string | { class: string }): GovernedWrenError {
+  const named = typeof wire === "string" ? undefined : wire.class;
+  const known = GOVERNED_ERROR_CLASSES.find((candidate) => candidate === named && candidate !== "transport");
+  return new GovernedWrenError(known ?? "internal");
+}
+const PROTOCOLS = ["wren-governed/1", "wren-governed/2"] as const;
+const reply = z.object({ id: z.number().int().nonnegative(), protocol: z.enum(PROTOCOLS).optional(), result: z.unknown().optional(),
+  error: z.union([z.string(), z.object({ class: z.string().min(1).max(64), message: z.string().max(1024) }).strict()]).optional() }).strict();
 
 export interface WrenAccessIdentity {
   readonly environment: Readonly<NodeJS.ProcessEnv>;
@@ -62,7 +97,7 @@ export async function openWrenComponentAccess(options: {
   let buffer = Buffer.alloc(0);
   let nextId = 1;
   let pending: { id: number; resolve(value: unknown): void; reject(error: Error): void } | undefined;
-  const unavailable = () => new Error("Governed Wren operation is unavailable");
+  const unavailable = () => new GovernedWrenError("transport");
   const ready = new Promise<void>((resolve, reject) => { pending = { id: 0, resolve: () => resolve(), reject }; });
   const signalGroup = (value: NodeJS.Signals) => {
     if (!child.pid) return;
@@ -114,10 +149,10 @@ export async function openWrenComponentAccess(options: {
       const value = reply.parse(JSON.parse(buffer.subarray(0, newline).toString("utf8")));
       buffer = buffer.subarray(newline + 1);
       if (buffer.length || !pending || value.id !== pending.id) throw unavailable();
-      if (value.id === 0 ? value.protocol !== "wren-governed/1" || Object.keys(value).length !== 2
+      if (value.id === 0 ? value.protocol === undefined || Object.keys(value).length !== 2
         : value.protocol !== undefined || (Object.hasOwn(value, "result") === Object.hasOwn(value, "error"))) throw unavailable();
       const waiter = pending; pending = undefined;
-      if (value.error !== undefined) waiter.reject(unavailable()); else waiter.resolve(value.result);
+      if (value.error !== undefined) waiter.reject(governedError(value.error)); else waiter.resolve(value.result);
     } catch { abort(); }
   });
   if (options.signal.aborted) abort();

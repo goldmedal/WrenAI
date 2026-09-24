@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
-import { captureWrenAccessIdentity, openWrenComponentAccess } from "../harness/components/wren-access.js";
+import { captureWrenAccessIdentity, GovernedWrenError, openWrenComponentAccess } from "../harness/components/wren-access.js";
 
 async function fixture(script: string, run: (project: string, executable: string) => Promise<void>) {
   const root = await mkdtemp(path.join(os.tmpdir(), "genbi-wren-access-test-"));
@@ -61,5 +61,43 @@ describe("owned Wren access", () => {
   }));
   it("refuses a protocol mismatch", async () => fixture('console.log(JSON.stringify({id:0,protocol:"old"}));process.stdin.resume();', async (project, executable) => {
     await expect(openWrenComponentAccess({ executable, project, fingerprint: await hashDirectory(project), signal: new AbortController().signal })).rejects.toThrow();
+  }));
+  it("surfaces a bounded error class from a structured error frame and never the wire message", async () => fixture(`
+    console.log(JSON.stringify({id:0,protocol:"wren-governed/2"}));
+    const readline = require('node:readline');
+    readline.createInterface({input:process.stdin}).on('line',line => {
+      const request=JSON.parse(line);
+      const cls = request.sql.includes('revenue') ? 'model_not_found' : request.sql.includes('spoof') ? 'transport' : 'policy_rejected';
+      console.log(JSON.stringify({id:request.id,error:{class:cls,message:"Table revenue missing in /private/manifest for user secret-token"}}));
+    });`, async (project, executable) => {
+    const signal = new AbortController().signal;
+    const access = await openWrenComponentAccess({ executable, project, fingerprint: await hashDirectory(project), signal });
+    try {
+      const first = await access.query({ sql: "SELECT total_revenue FROM revenue", limit: 1 }, signal).catch((error: unknown) => error);
+      expect(first).toBeInstanceOf(GovernedWrenError);
+      expect((first as GovernedWrenError).errorClass).toBe("model_not_found");
+      expect((first as Error).message).toContain("model_not_found");
+      expect((first as Error).message).not.toMatch(/private|secret|manifest/);
+      const second = await access.query({ sql: "SELECT 1 AND 2", limit: 1 }, signal).catch((error: unknown) => error);
+      expect((second as GovernedWrenError).errorClass).toBe("policy_rejected");
+      // A wire frame cannot claim the host-only channel class; unknown classes collapse to internal.
+      const spoofed = await access.query({ sql: "SELECT spoof", limit: 1 }, signal).catch((error: unknown) => error);
+      expect((spoofed as GovernedWrenError).errorClass).toBe("internal");
+      // The channel stays usable after classified errors.
+      await expect(access.inspect(signal)).rejects.toBeInstanceOf(GovernedWrenError);
+    } finally { await access.close(); }
+  }));
+  it("keeps a protocol/1 process usable and classifies its string errors as internal", async () => fixture(`${ready}
+    const readline = require('node:readline');
+    readline.createInterface({input:process.stdin}).on('line',line => {
+      const request=JSON.parse(line);
+      console.log(JSON.stringify({id:request.id,error:"Governed operation failed"}));
+    });`, async (project, executable) => {
+    const signal = new AbortController().signal;
+    const access = await openWrenComponentAccess({ executable, project, fingerprint: await hashDirectory(project), signal });
+    try {
+      const error = await access.query({ sql: "SELECT 1", limit: 1 }, signal).catch((error: unknown) => error);
+      expect((error as GovernedWrenError).errorClass).toBe("internal");
+    } finally { await access.close(); }
   }));
 });
