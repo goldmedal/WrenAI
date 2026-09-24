@@ -52,6 +52,7 @@ jobs:
           /usr/bin/tar -tzf release/python.tar.gz | python apps/genbi/scripts/managed-wren-release.py pbs > release/pbs-license-inventory.json
           /usr/bin/tar -xpzf release/python.tar.gz -C release/runtime
           /bin/chmod 700 release/runtime
+          node apps/genbi/scripts/managed-wren-release.mjs prepare-python release/runtime/python
           release/runtime/python/bin/python3.11 -m venv release/runtime/venv
           python apps/genbi/scripts/managed-wren-release.py requirements
           release/runtime/venv/bin/python -m pip install --no-index --no-deps --require-hashes --find-links release/wheels -r release/requirements.txt
