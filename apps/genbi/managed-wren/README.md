@@ -1,15 +1,15 @@
 # Managed Wren release binding
 
 This package pins the darwin-arm64 runtime published in
-[managed-wren-v0.0.4](https://github.com/goldmedal/WrenAI/releases/tag/managed-wren-v0.0.4):
-CPython 3.11.16 and Wren 0.13.0 with its complete 41-wheel closure.
+[managed-wren-v0.0.5](https://github.com/goldmedal/WrenAI/releases/tag/managed-wren-v0.0.5):
+CPython 3.11.16 and fork Wren 0.13.0+genbi.1 with its complete 41-wheel closure.
 
 `manifest.json` remains staged and contains an `approvedManifest` reference.
 Provisioning must retrieve the exact approved release manifest with SHA-256
-`64fd2e42332c59e938e74123223d901b0d709fad23514b0399f647d36e6da611`
+`d1ad640f3569d9cec3102110c18627180e22793ad644418ed9a93b475f06e33a`
 and verify its release identity before installing any runtime asset. The release
 contains the license inventories and `THIRD_PARTY_NOTICES.txt` reviewed for these
-unchanged archives and wheels.
+selected archives and wheels, including the fork source provenance.
 
 Readiness never downloads or installs the runtime. Explicit provisioning uses a
 private runtime directory, verifies every artifact, installs wheels offline, and
@@ -21,7 +21,7 @@ installation and vendor-session readiness remain separate checks.
 
 ## Fork source-wheel releases
 
-The next runtime input selects Wren `0.13.0+genbi.1`, built from the public fork
+The runtime input selects Wren `0.13.0+genbi.1`, built from the public fork
 commit pinned in `source-inputs.json`. This is a distinct fork distribution; it
 does not replace the PyPI `wrenai` package. It supplies the governed query
 transport required by native component execution.
@@ -56,5 +56,5 @@ manifest, Python license inventory, wheel license inventory, and
 `THIRD_PARTY_NOTICES.txt`, in that order. The protected publication job requires
 that digest, re-fetches the exact selected assets, and creates a new runtime
 release. It never overwrites an existing tag or asset. GenBI's installed binding
-remains on the earlier runtime until a separately verified new manifest anchor
-is committed.
+pins the approved manifest above; changing the runtime requires a separately
+verified new manifest anchor.
