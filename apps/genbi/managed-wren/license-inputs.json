@@ -1,0 +1,362 @@
+{
+  "schema": 1,
+  "pythonArchiveSha256": "50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9",
+  "pbsRelease": "20260901",
+  "pbsCommit": "4bb01f09aaf362c71e891be4a41cb6d6ddf830b3",
+  "sources": {
+    "pbs-full": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260901/cpython-3.11.16%2B20260901-aarch64-apple-darwin-pgo%2Blto-full.tar.zst",
+      "sha256": "19b8d2af1719e3fe8cd4edfa2e5030dab776233c05044f4348dbe3c0af7d1b2f",
+      "format": "tar.zst"
+    },
+    "tcl-source": {
+      "url": "https://prdownloads.sourceforge.net/tcl/tcl9.0.4-src.tar.gz",
+      "sha256": "d0aed49230bc02a65c1e0229e65f34590a4b037ec40d546f32573b467f7551ea",
+      "format": "tar.gz"
+    },
+    "tk-source": {
+      "url": "https://prdownloads.sourceforge.net/tcl/tk9.0.4-src.tar.gz",
+      "sha256": "d7a146d2917eb8b5cc95276dbf0e3d03c7464d2b19c1675357857c989301dbb4",
+      "format": "tar.gz"
+    },
+    "loguru-license": {
+      "url": "https://raw.githubusercontent.com/Delgan/loguru/ae3bfd1b85b6b4a3db535f69b975687c79498be4/LICENSE",
+      "sha256": "b35d026cc7aca9d5859a02eb87ddf7a386a24c986838651bd1f283f94e003327",
+      "format": "text"
+    },
+    "wren-license": {
+      "url": "https://raw.githubusercontent.com/Canner/WrenAI/9c32c1303a7957a5fce1170ca6b614eaa5e775b5/LICENSE-APACHE-2.0",
+      "sha256": "3da122eeaedca9b81aa873d2cb090c66eeaa1594e776efab631fbf0d1cebfeed",
+      "format": "text"
+    },
+    "wren-license-map": {
+      "url": "https://raw.githubusercontent.com/Canner/WrenAI/9c32c1303a7957a5fce1170ca6b614eaa5e775b5/LICENSE",
+      "sha256": "25ce726569e5c568a00f46133a3f7515a216c6c435f8aa8531ede1924b0d6309",
+      "format": "text"
+    },
+    "wren-core-source": {
+      "url": "https://files.pythonhosted.org/packages/0d/7a/950b688918be993d8416ba9bde82733915dd9c9bc2479773793fabd51f8f/wren_core_py-0.8.0.tar.gz",
+      "sha256": "d67b98c63c56db30f2f1ec4613c8c4a39258a20b7923f5128edd7551eab4c1c9",
+      "format": "tar.gz"
+    }
+  },
+  "nativeComponents": [
+    {
+      "name": "bzip2",
+      "version": "1.0.8",
+      "licenses": [
+        "bzip2-1.0.6"
+      ],
+      "linkedNames": [
+        "bz2"
+      ],
+      "source": {
+        "url": "https://astral-sh.github.io/mirror/files/bzip2-1.0.8.tar.gz",
+        "sha256": "ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269"
+      },
+      "documents": [
+        {
+          "source": "pbs-full",
+          "path": "python/licenses/LICENSE.bzip2.txt"
+        }
+      ]
+    },
+    {
+      "name": "libffi",
+      "version": "3.4.8",
+      "licenses": [
+        "MIT"
+      ],
+      "linkedNames": [
+        "ffi"
+      ],
+      "source": {
+        "url": "https://github.com/libffi/libffi/releases/download/v3.4.8/libffi-3.4.8.tar.gz",
+        "sha256": "bc9842a18898bfacb0ed1252c4febcc7e78fa139fd27fdc7a3e30d9d9356119b"
+      },
+      "documents": [
+        {
+          "source": "pbs-full",
+          "path": "python/licenses/LICENSE.libffi.txt"
+        }
+      ]
+    },
+    {
+      "name": "mpdecimal",
+      "version": "4.0.0",
+      "licenses": [
+        "BSD-2-Clause"
+      ],
+      "linkedNames": [
+        "mpdec"
+      ],
+      "source": {
+        "url": "https://astral-sh.github.io/mirror/files/mpdecimal-4.0.0.tar.gz",
+        "sha256": "942445c3245b22730fd41a67a7c5c231d11cb1b9936b9c0f76334fb7d0b4468c"
+      },
+      "documents": [
+        {
+          "source": "pbs-full",
+          "path": "python/licenses/LICENSE.mpdecimal.txt"
+        }
+      ]
+    },
+    {
+      "name": "expat",
+      "version": "2.8.4",
+      "licenses": [
+        "MIT"
+      ],
+      "linkedNames": [
+        "expat"
+      ],
+      "source": {
+        "url": "https://github.com/libexpat/libexpat/releases/download/R_2_8_4/expat-2.8.4.tar.xz",
+        "sha256": "656ae1cc8da3b4ea513bb4e254f33e6243938084c0ec6239da873376b09985a7"
+      },
+      "documents": [
+        {
+          "source": "pbs-full",
+          "path": "python/licenses/LICENSE.expat.txt"
+        }
+      ]
+    },
+    {
+      "name": "openssl-3.5",
+      "version": "3.5.8",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "linkedNames": [
+        "crypto",
+        "ssl"
+      ],
+      "source": {
+        "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz",
+        "sha256": "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2"
+      },
+      "documents": [
+        {
+          "source": "pbs-full",
+          "path": "python/licenses/LICENSE.openssl-3.txt"
+        }
+      ]
+    },
+    {
+      "name": "xz",
+      "version": "5.8.3",
+      "licenses": [
+        "0BSD"
+      ],
+      "linkedNames": [
+        "lzma"
+      ],
+      "source": {
+        "url": "https://github.com/tukaani-project/xz/releases/download/v5.8.3/xz-5.8.3.tar.gz",
+        "sha256": "3d3a1b973af218114f4f889bbaa2f4c037deaae0c8e815eec381c3d546b974a0"
+      },
+      "documents": [
+        {
+          "source": "pbs-full",
+          "path": "python/licenses/LICENSE.liblzma.txt"
+        }
+      ]
+    },
+    {
+      "name": "sqlite",
+      "version": "3.53.1.0",
+      "licenses": [
+        "Public-Domain"
+      ],
+      "linkedNames": [
+        "sqlite3"
+      ],
+      "source": {
+        "url": "https://www.sqlite.org/2026/sqlite-autoconf-3530100.tar.gz",
+        "sha256": "83e6b2020a034e9a7ad4a72feea59e1ad52f162e09cbd26735a3ffb98359fc4f"
+      },
+      "documents": [
+        {
+          "source": "pbs-full",
+          "path": "python/licenses/LICENSE.sqlite.txt"
+        }
+      ]
+    },
+    {
+      "name": "uuid",
+      "version": "1.0.3",
+      "licenses": [
+        "BSD-3-Clause"
+      ],
+      "linkedNames": [
+        "uuid"
+      ],
+      "source": {
+        "url": "https://sourceforge.net/projects/libuuid/files/libuuid-1.0.3.tar.gz",
+        "sha256": "46af3275291091009ad7f1b899de3d0cea0252737550e7919d17237997db5644"
+      },
+      "documents": [
+        {
+          "source": "pbs-full",
+          "path": "python/licenses/LICENSE.libuuid.txt"
+        }
+      ]
+    },
+    {
+      "name": "tcl",
+      "version": "9.0.4",
+      "licenses": [
+        "TCL"
+      ],
+      "source": {
+        "url": "https://prdownloads.sourceforge.net/tcl/tcl9.0.4-src.tar.gz",
+        "sha256": "d0aed49230bc02a65c1e0229e65f34590a4b037ec40d546f32573b467f7551ea"
+      },
+      "documents": [
+        {
+          "source": "tcl-source",
+          "path": "tcl9.0.4/license.terms"
+        },
+        {
+          "source": "tcl-source",
+          "path": "tcl9.0.4/library/license.terms"
+        },
+        {
+          "source": "tcl-source",
+          "path": "tcl9.0.4/compat/license.terms"
+        },
+        {
+          "source": "tcl-source",
+          "path": "tcl9.0.4/macosx/license.terms"
+        },
+        {
+          "source": "tcl-source",
+          "path": "tcl9.0.4/libtommath/LICENSE"
+        }
+      ]
+    },
+    {
+      "name": "tk",
+      "version": "9.0.4",
+      "licenses": [
+        "TCL"
+      ],
+      "source": {
+        "url": "https://prdownloads.sourceforge.net/tcl/tk9.0.4-src.tar.gz",
+        "sha256": "d7a146d2917eb8b5cc95276dbf0e3d03c7464d2b19c1675357857c989301dbb4"
+      },
+      "documents": [
+        {
+          "source": "tk-source",
+          "path": "tk9.0.4/license.terms"
+        },
+        {
+          "source": "tk-source",
+          "path": "tk9.0.4/library/license.terms"
+        },
+        {
+          "source": "tk-source",
+          "path": "tk9.0.4/library/demos/license.terms"
+        },
+        {
+          "source": "tk-source",
+          "path": "tk9.0.4/macosx/license.terms"
+        },
+        {
+          "source": "tk-source",
+          "path": "tk9.0.4/unix/license.terms"
+        },
+        {
+          "source": "tk-source",
+          "path": "tk9.0.4/xlib/license.terms"
+        },
+        {
+          "source": "tk-source",
+          "path": "tk9.0.4/xlib/X11/license.terms"
+        }
+      ]
+    },
+    {
+      "name": "itcl",
+      "version": "4.3.8",
+      "licenses": [
+        "TCL"
+      ],
+      "source": {
+        "url": "https://prdownloads.sourceforge.net/tcl/tcl9.0.4-src.tar.gz",
+        "sha256": "d0aed49230bc02a65c1e0229e65f34590a4b037ec40d546f32573b467f7551ea"
+      },
+      "documents": [
+        {
+          "source": "tcl-source",
+          "path": "tcl9.0.4/pkgs/itcl4.3.8/license.terms"
+        },
+        {
+          "source": "tcl-source",
+          "path": "tcl9.0.4/pkgs/itcl4.3.8/doc/license.terms"
+        }
+      ]
+    },
+    {
+      "name": "thread",
+      "version": "3.0.6",
+      "licenses": [
+        "TCL"
+      ],
+      "source": {
+        "url": "https://prdownloads.sourceforge.net/tcl/tcl9.0.4-src.tar.gz",
+        "sha256": "d0aed49230bc02a65c1e0229e65f34590a4b037ec40d546f32573b467f7551ea"
+      },
+      "documents": [
+        {
+          "source": "tcl-source",
+          "path": "tcl9.0.4/pkgs/thread3.0.6/license.terms"
+        }
+      ]
+    }
+  ],
+  "wheelSupplements": {
+    "loguru": {
+      "version": "0.7.3",
+      "wheelSha256": "31a33c10c8e1e10422bfd431aeb5d351c7cf7fa671e3c4df004162264b28220c",
+      "documents": [
+        {
+          "source": "loguru-license",
+          "path": "LICENSE"
+        }
+      ]
+    },
+    "wrenai": {
+      "version": "0.13.0",
+      "wheelSha256": "1cb14927c9a1e1925a7295c2772e5852254c6cc370db640ccc33b6cd04e95dae",
+      "documents": [
+        {
+          "source": "wren-license",
+          "path": "LICENSE-APACHE-2.0"
+        },
+        {
+          "source": "wren-license-map",
+          "path": "LICENSE"
+        }
+      ]
+    },
+    "wren_core_py": {
+      "version": "0.8.0",
+      "wheelSha256": "bd020d7d99d454bc813855954e31b02d9ede8dc55a71555ca5c5701f115d6128",
+      "documents": [
+        {
+          "source": "wren-core-source",
+          "path": "wren_core_py-0.8.0/wren-core/core/LICENSE"
+        },
+        {
+          "source": "wren-core-source",
+          "path": "wren_core_py-0.8.0/wren-core-base/LICENSE"
+        },
+        {
+          "source": "wren-core-source",
+          "path": "wren_core_py-0.8.0/wren-core-base/manifest-macro/LICENSE"
+        }
+      ]
+    }
+  }
+}
