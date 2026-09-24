@@ -44,7 +44,7 @@ try {
   const packedFiles = await tarFiles(packageTarball);
   assertPublishedFiles(packedFiles);
   const packedManifest = await tarJson(packageTarball, "package/package.json");
-  if (packedManifest.dependencies?.["@wrenai/context-loader"] !== "0.1.0") {
+  if (packedManifest.dependencies?.["@wrenai/context-loader"] !== "0.1.1") {
     throw new Error("packed @wrenai/genbi does not retain an exact @wrenai/context-loader version");
   }
 

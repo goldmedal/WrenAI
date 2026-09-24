@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@wrenai/context-loader': link:apps/context-loader
+  '@wrenai/context-loader@0.1.1': link:apps/context-loader
 
 importers:
 
