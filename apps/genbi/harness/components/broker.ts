@@ -22,6 +22,14 @@ export interface ComponentAccess {
   inspect(signal: AbortSignal): Promise<unknown>;
   close(): Promise<void>;
 }
+/** Which host context a step receives: the full prepared snapshot (private zone) or the capability card (public zone). */
+export interface ContextSurface { readonly kind: "snapshot" | "card"; readonly text: string }
+/** The step run as the host's `step` sees it: the assembled prompt plus its named parts for fingerprinting. */
+export type BrokeredStepRun = StepRun & {
+  /** Named prompt parts exactly as assembled into `prompt`, for the per-surface fingerprint (per surface and in total). Absent when a host bypasses the broker. */
+  readonly surfaces?: Readonly<Record<string, string>>;
+  readonly contextKind?: ContextSurface["kind"] | "none";
+};
 export interface ComponentBrokerOptions {
   readonly plan: ExecutionPlan;
   /** Fresh snapshots captured from the same project binding used by prepare(). */
@@ -31,7 +39,13 @@ export interface ComponentBrokerOptions {
   readonly currentIdentity: () => ComponentIdentity | undefined;
   /** Opens the exact model/tool authority represented by the verified host context. */
   readonly prepare: (component: ComponentPlan, identity: ComponentIdentity, signal: AbortSignal) => Promise<ComponentAccess>;
-  readonly step: (run: StepRun, component: ComponentPlan, identity: ComponentIdentity) => Promise<StepResponse>;
+  readonly step: (run: BrokeredStepRun, component: ComponentPlan, identity: ComponentIdentity) => Promise<StepResponse>;
+  /**
+   * Chooses the host context surface for one step. Default: the component's prepared snapshot.
+   * A zone-aware host returns the capability card for public-zone steps so the snapshot never
+   * reaches a public model.
+   */
+  readonly contextSurface?: (component: ComponentPlan, run: StepRun) => ContextSurface | undefined;
   readonly normalize: (component: ComponentPlan, evidence: ComponentEvidence, signal: AbortSignal, context: unknown) => Promise<ComponentInvocationResult>;
   readonly persistRoot?: RunnerHost["persistRoot"];
   /** The egress verification seam; see `RunnerHost.verifyChild`. */
@@ -115,11 +129,14 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
       if (!component || !binding.isCurrent()) throw new Error("Invalid component binding");
       const context = contexts[component.id];
       const render = z.object({ render_blocks: z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict()).optional() }).passthrough().parse(component.declaration.effect ?? {}).render_blocks;
-      const prompt = [run.prompt,
-        context ? `Host semantic context:\n${JSON.stringify(context.snapshot)}` : "",
-        run.terminal && render?.length ? `Render output: Return only one JSON object with a blocks array. Each block has a type and its declared fields. Use only these block contracts (a trailing ? means optional): ${JSON.stringify(render)}. Copy data and definitions only from successful host tool or child results. A KPI label must identify its returned column; do not invent units or deltas. If evidence is insufficient, return {"status":"refused","message":"Insufficient verified data"}.` : "",
-      ].filter(Boolean).join("\n\n");
-      return options.step({ ...run, prompt }, component, identity);
+      const surface = options.contextSurface ? options.contextSurface(component, run)
+        : context ? { kind: "snapshot" as const, text: `Host semantic context:\n${JSON.stringify(context.snapshot)}` } : undefined;
+      const renderText = run.terminal && render?.length ? `Render output: Return only one JSON object with a blocks array. Each block has a type and its declared fields. Use only these block contracts (a trailing ? means optional): ${JSON.stringify(render)}. Copy data and definitions only from successful host tool or child results. A KPI label must identify its returned column; do not invent units or deltas. If evidence is insufficient, return {"status":"refused","message":"Insufficient verified data"}.` : "";
+      const surfaces: Record<string, string> = { prompt: run.prompt };
+      if (surface) surfaces["context"] = surface.text;
+      if (renderText) surfaces["render"] = renderText;
+      const prompt = [run.prompt, surface?.text ?? "", renderText].filter(Boolean).join("\n\n");
+      return options.step({ ...run, prompt, surfaces: Object.freeze(surfaces), contextKind: surface?.kind ?? "none" }, component, identity);
     },
     ...(options.persistRoot ? { persistRoot: options.persistRoot } : {}),
     ...(options.verifyChild ? { verifyChild: options.verifyChild } : {}),

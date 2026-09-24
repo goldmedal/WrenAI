@@ -3,18 +3,20 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
-import { generatePreparedContext, resolveContextLoader } from "../compile/context-loader.js";
+import { fingerprintSurfaces } from "@warble/claude-agent-sdk";
+import { generatePreparedContext, generatePreparedContextAndCatalog, resolveContextLoader } from "../compile/context-loader.js";
 import { hashDirectory } from "../compile/fingerprint.js";
 import { resolveWarbleBinary } from "../compile/resolve-binary.js";
-import type { TraceStep } from "../events/types.js";
+import type { PromptSurfaceRecord, TraceStep } from "../events/types.js";
 import { createAgentEventEmitter } from "../events/emitter.js";
-import { createDefaultProviderRegistry, resolveTierModel, type TierBinding } from "../providers/index.js";
+import { createDefaultProviderRegistry, isZoneAwareBinding, resolveTierModel, resolveTierSpec, type TierBinding } from "../providers/index.js";
 import { deriveAdapterSpec } from "../route/adapter-spec.js";
 import type { InProcessOptions } from "../route/types.js";
 import type { RunAgentResult } from "../session/types.js";
 import { resolveWrenBinary } from "../tools/index.js";
 import { runAiComponentStep } from "./ai-step.js";
-import { createComponentBroker, type ComponentAccess } from "./broker.js";
+import { createComponentBroker, type ComponentAccess, type ContextSurface } from "./broker.js";
+import { buildCapabilityCard, type CapabilityCard } from "./capability-card.js";
 import { verifyEgress } from "./egress.js";
 import { createModelJudge } from "./egress-judge.js";
 import { normalizeComponentEvidence } from "./normalize.js";
@@ -46,7 +48,9 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
   const scratch = await mkdtemp(path.join(os.tmpdir(), "genbi-component-context-"));
   const emitter = createAgentEventEmitter(options.onEvent);
   const traceSteps: TraceStep[] = [];
+  const surfaceRecords: PromptSurfaceRecord[] = [];
   const toolOrder = new Map<string, number>();
+  const zoneAware = isZoneAwareBinding(binding);
   emitter.emit({ kind: "run.start", mode: "A", agentId: entry });
   try {
     signal.throwIfAborted();
@@ -54,8 +58,19 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     const fingerprint = await hashDirectory(project);
     const accessIdentity = await captureWrenAccessIdentity(project);
     const snapshotPath = path.join(scratch, "context.json");
-    await generatePreparedContext(resolveContextLoader().bin, project, snapshotPath);
+    const catalogPath = path.join(scratch, "catalog.json");
+    // A zone-aware run also needs the capability catalog: the card public-zone steps
+    // receive instead of the snapshot. One generator process reads the project once.
+    if (zoneAware) await generatePreparedContextAndCatalog(resolveContextLoader().bin, project, snapshotPath, catalogPath);
+    else await generatePreparedContext(resolveContextLoader().bin, project, snapshotPath);
     const snapshot: unknown = JSON.parse(await readFile(snapshotPath, "utf8"));
+    let card: CapabilityCard | undefined;
+    if (zoneAware) {
+      card = buildCapabilityCard(JSON.parse(await readFile(catalogPath, "utf8")), options.capabilityCard ?? {});
+      if (card.truncated) traceSteps.push({ id: "capability-card", tool: "capability_card", outcome: "success", ordinal: -1,
+        detail: `warning: capability card truncated by the size bound (${card.omittedLines} lines omitted, ${card.bytes} bytes kept)` });
+    }
+    const zoneOf = (component: string, tier: string) => resolveTierSpec(binding, tier, component)?.spec.zone ?? "unbound";
     const checkProject = async () => {
       signal.throwIfAborted();
       await accessIdentity.assertCurrent();
@@ -96,10 +111,23 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
         await resolveWrenBinary();
         return openWrenComponentAccess({ executable: "wren", project, fingerprint, signal: parent, identity: accessIdentity });
       },
+      // Public-zone steps never see the prepared snapshot; they get the card. Private steps get the snapshot as before.
+      ...(card ? { contextSurface: (component, run): ContextSurface | undefined => {
+        if (zoneOf(component.id, run.tier) === "public") return { kind: "card", text: card!.text };
+        const context = contexts[component.id];
+        return context ? { kind: "snapshot", text: `Host semantic context:\n${JSON.stringify(context.snapshot)}` } : undefined;
+      } } : {}),
       async step(run, component) {
         await checkProject();
         const model = models.get(component.id)?.get(run.tier);
         if (!model) throw new Error("Missing component tier binding");
+        const surfaces: Record<string, string> = { ...(run.surfaces ?? { prompt: run.prompt }) };
+        if (plan.systemPrompt) surfaces["system"] = plan.systemPrompt;
+        if (run.brief !== undefined) surfaces["brief"] = run.brief;
+        const fingerprint = fingerprintSurfaces(surfaces);
+        const stepName = plan.components[component.id]?.steps.find((step) => step.prompt === surfaces["prompt"] && step.tier === run.tier)?.name ?? "?";
+        surfaceRecords.push({ component: component.id, step: stepName, tier: run.tier, zone: zoneOf(component.id, run.tier), context: run.contextKind ?? "none",
+          algorithm: fingerprint.algorithm, digest: fingerprint.digest, surfaces: fingerprint.surfaces });
         const result = await runAiComponentStep({ ...run, prompt: [plan.systemPrompt, run.prompt].filter(Boolean).join("\n\n") }, model);
         await checkProject();
         return result;
@@ -131,7 +159,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       const envelope = { blocks: [], verified: false };
       emitter.emit({ kind: "refusal", reason: result.message, envelope });
       emitter.emit({ kind: "run.finish", status: "refusal" });
-      return { kind: "refusal", reason: result.message, envelope, trace: { steps: traceSteps.sort((a, b) => a.ordinal - b.ordinal) } };
+      return { kind: "refusal", reason: result.message, envelope, trace: { steps: traceSteps.sort((a, b) => a.ordinal - b.ordinal), surfaces: surfaceRecords } };
     }
     const value = result.output.kind === "value" ? data.safeParse(result.output.value) : undefined;
     const blocks = result.output.kind === "render" ? result.output.blocks : value?.success
@@ -141,7 +169,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       ...(result.provenance?.definition ? { definition: result.provenance.definition } : {}) };
     emitter.emit({ kind: "answer", envelope });
     emitter.emit({ kind: "run.finish", status: "answer" });
-    return { kind: "answer", envelope, trace: { steps: traceSteps.sort((a, b) => a.ordinal - b.ordinal) } };
+    return { kind: "answer", envelope, trace: { steps: traceSteps.sort((a, b) => a.ordinal - b.ordinal), surfaces: surfaceRecords } };
   } catch (error) {
     emitter.emit({ kind: "error", message: "Component preparation or execution failed." });
     emitter.emit({ kind: "run.finish", status: "error" });

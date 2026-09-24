@@ -1,0 +1,5 @@
+schema_version: 5
+name: card_demo
+catalog: wren
+schema: public
+data_source: duckdb

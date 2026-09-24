@@ -22,12 +22,18 @@
 //!
 //! Both go through the same projection, so the two cannot disagree about what the project says.
 
+mod catalog;
 mod consumers;
 mod impact;
 mod introspect;
 mod lineage;
 mod project;
 
+pub use catalog::{
+    capability_catalog, catalog_document, CapabilityCatalog, CatalogColumn, CatalogCube,
+    CatalogCubeMember, CatalogEnumValue, CatalogModel, CatalogProject, CatalogRelationship,
+    CatalogView, CATALOG_VERSION,
+};
 pub use introspect::{infer_additivity, MdlContext};
 pub use lineage::{cube_id, dashboard_id, dim_id, metric_id, model_id, query_id, rel_id, view_id};
 pub use project::{assemble, KnowledgeRules, LoadError, LoadedProject, ProjectSources};

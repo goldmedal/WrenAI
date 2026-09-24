@@ -34,9 +34,9 @@ describe("zone dry-run", () => {
     expect(dryRun.audits["render"]).toMatchObject({ thinking: "unset" });
     const text = formatZoneDryRun(dryRun);
     expect(text).toContain("gate armed");
-    expect(text).toContain("plan_report.plan_layout  role=caller  tier=plan  key=plan_report/plan  zone=public  anthropic model=claude-sonnet host=api.anthropic.com (adapter default) thinking=unset");
-    expect(text).toContain("answer_batch.generate_sql  role=callee  tier=strong  key=answer_batch/strong  zone=private  openai-compatible model=nvidia/nemotron-3-super host=nim.internal:8443 thinking=on tools=query");
-    expect(text).toContain("answer_batch.resolve_intent  role=callee  tier=cheap  key=cheap  zone=private");
+    expect(text).toContain("plan_report.plan_layout  role=caller  tier=plan  key=plan_report/plan  zone=public  context=card  anthropic model=claude-sonnet host=api.anthropic.com (adapter default) thinking=unset");
+    expect(text).toContain("answer_batch.generate_sql  role=callee  tier=strong  key=answer_batch/strong  zone=private  context=snapshot  openai-compatible model=nvidia/nemotron-3-super host=nim.internal:8443 thinking=on tools=query");
+    expect(text).toContain("answer_batch.resolve_intent  role=callee  tier=cheap  key=cheap  zone=private  context=snapshot");
     expect(text).toContain("plan_report.plan_layout --[ask]--> answer_batch");
     expect(text).toContain("judge  key=judge  zone=private  openai-compatible model=nvidia/nemotron-3-nano host=nim.internal:8443 thinking=off");
     expect(text).toContain("result: ok");

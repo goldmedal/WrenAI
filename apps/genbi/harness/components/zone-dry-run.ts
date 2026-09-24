@@ -15,8 +15,15 @@ export interface ZoneDryRunEdge {
   readonly to: string;
 }
 
+export interface ZoneDryRunOptions {
+  /** The capability card that public-zone steps would receive, when the project is known. */
+  readonly card?: { readonly digest: string; readonly bytes: number; readonly truncated: boolean };
+}
 export interface ZoneDryRun {
   readonly gate: ZoneGateResult;
+  readonly card?: ZoneDryRunOptions["card"];
+  /** Which host context each step would receive: the card on public steps, the snapshot elsewhere. */
+  readonly contexts: Readonly<Record<string, "card" | "snapshot">>;
   readonly audits: Readonly<Record<string, AdapterAudit>>;
   readonly edges: readonly ZoneDryRunEdge[];
   /** 0 when the gate is not armed or found nothing; 1 on any violation. */
@@ -58,14 +65,16 @@ export function auditAdapterSpec(spec: AdapterSpec): AdapterAudit {
 }
 
 /** Evaluates the gate over the plan and collects everything an audit prints; pure, offline. */
-export function describeZoneDryRun(plan: ExecutionPlan, entry: string, binding: TierBinding): ZoneDryRun {
+export function describeZoneDryRun(plan: ExecutionPlan, entry: string, binding: TierBinding, options: ZoneDryRunOptions = {}): ZoneDryRun {
   const gate = evaluateZoneGate(plan, entry, binding);
+  const contexts: Record<string, "card" | "snapshot"> = {};
+  for (const report of gate.steps) contexts[`${report.component}.${report.step}`] = gate.armed && report.zone === "public" ? "card" : "snapshot";
   const audits: Record<string, AdapterAudit> = {};
   for (const report of gate.steps) if (report.key !== undefined && report.spec) audits[report.key] = auditAdapterSpec(report.spec);
   for (const role of gate.roles) if (role.spec) audits[role.key] = auditAdapterSpec(role.spec);
   const edges: ZoneDryRunEdge[] = [];
   for (const report of gate.steps) for (const edge of report.calls) edges.push({ from: `${report.component}.${report.step}`, alias: edge.alias, to: edge.component });
-  return { gate, audits, edges, exitCode: gate.armed && gate.violations.length > 0 ? 1 : 0 };
+  return { gate, ...(options.card ? { card: options.card } : {}), contexts, audits, edges, exitCode: gate.armed && gate.violations.length > 0 ? 1 : 0 };
 }
 
 /** Renders a dry-run as the fixed-width text the CLI prints. */
@@ -79,8 +88,11 @@ export function formatZoneDryRun(dryRun: ZoneDryRun): string {
     const audit = step.key !== undefined ? dryRun.audits[step.key] : undefined;
     const where = audit ? `${audit.adapter} model=${audit.model} host=${audit.endpointHost} thinking=${audit.thinking}` : "(unbound)";
     const tools = step.dataTools.length ? ` tools=${step.dataTools.join(",")}` : "";
-    lines.push(`  ${step.component}.${step.step}  role=${step.role}  tier=${step.tier}  key=${step.key ?? "-"}  zone=${step.zone}  ${where}${tools}`);
+    const context = dryRun.contexts[`${step.component}.${step.step}`] ?? "snapshot";
+    const contextText = context === "card" ? `context=card${dryRun.card ? ` sha256:${dryRun.card.digest}` : ""}` : "context=snapshot";
+    lines.push(`  ${step.component}.${step.step}  role=${step.role}  tier=${step.tier}  key=${step.key ?? "-"}  zone=${step.zone}  ${contextText}  ${where}${tools}`);
   }
+  if (dryRun.card) lines.push(`  capability card: sha256:${dryRun.card.digest} (${dryRun.card.bytes} bytes${dryRun.card.truncated ? ", truncated" : ""}) — sent to public-zone steps only`);
   lines.push("");
   lines.push("call edges");
   if (dryRun.edges.length === 0) lines.push("  (none)");

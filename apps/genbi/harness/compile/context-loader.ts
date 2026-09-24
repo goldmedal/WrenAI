@@ -220,7 +220,20 @@ function findInRepoBuild(): string | undefined {
  * and `harness/exec/local.ts` already use.
  */
 export function generatePreparedContext(bin: string, projectDir: string, outPath: string, signal?: AbortSignal): Promise<void> {
-  const args = [projectDir, "-o", outPath];
+  return runContextLoader(bin, [projectDir, "-o", outPath], signal);
+}
+
+/**
+ * Runs the generator over `projectDir` writing both the prepared-context document (`outPath`) and
+ * the **capability catalog** (`catalogPath`): the authored, descriptive, SQL-free slice of the
+ * project that `buildCapabilityCard` renders for a planner outside the data zone. One process,
+ * one read of the project, so the two documents can never describe different states of it.
+ */
+export function generatePreparedContextAndCatalog(bin: string, projectDir: string, outPath: string, catalogPath: string, signal?: AbortSignal): Promise<void> {
+  return runContextLoader(bin, [projectDir, "-o", outPath, "--catalog-out", catalogPath], signal);
+}
+
+function runContextLoader(bin: string, args: string[], signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     execFile(bin, args, { maxBuffer: 32 * 1024 * 1024, timeout: CONTEXT_LOADER_TIMEOUT_MS, ...(signal ? { signal } : {}) }, (error, stdout, stderr) => {
       if (error) {

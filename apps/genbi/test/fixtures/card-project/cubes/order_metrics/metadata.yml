@@ -1,0 +1,23 @@
+name: order_metrics
+base_object: orders
+properties:
+  description: Revenue and order counts.
+measures:
+  - name: total_revenue
+    expression: SUM(amount)
+    type: DOUBLE
+    properties:
+      description: Sum of order amounts in USD.
+  - name: order_count
+    expression: COUNT(*)
+    type: BIGINT
+dimensions:
+  - name: customer_id
+    expression: customer_id
+    type: INTEGER
+time_dimensions:
+  - name: order_date
+    expression: order_date
+    type: DATE
+    granularities: [day, month, quarter, year]
+    date_range: ["2023-01-01", "2024-12-31"]

@@ -1,0 +1,10 @@
+name: order_lines
+table_reference:
+  catalog: wren
+  schema: public
+  table: order_lines
+columns:
+  - name: order_id
+    type: INTEGER
+  - name: quantity
+    type: INTEGER

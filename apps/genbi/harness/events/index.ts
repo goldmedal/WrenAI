@@ -16,6 +16,7 @@ export type {
   RunStartEvent,
   StepFinishEvent,
   StepStartEvent,
+  PromptSurfaceRecord,
   StepTrace,
   TokenEvent,
   ToolCallEvent,

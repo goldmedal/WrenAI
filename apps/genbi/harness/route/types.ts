@@ -64,6 +64,8 @@ export interface InProcessOptions {
   readonly disclosurePolicy?: DisclosurePolicy;
   /** Hybrid privacy split: binding keys of the judge / render tiers the zone gate checks by role. */
   readonly zoneRoles?: ZoneRoles;
+  /** Hybrid privacy split: size bound for the capability card handed to public-zone steps (default 32 KiB). */
+  readonly capabilityCard?: { readonly maxBytes?: number };
   /** Live-event layer: forwarded to `RunAgentContext.onEvent`. See that field's doc comment. */
   readonly onEvent?: (event: AgentEvent) => void;
   /**

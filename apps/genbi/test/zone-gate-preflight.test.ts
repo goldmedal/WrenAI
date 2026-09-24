@@ -8,7 +8,7 @@ import { ZoneGateError } from "../harness/components/zone-gate.js";
 import { runInProcessDefault } from "../harness/route/in-process.js";
 import { runAiComponentStep } from "../harness/components/ai-step.js";
 import { openWrenComponentAccess } from "../harness/components/wren-access.js";
-import { generatePreparedContext } from "../harness/compile/context-loader.js";
+import { generatePreparedContext, generatePreparedContextAndCatalog } from "../harness/compile/context-loader.js";
 import { createDefaultProviderRegistry } from "../harness/providers/index.js";
 import { policy, reportPlan } from "./zone-fixtures.js";
 
@@ -19,6 +19,10 @@ vi.mock("../harness/components/wren-access.js", async (original) => ({ ...await 
 vi.mock("../harness/tools/index.js", async (original) => ({ ...await original<typeof import("../harness/tools/index.js")>(), resolveWrenBinary: vi.fn() }));
 vi.mock("../harness/compile/context-loader.js", () => ({ resolveContextLoader: () => ({ bin: "synthetic-context-loader" }),
   generatePreparedContext: vi.fn(async (_bin: string, _project: string, output: string) => writeFile(output, JSON.stringify({ context_version: 2, parseable: true }))),
+  generatePreparedContextAndCatalog: vi.fn(async (_bin: string, _project: string, output: string, catalog: string) => {
+    await writeFile(output, JSON.stringify({ context_version: 2, parseable: true }));
+    await writeFile(catalog, JSON.stringify({ catalog_version: 1, project: {}, models: [], relationships: [], cubes: [], views: [] }));
+  }),
 }));
 const created: { adapter: string; config: unknown }[] = [];
 vi.mock("../harness/providers/index.js", async (original) => {
@@ -47,6 +51,7 @@ describe("zone gate runs before any model, tool or session starts", () => {
       })).rejects.toThrow(ZoneGateError);
       expect(created).toEqual([]);
       expect(vi.mocked(generatePreparedContext)).not.toHaveBeenCalled();
+      expect(vi.mocked(generatePreparedContextAndCatalog)).not.toHaveBeenCalled();
       expect(vi.mocked(openWrenComponentAccess)).not.toHaveBeenCalled();
       expect(vi.mocked(runAiComponentStep)).not.toHaveBeenCalled();
     } finally { await rm(project, { recursive: true, force: true }); }
