@@ -2,7 +2,7 @@ import type { AuthChoice } from "../auth/index.js";
 import type { Bundle } from "../bundle/schema.js";
 import type { Deployment } from "../compliance/index.js";
 import type { AgentEvent } from "../events/index.js";
-import type { AdapterSpec } from "../providers/index.js";
+import type { AdapterSpec, DisclosurePolicy, ZoneRoles } from "../providers/index.js";
 import type { RunAgentResult } from "../session/index.js";
 import type { McpServerConfigMap } from "../tools/index.js";
 import type { ResolvedCli } from "./agent-sdk-cli.js";
@@ -55,6 +55,15 @@ export interface InProcessOptions {
    * coverage is total-or-loud-fail.
    */
   readonly tierBinding?: Readonly<Record<string, AdapterSpec>>;
+  /**
+   * Hybrid privacy split: the egress disclosure policy the verification step
+   * enforces on every callee result before a caller sees it. Its presence
+   * arms the zone gate (see `components/zone-gate.ts`) and requires
+   * `zoneRoles.judge`.
+   */
+  readonly disclosurePolicy?: DisclosurePolicy;
+  /** Hybrid privacy split: binding keys of the judge / render tiers the zone gate checks by role. */
+  readonly zoneRoles?: ZoneRoles;
   /** Live-event layer: forwarded to `RunAgentContext.onEvent`. See that field's doc comment. */
   readonly onEvent?: (event: AgentEvent) => void;
   /**
@@ -245,6 +254,10 @@ export interface RouteOptions {
   readonly mcpServers?: McpServerConfigMap;
   /** In-process only (hybrid mode); see `InProcessOptions.tierBinding`. `route()` rejects this alongside a `subscription` authChoice. */
   readonly tierBinding?: Readonly<Record<string, AdapterSpec>>;
+  /** In-process only; see `InProcessOptions.disclosurePolicy`. */
+  readonly disclosurePolicy?: DisclosurePolicy;
+  /** In-process only; see `InProcessOptions.zoneRoles`. */
+  readonly zoneRoles?: ZoneRoles;
   /** Dispatched only (hybrid mode); see `DispatchedOptions.modelsConfig`. `route()` rejects this alongside a non-`subscription` authChoice. */
   readonly modelsConfig?: string;
   /** Live-event layer: forwarded to whichever mode executor runs. See `InProcessOptions.onEvent`/`DispatchedOptions.onEvent`. */

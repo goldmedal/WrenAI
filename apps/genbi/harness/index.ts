@@ -30,10 +30,17 @@ export {
   createMockAdapter,
   createOpenAICompatibleAdapter,
   createProviderRegistry,
+  isZoneAwareBinding,
   MOCK_ADAPTER_ID,
   OPENAI_COMPATIBLE_ADAPTER_ID,
+  parseDisclosurePolicy,
+  parseTierBindingDocument,
+  readTierBindingFile,
   resolveStepModel,
   resolveTierModel,
+  resolveTierSpec,
+  tierBindingKey,
+  TierBindingParseError,
   UnknownAdapterError,
   UnknownTierError,
 } from "./providers/index.js";
@@ -41,11 +48,20 @@ export type {
   AdapterFactory,
   AdapterSpec,
   AnthropicAdapterConfig,
+  AnswerShape,
+  DisclosurePolicy,
   MockAdapterConfig,
   OpenAICompatibleAdapterConfig,
   ProviderRegistry,
   TierBinding,
+  TierBindingDocument,
+  Zone,
+  ZoneRoles,
 } from "./providers/index.js";
+export { assertZoneGate, evaluateZoneGate, reachableMounts, ZoneGateError } from "./components/zone-gate.js";
+export type { ZoneGateResult, ZoneGateViolation, ZoneStepReport } from "./components/zone-gate.js";
+export { describeZoneDryRun, formatZoneDryRun } from "./components/zone-dry-run.js";
+export type { ZoneDryRun } from "./components/zone-dry-run.js";
 
 export {
   AgentScopeError,

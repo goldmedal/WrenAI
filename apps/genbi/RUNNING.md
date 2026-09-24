@@ -117,6 +117,64 @@ says so plainly if it finds none. Setting them pins the choice for boot, worth
 doing only when more than one is installed. Either way it is just the pre-Setup
 default: once Setup saves an explicit runtime, that takes over.
 
+## Zone-aware tier binding (hybrid privacy split)
+
+In-process runs can bind each model tier to a deployment **zone**, `private` or
+`public`. A zone is a fact the operator declares about where a model runs; the
+harness never infers it from an endpoint host, a model id or an adapter kind.
+Bindings are keyed on `(mount, tier)`: a `"<mount>/<tier>"` key wins for that one
+component, a bare `"<tier>"` key is the shared default, and a flat map with no
+`/` keys is still a complete binding, so nothing existing changes shape.
+
+```bash
+wren-harness "annual revenue report" --project /path/to/project \
+  --mode api-key --adapter anthropic \
+  --tier-binding ./tier-binding.json
+```
+
+```json
+{
+  "tiers": {
+    "plan_report/plan":    { "adapter": "anthropic", "config": { "model": "claude-sonnet" }, "zone": "public" },
+    "answer_query/strong": { "adapter": "openai-compatible", "zone": "private",
+                             "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-super-120b-a12b",
+                                         "extraBody": { "chat_template_kwargs": { "enable_thinking": true } } } },
+    "cheap":               { "adapter": "openai-compatible", "zone": "private",
+                             "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-nano-30b-a3b" } },
+    "judge":               { "adapter": "openai-compatible", "zone": "private",
+                             "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-nano-30b-a3b" } }
+  },
+  "disclosure_policy": { "max_rows": 50, "min_group_size": 5, "sensitive_column_patterns": ["email", "phone"] },
+  "roles": { "judge": "judge" }
+}
+```
+
+`extraBody` is merged into every request the `openai-compatible` adapter sends,
+for serving runtimes whose switches live in the body (Nemotron's reasoning
+toggle above). `--tier-adapter` accepts the same `zone=` field and the same
+`<mount>/<tier>` names; the two flags are mutually exclusive.
+
+Any `zone`, `disclosure_policy` or `roles` in the binding **arms the zone gate**,
+a pure check that runs before any model, tool or child session starts and fails
+loudly instead of degrading: every step of a callee component and every step
+holding a data tool must resolve to `private`; so must the `judge` and `render`
+role tiers; a zone-relevant tier without a `zone` is rejected; a
+`disclosure_policy` without a `judge` role is rejected. A caller step with no
+data tools may be `public`. A binding with no zone information anywhere is the
+pre-existing single-zone binding and is not gated.
+
+Audit a binding without running anything:
+
+```bash
+wren-harness "unused" --project /path/to/project --mode api-key --adapter anthropic \
+  --tier-binding ./tier-binding.json --zone-dry-run
+```
+
+It compiles the profile, prints every step's component, tier, binding key, zone,
+adapter, model, endpoint host and thinking setting, every alias call edge, the
+role tiers and the gate verdict, then exits `0` (ok) or `1` (violation). No
+model is constructed, no network connection is opened and no credential is read.
+
 ## The UI
 
 In a second terminal:

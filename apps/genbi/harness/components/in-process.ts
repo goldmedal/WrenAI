@@ -8,7 +8,7 @@ import { hashDirectory } from "../compile/fingerprint.js";
 import { resolveWarbleBinary } from "../compile/resolve-binary.js";
 import type { TraceStep } from "../events/types.js";
 import { createAgentEventEmitter } from "../events/emitter.js";
-import { createDefaultProviderRegistry, resolveTierModel } from "../providers/index.js";
+import { createDefaultProviderRegistry, resolveTierModel, type TierBinding } from "../providers/index.js";
 import { deriveAdapterSpec } from "../route/adapter-spec.js";
 import type { InProcessOptions } from "../route/types.js";
 import type { RunAgentResult } from "../session/types.js";
@@ -19,19 +19,32 @@ import { normalizeComponentEvidence } from "./normalize.js";
 import { planDigest } from "./plan.js";
 import { ComponentRunner, type ExecutionPlan } from "./runner.js";
 import { captureWrenAccessIdentity, openWrenComponentAccess } from "./wren-access.js";
+import { assertZoneGate } from "./zone-gate.js";
 
 const data = z.object({ columns: z.array(z.string()), rows: z.array(z.record(z.string(), z.unknown())) });
 
 /** Executable format 0.2 path; never flattened into the legacy agent tool union. */
 export async function runInProcessComponents(plan: ExecutionPlan, options: InProcessOptions): Promise<RunAgentResult> {
   if (options.mcpServers) throw new Error("Composed execution requires component-owned host bindings");
+  const entry = options.agentId ?? "answer_query";
+  // The binding is fixed and gated here, before any scratch state, context
+  // generation, provider construction or child process exists. A rejected
+  // binding therefore produces none of them.
+  const binding: TierBinding = {
+    tiers: structuredClone(options.tierBinding ?? Object.fromEntries(
+      Object.values(plan.components).flatMap((component) => component.steps.map((step) => [step.tier,
+        deriveAdapterSpec(options.authChoice, options.model ? { model: options.model } : {})])),
+    )),
+    ...(options.disclosurePolicy !== undefined ? { disclosurePolicy: structuredClone(options.disclosurePolicy) } : {}),
+    ...(options.zoneRoles !== undefined ? { roles: structuredClone(options.zoneRoles) } : {}),
+  };
+  assertZoneGate(plan, entry, binding);
   const controller = new AbortController();
   const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
   const scratch = await mkdtemp(path.join(os.tmpdir(), "genbi-component-context-"));
   const emitter = createAgentEventEmitter(options.onEvent);
   const traceSteps: TraceStep[] = [];
   const toolOrder = new Map<string, number>();
-  const entry = options.agentId ?? "answer_query";
   emitter.emit({ kind: "run.start", mode: "A", agentId: entry });
   try {
     signal.throwIfAborted();
@@ -53,19 +66,16 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       return [component.id, { binding, snapshot }];
     }));
     const registry = createDefaultProviderRegistry();
-    const tiers = structuredClone(options.tierBinding ?? Object.fromEntries(
-      Object.values(plan.components).flatMap((component) => component.steps.map((step) => [step.tier,
-        deriveAdapterSpec(options.authChoice, options.model ? { model: options.model } : {})])),
-    ));
-    const identity = { session: randomUUID(), vendor: "in-process", account: planDigest(tiers), generation: randomUUID(),
+    const identity = { session: randomUUID(), vendor: "in-process", account: planDigest(binding), generation: randomUUID(),
       project, bindingRevision: planDigest([fingerprint, accessIdentity.digest]), contextDigest: planDigest(contexts), planDigest: plan.identity };
     const models = new Map<string, Map<string, ReturnType<typeof resolveTierModel>>>();
     const broker = createComponentBroker({ plan, contexts, verifierBinary: await resolveWarbleBinary(options.warbleBin),
       identity, currentIdentity: () => signal.aborted ? undefined : identity,
       async prepare(component, _identity, parent): Promise<ComponentAccess> {
         await checkProject();
+        // Keyed on (mount, tier): a caller and callee sharing a tier name can bind different models.
         models.set(component.id, new Map([...new Set(component.steps.map((step) => step.tier))]
-          .map((tier) => [tier, resolveTierModel({ tiers }, tier, registry)])));
+          .map((tier) => [tier, resolveTierModel(binding, tier, registry, component.id)])));
         if (component.steps.every((step) => step.tools.length === 0)) return {
           async query() { throw new Error("No query grant"); }, async inspect() { throw new Error("No context grant"); }, async close() {},
         };

@@ -2,6 +2,7 @@ import { detectAndPick } from "./auth/index.js";
 import type { AuthChoice, LoginProbe } from "./auth/index.js";
 import type { Deployment } from "./compliance/index.js";
 import type { AdapterSpec } from "./providers/index.js";
+import { ZONES, type Zone } from "./providers/index.js";
 import { deriveAdapterSpec } from "./route/adapter-spec.js";
 import type { RouteResult } from "./route/types.js";
 
@@ -28,6 +29,10 @@ export interface CliFlags {
   readonly tierAdapters?: readonly string[];
   /** Hybrid mode, dispatched: `--models-config <path>`, forwarded verbatim to `warble-agent-sdk chat`. */
   readonly modelsConfig?: string;
+  /** Hybrid privacy split, in-process: `--tier-binding <path>`, a JSON tier binding document (tiers + disclosure_policy + roles). */
+  readonly tierBindingFile?: string;
+  /** In-process: `--zone-dry-run` prints the zone audit of the composed plan and exits without running a model. */
+  readonly zoneDryRun?: boolean;
   /** Dispatched only: `--chat-timeout-ms <n>`, overrides `spawnChat`'s default 10-minute hang guard. See `DispatchedOptions.chatTimeoutMs`. */
   readonly chatTimeoutMs?: number;
 }
@@ -226,13 +231,16 @@ export function buildGatewayConfig(flags: CliFlags): Record<string, unknown> | u
 
 /** One parsed `--tier-adapter` entry, before it's turned into an `AdapterSpec`. */
 interface ParsedTierAdapterFlag {
+  /** A bare tier name or a mount-qualified `<mount>/<tier>` key. */
   readonly tier: string;
   readonly mode: string;
   readonly fields: Pick<CliFlags, "adapter" | "apiKey" | "model" | "endpoint">;
+  /** The deployment zone declared for this tier, when the entry carries `zone=`. */
+  readonly zone?: Zone;
 }
 
 const TIER_ADAPTER_ALLOWED_MODES = new Set(["api-key", "local", "gateway"]);
-const TIER_ADAPTER_ALLOWED_FIELDS = new Set(["adapter", "apiKey", "model", "endpoint"]);
+const TIER_ADAPTER_ALLOWED_FIELDS = new Set(["adapter", "apiKey", "model", "endpoint", "zone"]);
 
 /**
  * Parses one hybrid-mode `--tier-adapter <tier>=<mode>[:<field>=<value>,...]`
@@ -262,7 +270,12 @@ export function parseTierAdapterFlag(raw: string): ParsedTierAdapterFlag {
     );
   }
 
+  if (tier.startsWith("/") || tier.endsWith("/") || tier.split("/").length > 2) {
+    throw new CliUsageError(`--tier-adapter "${raw}": tier must be "<tier>" or "<mount>/<tier>", got "${tier}"`);
+  }
+
   const fields: Record<string, string> = {};
+  let zone: Zone | undefined;
   if (fieldsRaw.length > 0) {
     for (const pair of fieldsRaw.split(",")) {
       const pairEq = pair.indexOf("=");
@@ -272,14 +285,22 @@ export function parseTierAdapterFlag(raw: string): ParsedTierAdapterFlag {
       const key = pair.slice(0, pairEq);
       if (!TIER_ADAPTER_ALLOWED_FIELDS.has(key)) {
         throw new CliUsageError(
-          `--tier-adapter "${raw}": unknown field "${key}" (allowed: adapter, apiKey, model, endpoint)`,
+          `--tier-adapter "${raw}": unknown field "${key}" (allowed: adapter, apiKey, model, endpoint, zone)`,
         );
       }
-      fields[key] = pair.slice(pairEq + 1);
+      const value = pair.slice(pairEq + 1);
+      if (key === "zone") {
+        if (!(ZONES as readonly string[]).includes(value)) {
+          throw new CliUsageError(`--tier-adapter "${raw}": zone must be one of ${ZONES.join("|")}, got "${value}"`);
+        }
+        zone = value as Zone;
+        continue;
+      }
+      fields[key] = value;
     }
   }
 
-  return { tier, mode, fields };
+  return { tier, mode, fields, ...(zone !== undefined ? { zone } : {}) };
 }
 
 /**
@@ -296,7 +317,7 @@ export function parseTierAdapterFlag(raw: string): ParsedTierAdapterFlag {
 export function buildTierBindingFromFlags(raw: readonly string[]): Record<string, AdapterSpec> {
   const tiers: Record<string, AdapterSpec> = {};
   for (const entry of raw) {
-    const { tier, mode, fields } = parseTierAdapterFlag(entry);
+    const { tier, mode, fields, zone } = parseTierAdapterFlag(entry);
     if (tier in tiers) {
       throw new CliUsageError(`--tier-adapter names tier "${tier}" more than once`);
     }
@@ -305,7 +326,8 @@ export function buildTierBindingFromFlags(raw: readonly string[]): Record<string
         AuthChoice,
         { mode: "api-key" | "local" | "gateway" }
       >; // `mode` was already restricted to api-key|local|gateway above, so this is never "subscription".
-      tiers[tier] = deriveAdapterSpec(authChoice, fields.model !== undefined ? { model: fields.model } : {});
+      const spec = deriveAdapterSpec(authChoice, fields.model !== undefined ? { model: fields.model } : {});
+      tiers[tier] = zone !== undefined ? { ...spec, zone } : spec;
     } catch (error) {
       throw new CliUsageError(`--tier-adapter "${entry}": ${error instanceof Error ? error.message : String(error)}`);
     }

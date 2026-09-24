@@ -3,7 +3,8 @@ import path from "node:path";
 import { createDefaultCapabilityRegistry } from "../capability/registry.js";
 import { createLocalExecutionEnv } from "../exec/index.js";
 import { deriveEnforcement } from "../guardrails/index.js";
-import { createDefaultProviderRegistry } from "../providers/index.js";
+import { createDefaultProviderRegistry, isZoneAwareBinding, resolveTierSpec, type TierBinding } from "../providers/index.js";
+import { ZoneGateError, type ZoneGateViolation } from "../components/zone-gate.js";
 import { runAgent } from "../session/index.js";
 import type { RunAgentResult } from "../session/index.js";
 import { createWrenNativeToolRegistry, resolveWrenBinary } from "../tools/index.js";
@@ -19,16 +20,48 @@ const ANSWER_QUERY_AGENT_ID = "answer_query";
 /** Operator-wide override for `resolveArtifactsDir`'s default, e.g. for a long-running BFF process. */
 const ARTIFACTS_DIR_ENV_VAR = "WREN_HARNESS_ARTIFACTS_DIR";
 
-/** Projects a bundle-wide validated map onto the component selected for one turn. */
+/**
+ * Projects a bundle-wide validated map onto the component selected for one
+ * turn, keyed on (mount, tier): an `<agent.id>/<tier>` entry wins over the
+ * bare tier entry, so the same tier name can bind a different model per mount.
+ */
 export function filterTierBindingForAgent(
-  agent: { readonly steps: readonly { readonly tier: string }[] },
+  agent: { readonly id?: string; readonly steps: readonly { readonly tier: string }[] },
   tierBinding: Readonly<Record<string, import("../providers/index.js").AdapterSpec>>,
 ): Readonly<Record<string, import("../providers/index.js").AdapterSpec>> {
+  const binding: TierBinding = { tiers: tierBinding };
   return Object.fromEntries(
     [...new Set(agent.steps.map((step) => step.tier))]
-      .filter((tier) => tierBinding[tier] !== undefined)
-      .map((tier) => [tier, tierBinding[tier]!]),
+      .map((tier) => [tier, resolveTierSpec(binding, tier, agent.id)?.spec] as const)
+      .filter((entry): entry is readonly [string, import("../providers/index.js").AdapterSpec] => entry[1] !== undefined),
   );
+}
+
+/**
+ * The legacy (single-agent, IR 0.6) path has no caller/callee split: every
+ * step, and the render stage, sees rows. So a zone-aware binding on this path
+ * must be all-private; a `public` or unset zone on any tier the agent (or its
+ * render stage) uses is a loud failure, the same posture as the composed gate.
+ */
+export function assertLegacyZoneBinding(
+  agent: { readonly id: string; readonly steps: readonly { readonly tier: string; readonly realization: { readonly kind: string } }[] },
+  binding: TierBinding,
+  renderTier: string | undefined,
+): void {
+  if (!isZoneAwareBinding(binding)) return;
+  const violations: ZoneGateViolation[] = [];
+  const check = (tier: string, what: string): void => {
+    const resolved = resolveTierSpec(binding, tier, agent.id);
+    const zone = resolved?.spec.zone ?? "unbound";
+    if (!resolved) violations.push({ code: "unbound_tier", component: agent.id, tier, zone, message: `${what} (tier ${tier}) has no binding entry` });
+    else if (zone === "unbound") violations.push({ code: "missing_zone", component: agent.id, tier, zone, message: `${what} (tier ${tier}) sees project data but binding entry "${resolved.key}" declares no zone` });
+    else if (zone !== "private") violations.push({ code: "data_step_public", component: agent.id, tier, zone, message: `${what} (tier ${tier}) sees project data but binding entry "${resolved.key}" is zone: ${zone}; it must be private` });
+  };
+  for (const step of agent.steps) check(step.tier, `step ${agent.id}.${step.tier}`);
+  const independent = agent.steps.filter((step) => step.realization.kind === "independent");
+  const render = renderTier ?? independent[independent.length - 1]?.tier;
+  if (render !== undefined) check(render, `render stage of ${agent.id}`);
+  if (violations.length > 0) throw new ZoneGateError(violations);
 }
 
 /**
@@ -90,6 +123,13 @@ export async function runInProcessDefault(options: InProcessOptions): Promise<Ru
   // here; `buildHybridTierBinding` intentionally rejects tiers used solely by
   // another component.
   const agentTierBinding = options.tierBinding === undefined ? undefined : filterTierBindingForAgent(agent, options.tierBinding);
+  if (options.tierBinding !== undefined || options.disclosurePolicy !== undefined || options.zoneRoles !== undefined) {
+    assertLegacyZoneBinding(agent, {
+      tiers: options.tierBinding ?? {},
+      ...(options.disclosurePolicy !== undefined ? { disclosurePolicy: options.disclosurePolicy } : {}),
+      ...(options.zoneRoles !== undefined ? { roles: options.zoneRoles } : {}),
+    }, undefined);
+  }
   const binding =
     options.tierBinding !== undefined
       ? buildHybridTierBinding(agent, agentTierBinding!)
