@@ -41,7 +41,7 @@ describe("installed-package and vendor-contract CI wiring", () => {
   });
 
   it("pins the context loader exactly and runs its no-checkout acceptance on the certified macOS target", () => {
-    expect(packageJson.dependencies["@wrenai/context-loader"]).toBe("0.1.0");
+    expect(packageJson.dependencies["@wrenai/context-loader"]).toBe("0.1.1");
     const workflow = readFileSync(path.join(repositoryRoot, ".github", "workflows", "genbi-ci.yml"), "utf8");
     expect(workflow).toContain("macOS packed-install context-loader acceptance");
     expect(workflow).toContain("runs-on: macos-14");
