@@ -94,7 +94,7 @@ try {
     ok: true,
     checks: [
       { name: "tarball excludes checkout-only scripts, tests, fixtures, and examples", ok: true },
-      { name: "fresh installed package rejects its staged managed-Wren manifest by default, then provisions only exact local fixture mirror bytes without checkout, ambient Python, or index resolution", ok: true },
+      { name: "fresh installed package keeps readiness offline, rejects altered approval bytes, then provisions exact local fixture bytes without checkout, ambient Python, or index resolution", ok: true },
       { name: "fresh install launches through npx with package-manager PATH", ok: true },
       { name: "installed Codex driver handles deterministic command events while the production backend remains unavailable", ok: true },
       { name: "first-run Setup connect terminal flow works without checkout access or development escapes", ok: true },
@@ -226,22 +226,35 @@ async function verifyInstalledProjectBind({ installRoot, workspaceRoot, sourceAu
 }
 
 /**
- * Runner-only fixture seam: production sees the packaged staged manifest and
- * fails closed. This mutates only the disposable npm installation, while the
- * installed module still derives its own package root and accepts no env
+ * Runner-only fixture seam: the packaged approval anchor cannot make readiness
+ * provision a runtime, and altered approval bytes must fail closed. This mutates
+ * only the disposable npm installation, while the installed module still derives its own package root and accepts no env
  * selector for artifacts or interpreters.
  */
 async function verifyInstalledManagedWrenProvision({ installRoot, installedPackageRoot, sourceAuditHook, workspaceRoot: selectedWorkspaceRoot, port: selectedPort, fixtureEndpoint, tempRoot: selectedTempRoot }) {
   const manifestPath = path.join(installedPackageRoot, "managed-wren", "manifest.json");
   const packaged = JSON.parse(await readFile(manifestPath, "utf8"));
-  if (packaged.activation !== "staged" || packaged.licenseApproval?.state !== "pending") throw new Error("packed managed-Wren manifest unexpectedly enables provisioning by default");
+  if (packaged.activation !== "staged" || packaged.licenseApproval?.state !== "pending") throw new Error("packed managed-Wren manifest must retain its approval-fetch boundary");
   const requestedRuntimeRoot = path.join(installRoot, "managed-wren-runtime");
   await mkdir(requestedRuntimeRoot, { mode: 0o700 });
   const runtimeRoot = await realpath(requestedRuntimeRoot);
   const moduleUrl = pathToFileURL(path.join(installedPackageRoot, "dist-server", "server", "managed-wren-runtime.js")).href;
   const childEnv = controlledEnvironment({ installRoot, workspaceRoot: selectedWorkspaceRoot, port: selectedPort, sourceAuditHook, fixtureEndpoint });
-  const defaultProbe = await run(process.execPath, ["--input-type=module", "--eval", `import { provisionManagedWrenRuntime } from ${JSON.stringify(moduleUrl)}; try { await provisionManagedWrenRuntime({ runtimeRoot: ${JSON.stringify(runtimeRoot)} }); process.exitCode = 9; } catch (error) { console.log(error?.code ?? "unknown"); }`], { cwd: installRoot, env: childEnv });
+  const defaultProbe = await run(process.execPath, ["--input-type=module", "--eval", `import { resolveManagedWrenRuntime } from ${JSON.stringify(moduleUrl)}; globalThis.fetch = () => { throw new Error("readiness must not fetch"); }; try { resolveManagedWrenRuntime({ runtimeRoot: ${JSON.stringify(runtimeRoot)} }); process.exitCode = 9; } catch (error) { console.log(error?.code ?? "unknown"); }`], { cwd: installRoot, env: childEnv });
   if (defaultProbe.stdout.trim() !== "codex_wren_runtime_unprovisioned") throw new Error(`staged installed manifest did not fail closed: ${defaultProbe.stdout}${defaultProbe.stderr}`);
+
+  if (packaged.approvedManifest) {
+    const badApproval = await run(process.execPath, ["--input-type=module", "--eval", `
+      import assert from "node:assert/strict";
+      import { provisionManagedWrenRuntime } from ${JSON.stringify(moduleUrl)};
+      const calls = [];
+      globalThis.fetch = async url => { calls.push(String(url)); return new Response("altered approval bytes"); };
+      await assert.rejects(provisionManagedWrenRuntime({ runtimeRoot: ${JSON.stringify(runtimeRoot)} }), { code: "codex_wren_manifest_invalid" });
+      assert.deepEqual(calls, [${JSON.stringify(packaged.approvedManifest.url)}]);
+      console.log("altered-approval-rejected");
+    `], { cwd: installRoot, env: childEnv });
+    if (badApproval.stdout.trim() !== "altered-approval-rejected") throw new Error("installed approval anchor did not reject altered bytes");
+  }
 
   const fixture = await managedWrenFixture(selectedTempRoot);
   await writeFile(manifestPath, JSON.stringify(fixture.manifest), { mode: 0o600 });
