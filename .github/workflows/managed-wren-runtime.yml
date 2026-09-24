@@ -49,7 +49,6 @@ jobs:
           python apps/genbi/scripts/managed-wren-release.py wheels
           curl --fail --location --proto '=https' --tlsv1.2 -o release/python.tar.gz "$PYTHON_URL"
           test "$(shasum -a 256 release/python.tar.gz | awk '{print $1}')" = "$PYTHON_SHA256"
-          /usr/bin/tar -tzf release/python.tar.gz | python apps/genbi/scripts/managed-wren-release.py pbs > release/pbs-license-inventory.json
           /usr/bin/tar -xpzf release/python.tar.gz -C release/runtime
           /bin/chmod 700 release/runtime
           node apps/genbi/scripts/managed-wren-release.mjs prepare-python release/runtime/python
@@ -57,6 +56,8 @@ jobs:
           python apps/genbi/scripts/managed-wren-release.py requirements
           release/runtime/venv/bin/python -m pip install --no-index --no-deps --require-hashes --find-links release/wheels -r release/requirements.txt
           node apps/genbi/scripts/managed-wren-release.mjs release "$RUNTIME_TAG"
+          python apps/genbi/scripts/managed-wren-release-licenses.py
+          node apps/genbi/scripts/managed-wren-release.mjs prepare-notices release
       - uses: actions/upload-artifact@v4
         with:
           name: managed-wren-review-metadata

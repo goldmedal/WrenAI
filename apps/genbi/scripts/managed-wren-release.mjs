@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { runtimeTreeDigest, preparePythonTree } from "../managed-wren/runtime-tree.cjs";
 
+import { validateLicenseEvidence, noticesDigest, verifyNotices } from "./managed-wren-release-notices.mjs";
+
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const stableJson = (value) => Array.isArray(value) ? "[" + value.map(stableJson).join(",") + "]" : value && typeof value === "object" ? "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + stableJson(value[key])).join(",") + "}" : JSON.stringify(value);
@@ -83,7 +85,7 @@ async function generate(output, runtimeTag) {
   const closureSha256 = digest(wheels.map((wheel) => wheel.filename + "\0" + wheel.sha256).sort().join("\n"));
   const manifest = { schema: 1, activation: "staged", platform: "darwin-arm64", compatibility: { genbi: inputs.compatibility.genbi, profile: inputs.compatibility.profile, wren: inputs.wrenai.version }, python: { implementation: "cpython", version: inputs.python.version, upstream: { release: inputs.python.release, url: inputs.python.url, sha256: inputs.python.sha256 }, mirror: { url: "https://github.com/goldmedal/WrenAI/releases/download/" + runtimeTag + "/" + inputs.python.filename, sha256: inputs.python.sha256 }, interpreterPath: "python/bin/python3.11" }, wheels, runtime: { pythonArchivePath: "python.tar.gz", venvInterpreterPath: "venv/bin/python", launcherPath: "venv/bin/wren", module: "wren.cli:app", packagePath: "venv/lib/python3.11/site-packages/wren", sitePackagesPath: "venv/lib/python3.11/site-packages", pythonTreeSha256, packageTreeSha256, sitePackagesTreeSha256, closureSha256 }, licenseApproval: { state: "pending" } };
   verifyExactPublishInventory(manifest, wheelInputs);
-  const inventory = { schema: 1, status: "pending-explicit-approval", components: [{ name: "python-build-standalone", version: "cpython-" + inputs.python.release, declaredLicense: "MPL-2.0", artifact: inputs.python.filename }, { name: "CPython", version: inputs.python.version, declaredLicense: "PSF-2.0", artifact: inputs.python.filename }, ...wheels.map((wheel) => ({ name: wheel.distribution, version: wheel.version, declaredLicense: wheelLicenses.get(wheel.filename) ?? "UNKNOWN", artifact: wheel.filename }))], note: "The protected release environment must approve the completed expanded wheel and bundled-library inventory before public assets or an approved manifest can be emitted." };
+  const inventory = { schema: 1, status: "pending-explicit-approval", components: [{ name: "python-build-standalone", version: "cpython-" + inputs.python.release, declaredLicense: "See exact bundled component license inventory", artifact: inputs.python.filename }, { name: "CPython", version: inputs.python.version, declaredLicense: "PSF-2.0", artifact: inputs.python.filename }, ...wheels.map((wheel) => ({ name: wheel.distribution, version: wheel.version, declaredLicense: wheelLicenses.get(wheel.filename) ?? "UNKNOWN", artifact: wheel.filename }))], note: "The protected release environment must approve the completed expanded wheel and bundled-library inventory before public assets or an approved manifest can be emitted." };
   const provenance = { schema: 1, inputs, selectedWheels: wheelInputs, stagedManifestSha256: digest(stableJson(manifest)), generatedAt: new Date().toISOString() };
   await mkdir(output, { recursive: true, mode: 0o700 });
   await writeFile(path.join(output, "managed-wren-manifest.candidate.json"), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o600 });
@@ -103,11 +105,28 @@ async function main() {
     validateRuntimeTag(args[0]);
     return;
   }
+  if (command === "prepare-notices") {
+    const [reviewDirectory] = args;
+    if (!reviewDirectory || args.length !== 1) throw new Error("usage: managed-wren-release.mjs prepare-notices <review-directory>");
+    const candidate = JSON.parse(await readFile(path.join(reviewDirectory, "managed-wren-manifest.candidate.json"), "utf8"));
+    const pbs = JSON.parse(await readFile(path.join(reviewDirectory, "pbs-license-inventory.json"), "utf8"));
+    const wheels = JSON.parse(await readFile(path.join(reviewDirectory, "wheel-license-inventory.json"), "utf8"));
+    validateLicenseEvidence(candidate, pbs, wheels);
+    const hash = noticesDigest(pbs, wheels);
+    pbs.noticesSha256 = hash; wheels.noticesSha256 = hash;
+    await writeFile(path.join(reviewDirectory, "pbs-license-inventory.json"), JSON.stringify(pbs, null, 2) + "\n");
+    await writeFile(path.join(reviewDirectory, "wheel-license-inventory.json"), JSON.stringify(wheels, null, 2) + "\n");
+    return;
+  }
   if (command === "verify-publish") {
     const [reviewDirectory, assetsDirectory] = args; if (!reviewDirectory || !assetsDirectory) throw new Error("usage: managed-wren-release.mjs verify-publish <review-directory> <assets-directory>");
     const candidate = JSON.parse(await readFile(path.join(reviewDirectory, "managed-wren-manifest.candidate.json"), "utf8"));
     const wheelInputs = JSON.parse(await readFile(path.join(reviewDirectory, "wheel-inputs.json"), "utf8"));
+    const pbs = JSON.parse(await readFile(path.join(reviewDirectory, "pbs-license-inventory.json"), "utf8"));
+    const wheels = JSON.parse(await readFile(path.join(reviewDirectory, "wheel-license-inventory.json"), "utf8"));
+    const notices = verifyNotices(candidate, pbs, wheels);
     await refetchExactPublishAssets(candidate, wheelInputs, assetsDirectory);
+    await writeFile(path.join(assetsDirectory, "THIRD_PARTY_NOTICES.txt"), notices, { mode: 0o600, flag: "wx" });
     await writeFile(path.join(reviewDirectory, "managed-wren-manifest.json"), JSON.stringify(approvedManifest(candidate), null, 2) + "\n", { mode: 0o600 });
     return;
   }

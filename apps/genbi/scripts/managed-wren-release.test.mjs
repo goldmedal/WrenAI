@@ -1,3 +1,4 @@
+import "./managed-wren-release-notices.test.mjs";
 import "./managed-wren-release-tree.test.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -192,7 +193,7 @@ test("actual staging commands derive source identities from the exact input file
   assert.match(workflow, /-o release\/python.tar.gz "\$PYTHON_URL"/);
   assert.match(workflow, /= "\$PYTHON_SHA256"/);
   assert.match(workflow, /export PYTHON_SHA256/);
-  for (const command of ["wheels", "pbs", "requirements"]) {
+  for (const command of ["wheels", "requirements"]) {
     assert.ok(workflow.includes(`python apps/genbi/scripts/managed-wren-release.py ${command}`));
   }
   assert.doesNotMatch(workflow, /python(?:3)?\s+(?:-c\b|-\s*<<)/);
