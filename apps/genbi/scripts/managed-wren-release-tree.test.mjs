@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, lstatSync, readlinkSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runtimeTreeDigest, relocateEntryPoints } from '../managed-wren/runtime-tree.cjs';
+import { runtimeTreeDigest, relocateEntryPoints, preparePythonTree } from '../managed-wren/runtime-tree.cjs';
 const digest = (bytes) => createHash('sha256').update(bytes).digest('base64url');
 function fixture(t, name = 'runtime') {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'managed-tree-')));
@@ -53,4 +53,30 @@ test('foreign interpreters, links, external rows and duplicate owners cannot att
   mkdirSync(path.join(f.site, 'second.dist-info')); writeFileSync(path.join(f.site, 'second.dist-info/RECORD'), record);
   assert.throws(() => relocateEntryPoints(f.site, f.venv, 'wren'), /duplicate console owner/);
   assert.deepEqual(readFileSync(f.launcher), original);
+});
+
+test('fresh Python preparation narrows modes, preserves bytes and links, and is idempotent', (t) => {
+  const f = fixture(t); const root = path.join(f.root, 'python'); mkdirSync(root);
+  const bin = path.join(root, 'bin'); mkdirSync(bin); const file = path.join(bin, 'python3.11');
+  writeFileSync(file, 'interpreter'); chmodSync(root, 0o777); chmodSync(bin, 0o775); chmodSync(file, 0o775);
+  const data = path.join(root, 'data'); writeFileSync(data, 'data'); chmodSync(data, 0o666);
+  const link = path.join(bin, 'python'); symlinkSync('python3.11', link);
+  const before = runtimeTreeDigest(root);
+  preparePythonTree(root);
+  for (const target of [root, bin, file]) assert.equal(lstatSync(target).mode & 0o777, 0o755);
+  assert.equal(lstatSync(data).mode & 0o777, 0o644);
+  assert.equal(readFileSync(file, 'utf8'), 'interpreter'); assert.equal(readlinkSync(link), 'python3.11');
+  const after = runtimeTreeDigest(root); assert.notEqual(after, before);
+  preparePythonTree(root); assert.equal(runtimeTreeDigest(root), after);
+});
+test('preparation rejects escaped links, shared inodes, special modes and a linked root before chmod', (t) => {
+  const f = fixture(t); const root = path.join(f.root, 'python'); mkdirSync(root); chmodSync(root, 0o775);
+  const outside = path.join(f.root, 'outside'); writeFileSync(outside, 'untouched'); chmodSync(outside, 0o666);
+  const bad = path.join(root, 'bad');
+  for (const make of [() => symlinkSync(outside, bad), () => linkSync(outside, bad), () => { writeFileSync(bad, 'setuid'); chmodSync(bad, 0o4755); }]) {
+    make(); assert.throws(() => preparePythonTree(root));
+    assert.equal(lstatSync(outside).mode & 0o777, 0o666);
+    assert.equal(lstatSync(root).mode & 0o777, 0o775); unlinkSync(bad);
+  }
+  symlinkSync(root, bad + '-root'); assert.throws(() => preparePythonTree(bad + '-root'), /canonical directory/);
 });

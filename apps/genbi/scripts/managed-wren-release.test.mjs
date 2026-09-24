@@ -202,3 +202,12 @@ test("actual staging commands derive source identities from the exact input file
 test("standalone Python metadata helper passes its offline contracts", () => {
   execFileSync("python3", ["-B", path.join(here, "managed-wren-release.test.py")], { stdio: "pipe" });
 });
+
+test("staging prepares extracted Python permissions before executing or attesting it", async () => {
+  const workflow = await readFile(path.join(repo, ".github/workflows/managed-wren-runtime.yml"), "utf8");
+  const extract = workflow.indexOf("/usr/bin/tar -xpzf");
+  const prepare = workflow.indexOf("node apps/genbi/scripts/managed-wren-release.mjs prepare-python release/runtime/python");
+  const execute = workflow.indexOf("release/runtime/python/bin/python3.11 -m venv");
+  const attest = workflow.indexOf('node apps/genbi/scripts/managed-wren-release.mjs release "$RUNTIME_TAG"');
+  assert.ok(extract >= 0 && prepare > extract && execute > prepare && attest > execute);
+});

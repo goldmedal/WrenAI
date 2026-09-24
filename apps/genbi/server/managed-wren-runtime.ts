@@ -117,6 +117,7 @@ function assertSecureTree(root: string, code: ManagedWrenFailureCode): void {
 }
 const runtimeTree = createRequire(import.meta.url)(path.join(packageRoot(), "managed-wren", "runtime-tree.cjs")) as {
   runtimeTreeDigest(root: string): string;
+  preparePythonTree(root: string): void;
   relocateEntryPoints(sitePackages: string, previousVenv: string, ownedLauncher?: string): void;
   entryPoint(file: string, venv: string): { body: string; name: string };
 };
@@ -378,6 +379,8 @@ export async function provisionManagedWrenRuntime(options: { readonly packageRoo
     const archive = path.join(staging, manifest.runtime.pythonArchivePath); const download = async (url: string, target: string, expected: string) => { const response = await fetch(url); if (!response.ok) throw new Error("download"); const bytes = Buffer.from(await response.arrayBuffer()); if (sha256(bytes) !== expected) throw new Error("digest"); writeFileSync(target, bytes, { mode: 0o600, flag: "wx" }); };
     await download(manifest.python.mirror.url, archive, manifest.python.mirror.sha256);
     assertSafeArchive(archive); execFileSync("/usr/bin/tar", ["-xpzf", archive, "-C", staging], { stdio: "ignore" }); chmodSync(staging, 0o700);
+    runtimeTree.preparePythonTree(path.join(staging, "python"));
+    assertSecureTree(staging, "codex_wren_interpreter_mismatch");
     const python = path.join(staging, manifest.python.interpreterPath); regularExecutable(staging, python, "codex_wren_interpreter_mismatch");
     const wheels = path.join(staging, "wheels"); mkdirSync(wheels, { mode: 0o700 });
     for (const wheel of manifest.wheels) await download(wheel.url, path.join(wheels, wheel.filename), wheel.sha256);

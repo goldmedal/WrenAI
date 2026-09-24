@@ -1,6 +1,6 @@
 // Shared release/provision attestation. Only verified venv prefixes are canonicalized.
 const { createHash } = require('node:crypto');
-const { lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, writeFileSync } = require('node:fs');
+const { chmodSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, writeFileSync } = require('node:fs');
 const path = require('node:path');
 const hash = (bytes, encoding = 'hex') => createHash('sha256').update(bytes).digest(encoding);
 const inside = (root, file) => { const relative = path.relative(root, file); return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative)); };
@@ -92,4 +92,24 @@ function relocateEntryPoints(sitePackages, previousVenv, ownedLauncher) {
     if (plan.file) writeFileSync(plan.file, lines.join('\n'));
   }
 }
-module.exports = { runtimeTreeDigest, relocateEntryPoints, entryPoint };
+/** Narrow modes only on a fresh, hash-verified extraction in private staging.
+ * Never use this on a published generation: resolve must reject tampering.
+ * Validate the entire tree before chmod; never follow links or touch shared inodes.
+ */
+function preparePythonTree(root) {
+  const pending = [];
+  function visit(file) {
+    const stat = lstatSync(file);
+    if (stat.isSymbolicLink()) {
+      if (!inside(root, realpathSync(file))) throw new Error('Python link escapes tree');
+      return;
+    }
+    if ((!stat.isDirectory() && !stat.isFile()) || (stat.mode & 0o7000) || (stat.isFile() && stat.nlink !== 1)) throw new Error('unsupported Python tree entry');
+    pending.push([file, (stat.mode & 0o777) & ~0o022]);
+    if (stat.isDirectory()) for (const name of readdirSync(file)) visit(path.join(file, name));
+  }
+  if (!lstatSync(root).isDirectory() || realpathSync(root) !== root) throw new Error('Python root must be a canonical directory');
+  visit(root);
+  for (const [file, mode] of pending) chmodSync(file, mode);
+}
+module.exports = { runtimeTreeDigest, relocateEntryPoints, entryPoint, preparePythonTree };
