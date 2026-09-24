@@ -13,6 +13,8 @@ import { createDefaultProviderRegistry } from "../harness/providers/index.js";
 import { policy, reportPlan } from "./zone-fixtures.js";
 
 vi.mock("../harness/components/ai-step.js", () => ({ runAiComponentStep: vi.fn() }));
+// The judge model is a bare mock here; a passing judge lets the split run reach its answer. The judge itself is tested in egress-verification.test.ts.
+vi.mock("../harness/components/egress-judge.js", () => ({ createModelJudge: () => async () => JSON.stringify({ verdict: "pass", reason_category: "aggregate" }) }));
 vi.mock("../harness/components/wren-access.js", async (original) => ({ ...await original<typeof import("../harness/components/wren-access.js")>(), openWrenComponentAccess: vi.fn() }));
 vi.mock("../harness/tools/index.js", async (original) => ({ ...await original<typeof import("../harness/tools/index.js")>(), resolveWrenBinary: vi.fn() }));
 vi.mock("../harness/compile/context-loader.js", () => ({ resolveContextLoader: () => ({ bin: "synthetic-context-loader" }),
@@ -28,6 +30,7 @@ vi.mock("../harness/providers/index.js", async (original) => {
 });
 
 const priv = (modelId: string) => ({ adapter: "mock", config: { modelId }, zone: "private" as const });
+const judge = () => priv("nano-judge");
 const pub = (modelId: string) => ({ adapter: "mock", config: { modelId }, zone: "public" as const });
 
 beforeEach(() => { vi.resetAllMocks(); created.length = 0; });
@@ -70,7 +73,7 @@ describe("zone gate runs before any model, tool or session starts", () => {
       });
       const result = await runInProcessDefault({ bundle: describeComponentPlan(plan, "synthetic"), userProject: project, profileSource: project, question: "annual revenue report", agentId: "plan_report",
         authChoice: { mode: "api-key", adapter: "openai" },
-        tierBinding: { "plan_report/strong": pub("cloud-strong"), "answer_batch/strong": priv("local-strong"), cheap: priv("nano"), judge: priv("nano-judge") },
+        tierBinding: { "plan_report/strong": pub("cloud-strong"), "answer_batch/strong": priv("local-strong"), cheap: priv("nano"), judge: judge() },
         disclosurePolicy: policy, zoneRoles: { judge: "judge" },
         ...(process.env.WARBLE_TEST_CLI ? { warbleBin: process.env.WARBLE_TEST_CLI } : {}),
         onEvent: (event) => events.push(event),
@@ -80,7 +83,10 @@ describe("zone gate runs before any model, tool or session starts", () => {
       expect(seen.find((entry) => entry.step === "Narrate")?.modelId).toBe("cloud-strong");
       expect(seen.find((entry) => entry.step === "Query")?.modelId).toBe("local-strong");
       expect(seen.find((entry) => entry.step === "Resolve")?.modelId).toBe("nano");
-      expect(created.map((entry) => (entry.config as { modelId: string }).modelId).sort()).toEqual(["cloud-strong", "local-strong", "nano"]);
+      expect(created.map((entry) => (entry.config as { modelId: string }).modelId).sort()).toEqual(["cloud-strong", "local-strong", "nano", "nano-judge"]);
+      // The disclosed child value reached the caller without its definition/SQL, and the trace recorded the decision without the payload.
+      expect(result.trace?.steps.filter((step) => step.tool === "egress").map((step) => step.detail)).toEqual(["ask/answer: ok"]);
+      expect(JSON.stringify(result.trace)).not.toContain("SELECT 42");
     } finally { await rm(project, { recursive: true, force: true }); }
   });
 });

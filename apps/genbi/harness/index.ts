@@ -61,6 +61,9 @@ export type {
 export { assertZoneGate, evaluateZoneGate, reachableMounts, ZoneGateError } from "./components/zone-gate.js";
 export type { ZoneGateResult, ZoneGateViolation, ZoneStepReport } from "./components/zone-gate.js";
 export { describeZoneDryRun, formatZoneDryRun } from "./components/zone-dry-run.js";
+export { BUILT_IN_PII_PATTERNS, readSlots, slotDeclarationSchema, verifyEgress } from "./components/egress.js";
+export type { DisclosedAnswer, EgressDecision, EgressJudge, EgressJudgeInput, EgressOutcome, EgressProvenance, EgressReason, EgressStatus, SlotDeclaration } from "./components/egress.js";
+export { createModelJudge, EGRESS_JUDGE_INSTRUCTIONS } from "./components/egress-judge.js";
 export type { ZoneDryRun } from "./components/zone-dry-run.js";
 
 export {

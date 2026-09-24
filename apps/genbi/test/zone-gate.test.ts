@@ -44,6 +44,15 @@ describe("zone gate", () => {
     const { roles: _roles, ...noJudge } = splitBinding();
     expect(evaluateZoneGate(reportPlan(), "plan_report", noJudge).violations).toMatchObject([{ code: "missing_judge" }]);
   });
+  it("rejects a zone-aware binding whose public caller reaches a callee without a disclosure policy", () => {
+    const { disclosurePolicy: _policy, roles: _roles, ...tiersOnly } = splitBinding();
+    const result = evaluateZoneGate(reportPlan(), "plan_report", tiersOnly);
+    expect(result.armed).toBe(true);
+    expect(result.violations).toMatchObject([{ code: "missing_policy", component: "plan_report", step: "plan_layout", tier: "plan", zone: "public" }]);
+    // An all-private caller may compose without a policy: nothing crosses a zone.
+    const allPrivate = { ...tiersOnly, tiers: { ...tiersOnly.tiers, plan: priv("local-planner") } };
+    expect(evaluateZoneGate(reportPlan(), "plan_report", allPrivate).violations).toEqual([]);
+  });
   it("rejects a data-bearing caller step on a public tier (spec §8 re-check)", () => {
     const plan = reportPlan();
     const caller = plan.components.plan_report!;

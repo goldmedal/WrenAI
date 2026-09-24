@@ -15,6 +15,8 @@ import type { RunAgentResult } from "../session/types.js";
 import { resolveWrenBinary } from "../tools/index.js";
 import { runAiComponentStep } from "./ai-step.js";
 import { createComponentBroker, type ComponentAccess } from "./broker.js";
+import { verifyEgress } from "./egress.js";
+import { createModelJudge } from "./egress-judge.js";
 import { normalizeComponentEvidence } from "./normalize.js";
 import { planDigest } from "./plan.js";
 import { ComponentRunner, type ExecutionPlan } from "./runner.js";
@@ -69,8 +71,20 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     const identity = { session: randomUUID(), vendor: "in-process", account: planDigest(binding), generation: randomUUID(),
       project, bindingRevision: planDigest([fingerprint, accessIdentity.digest]), contextDigest: planDigest(contexts), planDigest: plan.identity };
     const models = new Map<string, Map<string, ReturnType<typeof resolveTierModel>>>();
+    // The egress verification seam is installed whenever a disclosure policy is
+    // bound. The gate has already required a private judge tier for it, so a
+    // missing judge here is an internal error, not a degrade.
+    const policy = binding.disclosurePolicy;
+    const judgeKey = binding.roles?.judge;
+    const judgeSpec = judgeKey !== undefined ? binding.tiers[judgeKey] : undefined;
+    if (policy && !judgeSpec) throw new Error("Egress verification requires a bound judge tier");
+    const judge = judgeSpec ? createModelJudge(registry.create(judgeSpec.adapter, judgeSpec.config)) : undefined;
     const broker = createComponentBroker({ plan, contexts, verifierBinary: await resolveWarbleBinary(options.warbleBin),
       identity, currentIdentity: () => signal.aborted ? undefined : identity,
+      ...(policy ? { verifyChild: async (context, result, parent) => {
+        await checkProject();
+        return verifyEgress(context.request, result, { policy, ...(judge ? { judge } : {}), signal: parent });
+      } } : {}),
       async prepare(component, _identity, parent): Promise<ComponentAccess> {
         await checkProject();
         // Keyed on (mount, tier): a caller and callee sharing a tier name can bind different models.
@@ -92,6 +106,12 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       },
       async normalize(component, evidence) { await checkProject(); return normalizeComponentEvidence(component, evidence, contexts[component.id]?.snapshot); },
       onEvent(event) {
+        if (event.kind === "egress") {
+          // Slot id, status and reason category only: the payload never enters the trace.
+          traceSteps.push({ id: `${event.callId}:egress:${event.slot}`, tool: "egress", outcome: event.egress === "refused" ? "error" : "success",
+            ordinal: toolOrder.get(event.callId ?? "") ?? traceSteps.length, detail: `${event.tool}/${event.slot}: ${event.egress}${event.reason ? ` (${event.reason})` : ""}` });
+          return;
+        }
         if (event.callId && event.tool && event.kind === "tool.start") toolOrder.set(event.callId, toolOrder.size);
         if (event.callId && event.tool && event.kind === "tool.finish") traceSteps.push({ id: event.callId, tool: event.tool,
           outcome: event.status === "ok" ? "success" : "error", ordinal: toolOrder.get(event.callId) ?? traceSteps.length });

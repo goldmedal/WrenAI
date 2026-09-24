@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { normalizeComponentRequest, type ComponentInvocationResult } from "@warble/claude-agent-sdk";
+import type { EgressDecision, EgressProvenance } from "./egress.js";
 
 export interface ComponentTool { readonly name: string; readonly source: string }
 export interface ComponentStep {
@@ -52,7 +53,25 @@ export interface ToolEvidence {
 export interface ComponentEvidence {
   readonly steps: Readonly<Record<string, unknown>>;
   readonly tools: readonly ToolEvidence[];
+  /** Child results exactly as the caller saw them, i.e. after egress verification. */
   readonly children: readonly ComponentInvocationResult[];
+  /** Provenance the egress step kept aside (definition, SQL); host-only, never model input. */
+  readonly egress?: readonly EgressProvenance[];
+}
+/** Where a child result is about to cross back into its caller. */
+export interface ChildVerificationContext {
+  readonly caller: string;
+  readonly step: string;
+  readonly alias: string;
+  readonly callee: string;
+  /** The normalized alias-call request (request text plus `input`), as the child received it. */
+  readonly request: { readonly request: string; readonly input: Readonly<Record<string, unknown>> };
+}
+export interface ChildVerification {
+  /** What the caller receives; may only be narrower than the child result. */
+  readonly disclosed: ComponentInvocationResult;
+  readonly decisions: readonly EgressDecision[];
+  readonly provenance: readonly EgressProvenance[];
 }
 /** Host-created after exact context, model, account and tool authority validation. */
 export interface ComponentBinding {
@@ -82,10 +101,18 @@ export interface RunnerHost {
   runStep(run: StepRun, binding: ComponentBinding): Promise<StepResponse>;
   /** Separate root-only sink, invoked once after successful closure execution. */
   persistRoot?(result: Extract<ComponentInvocationResult, { status: "ok" }>, binding: ComponentBinding, signal: AbortSignal): Promise<void>;
+  /**
+   * The egress verification seam: every child result passes through here,
+   * after the child invocation and before the alias resolves for the caller.
+   * The caller never sees `result`, only `disclosed`. Optional so a single-zone
+   * composition keeps today's pass-through; a host with a disclosure policy
+   * installs one.
+   */
+  verifyChild?(context: ChildVerificationContext, result: ComponentInvocationResult, signal: AbortSignal): Promise<ChildVerification>;
   onEvent?(event: ComponentEvent): void;
 }
 export interface ComponentEvent {
-  readonly kind: "step.start" | "step.finish" | "call.start" | "call.finish" | "tool.start" | "tool.finish";
+  readonly kind: "step.start" | "step.finish" | "call.start" | "call.finish" | "tool.start" | "tool.finish" | "egress";
   readonly invocation: string;
   readonly parent: string | null;
   readonly component: string;
@@ -94,6 +121,10 @@ export interface ComponentEvent {
   readonly callId?: string;
   readonly depth: number;
   readonly status?: "ok" | "error" | "cancelled";
+  /** `egress` events: slot id and outcome only, never the payload. */
+  readonly slot?: string;
+  readonly egress?: EgressDecision["status"];
+  readonly reason?: string;
 }
 
 const normalizedResult = z.discriminatedUnion("status", [
@@ -214,6 +245,16 @@ export class ComponentRunner {
     }
   }
 
+  /** Runs the host's egress seam, or passes the result through when the host installed none. */
+  private async verifyChild(context: Omit<ChildVerificationContext, "request"> & { readonly request: ReturnType<typeof normalizeComponentRequest> }, raw: ComponentInvocationResult): Promise<ChildVerification> {
+    if (!this.host.verifyChild) return { disclosed: raw, decisions: [], provenance: [] };
+    if ("error" in context.request) throw new ExecutionFailure("callee_failed");
+    const verified = await this.wait(this.host.verifyChild({ ...context, request: context.request.value }, raw, this.controller.signal));
+    // Narrowing only: a seam that returns success for a child that did not succeed is a host bug, never a disclosure.
+    if (verified.disclosed.status === "ok" && raw.status !== "ok") throw new ExecutionFailure("callee_failed");
+    return verified;
+  }
+
   private release(binding: ComponentBinding): Promise<void> {
     let pending = this.releases.get(binding);
     if (!pending) { pending = Promise.resolve().then(() => binding.close()).catch(() => { this.cleanupFailure = true; throw new Error("Component cleanup failed"); }); this.releases.set(binding, pending); }
@@ -256,6 +297,7 @@ export class ComponentRunner {
     const products = object<unknown>();
     const tools: ToolEvidence[] = [];
     const children: ComponentInvocationResult[] = [];
+    const egress: EgressProvenance[] = [];
     let childSteps = 0;
     let failed: string | undefined;
     try {
@@ -283,8 +325,8 @@ export class ComponentRunner {
           this.check();
           if (!active) throw new ExecutionFailure("cancelled");
         };
-        const trackTool = async <T>(tool: string, execute: () => Promise<T>): Promise<T> => {
-          const toolEvent = { ...event, step: step.name, tool, callId: randomUUID() };
+        const trackTool = async <T>(tool: string, execute: () => Promise<T>, callId: string = randomUUID()): Promise<T> => {
+          const toolEvent = { ...event, step: step.name, tool, callId };
           this.host.onEvent?.({ ...toolEvent, kind: "tool.start" });
           try {
             const value = await execute();
@@ -325,16 +367,28 @@ export class ComponentRunner {
               if (!accepting) throw new ExecutionFailure("cancelled");
             } catch (error) { return Promise.reject(error); }
             const savedInput = copy(input, COMPONENT_LIMITS.requestBytes);
+            const callId = randomUUID();
             const pending = queue.then(() => trackTool(edge.alias, async () => {
               assertActive();
-              const result = await this.invoke(edge.component, savedInput, invocation, depth + 1);
+              const raw = await this.invoke(edge.component, savedInput, invocation, depth + 1);
               assertActive();
+              // The egress seam: the caller only ever receives `disclosed`. The raw
+              // child result exists on this stack frame and nowhere else.
+              const verified = await this.verifyChild({ caller: id, step: step.name, alias: edge.alias, callee: edge.component,
+                request: normalizeComponentRequest(savedInput, COMPONENT_LIMITS.requestBytes) }, raw);
+              assertActive();
+              for (const decision of verified.decisions) {
+                this.host.onEvent?.({ ...event, kind: "egress", step: step.name, tool: edge.alias, callId, slot: decision.slot_id,
+                  egress: decision.status, ...(decision.reason_category ? { reason: decision.reason_category } : {}) });
+              }
+              egress.push(...verified.provenance.map((item) => freeze(copy(item, COMPONENT_LIMITS.resultBytes))));
+              const result = verified.disclosed;
               children.push(freeze(copy(result, COMPONENT_LIMITS.resultBytes)));
               // Tool transports may catch a rejection or ignore the returned value.
               // Retain failure in the host queue so root success cannot hide it.
               if (result.status !== "ok") throw new ExecutionFailure("callee_failed");
               return result;
-            }));
+            }, callId));
             queue = pending.catch(() => {});
             queued.push(pending);
             return pending;
@@ -376,7 +430,7 @@ export class ComponentRunner {
         } finally { active = false; }
       }
       if (failed) throw new ExecutionFailure("callee_failed");
-      const result = copy(await this.wait(binding.normalize(freeze({ steps: products, tools, children }), this.controller.signal)), COMPONENT_LIMITS.resultBytes);
+      const result = copy(await this.wait(binding.normalize(freeze({ steps: products, tools, children, egress }), this.controller.signal)), COMPONENT_LIMITS.resultBytes);
       if (!normalizedResult.safeParse(result).success) throw new ExecutionFailure("invalid_result");
       this.host.onEvent?.({ ...event, kind: "call.finish", status: result.status === "ok" ? "ok" : "error" });
       return result;

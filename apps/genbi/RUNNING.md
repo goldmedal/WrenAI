@@ -163,6 +163,25 @@ role tiers; a zone-relevant tier without a `zone` is rejected; a
 data tools may be `public`. A binding with no zone information anywhere is the
 pre-existing single-zone binding and is not gated.
 
+When a `disclosure_policy` is bound, every callee result passes through the
+**egress verification step** on its way back to the caller: host
+post-processing inside the runner's alias handler, after the child invocation
+and before the alias resolves, never a tool a model can choose. Per slot the
+caller declared (`input.slots[]`: `slot_id`, `expected_shape`, `question`,
+`unit?`, `max_rows?`; no slots means one implicit table slot for the request
+text) it runs the deterministic checks first — declared shape, `max_rows`,
+policy-listed sensitive columns, PII patterns in string cells, group size
+against `min_group_size` — and only a passing slot reaches the private-zone
+judge (the `roles.judge` tier), which answers `pass | redact | refuse`. A judge
+that times out, errors or answers off-contract counts as `refuse`. The caller
+receives `{answers: [{slot_id, status: ok|partial|refused, shape, columns,
+rows, value?, unit?, reason_category?}]}` rebuilt from columns and rows alone,
+so `definition`, SQL and any other key never cross; provenance is kept aside
+host-side for the rendered artifact, and every decision is traced with slot id,
+status and reason category only. Reason categories cross the boundary; reason
+details do not. Per-answer verification does not stop differencing attacks
+across many narrowing questions; that is a documented limit.
+
 Audit a binding without running anything:
 
 ```bash

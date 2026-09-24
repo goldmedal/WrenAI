@@ -34,6 +34,8 @@ export interface ComponentBrokerOptions {
   readonly step: (run: StepRun, component: ComponentPlan, identity: ComponentIdentity) => Promise<StepResponse>;
   readonly normalize: (component: ComponentPlan, evidence: ComponentEvidence, signal: AbortSignal, context: unknown) => Promise<ComponentInvocationResult>;
   readonly persistRoot?: RunnerHost["persistRoot"];
+  /** The egress verification seam; see `RunnerHost.verifyChild`. */
+  readonly verifyChild?: RunnerHost["verifyChild"];
   readonly onEvent?: RunnerHost["onEvent"];
 }
 const queryInput = z.object({ sql: z.string().trim().min(1).max(65_536), limit: z.number().int().positive().optional() }).strict();
@@ -120,6 +122,7 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
       return options.step({ ...run, prompt }, component, identity);
     },
     ...(options.persistRoot ? { persistRoot: options.persistRoot } : {}),
+    ...(options.verifyChild ? { verifyChild: options.verifyChild } : {}),
     ...(options.onEvent ? { onEvent: options.onEvent } : {}),
   };
 }

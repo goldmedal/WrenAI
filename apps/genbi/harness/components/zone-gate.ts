@@ -33,7 +33,8 @@ export type ZoneGateViolationCode =
   | "unbound_tier"
   | "judge_public"
   | "render_public"
-  | "missing_judge";
+  | "missing_judge"
+  | "missing_policy";
 
 export interface ZoneGateViolation {
   readonly code: ZoneGateViolationCode;
@@ -92,7 +93,9 @@ function dataToolNames(step: ComponentStep): string[] {
  * 3. the `judge` role tier, when declared, is private; a disclosure policy without a judge fails;
  * 4. the `render` role tier, when declared, is private;
  * 5. a tier referenced by any of the above without a `zone` fails — no default zone;
- * 6. a caller step without data tools may be public, private, or leave zone unset.
+ * 6. a caller step without data tools may be public, private, or leave zone unset;
+ * 7. a public (or zone-unset) caller step that calls a callee needs a `disclosure_policy`,
+ *    because that is the only way child results are verified before they cross.
  *
  * A binding with no zone information anywhere is not zone-aware: the gate is
  * not armed and the result carries no violations, only the step report.
@@ -145,6 +148,14 @@ export function evaluateZoneGate(plan: ExecutionPlan, entry: string, binding: Ti
     } else if (zone !== "private") {
       violations.push({ code: role === "judge" ? "judge_public" : "render_public", tier: key, zone,
         message: `${role} tier "${key}" is zone: ${zone}; it ${role === "judge" ? "sees unfiltered answers" : "sees rows"} and must be private` });
+    }
+  }
+  if (armed && binding.disclosurePolicy === undefined) {
+    for (const report of steps) {
+      if (report.role === "caller" && report.calls.length > 0 && report.zone !== "private") {
+        violations.push({ code: "missing_policy", component: report.component, step: report.step, tier: report.tier, zone: report.zone,
+          message: `step ${report.component}.${report.step} (tier ${report.tier}, zone ${report.zone}) calls ${report.calls.map((edge) => edge.component).join(", ")} but the binding has no disclosure_policy; child results would cross unverified` });
+      }
     }
   }
   if (armed && binding.disclosurePolicy !== undefined && binding.roles?.judge === undefined) {
