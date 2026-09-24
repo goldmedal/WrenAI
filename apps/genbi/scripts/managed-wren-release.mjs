@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runtimeTreeDigest } from "../managed-wren/runtime-tree.cjs";
+import { runtimeTreeDigest, preparePythonTree } from "../managed-wren/runtime-tree.cjs";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const digest = (value) => createHash("sha256").update(value).digest("hex");
@@ -93,6 +93,11 @@ async function generate(output, runtimeTag) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
+  if (command === "prepare-python") {
+    if (args.length !== 1) throw new Error("usage: managed-wren-release.mjs prepare-python <extracted-python-directory>");
+    preparePythonTree(path.resolve(args[0]));
+    return;
+  }
   if (command === "validate-tag") {
     if (args.length !== 1) throw new Error("usage: managed-wren-release.mjs validate-tag <runtime-tag>");
     validateRuntimeTag(args[0]);
