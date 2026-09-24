@@ -10,7 +10,7 @@ vi.mock("../server/runtime-host/codex-component-step.js", () => ({ runCodexCompo
 vi.mock("../harness/components/wren-access.js", () => ({ openWrenComponentAccess: vi.fn(async () => { throw Error("Wren must not start in these tests"); }) }));
 vi.mock("../harness/compile/fingerprint.js", () => ({ hashDirectory: vi.fn(async () => "fingerprint") }));
 const component: ComponentPlan = { id: "root", declaration: {}, steps: [{ name: "layout", tier: "strong", prompt: "", produces: "result", consumes: [], tools: [], calls: [] }] };
-const run = (signal = new AbortController().signal): StepRun => ({ tier: "strong", request: "synthetic", input: {}, prompt: "", consumes: {}, tools: {}, toolSchemas: {}, toolDescriptions: {}, signal });
+const run = (signal = new AbortController().signal): StepRun => ({ tier: "strong", request: "synthetic", input: {}, prompt: "", consumes: {}, children: [], tools: {}, toolSchemas: {}, toolDescriptions: {}, signal });
 function setup(vendor: "claude" | "codex" = "claude") {
   const identity = { session_id: "synthetic", vendor, auth_identity: "approved", runtime_generation: "1", binding: { project_identity: "project", generation: "1", revision: "revision" } };
   const close = vi.fn(async () => {});

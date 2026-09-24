@@ -46,8 +46,8 @@ describe("zone gate runs before any model, tool or session starts", () => {
       const plan = { ...reportPlan(), components: Object.fromEntries(Object.entries(reportPlan().components).map(([id, node]) => [id, { ...node, declaration: { ...node.declaration, context_binding: { project } } }])) };
       await expect(runInProcessDefault({ bundle: describeComponentPlan(plan, "synthetic"), userProject: project, profileSource: project, question: "annual revenue report", agentId: "plan_report",
         authChoice: { mode: "api-key", adapter: "openai" },
-        tierBinding: { plan: pub("sonnet"), cheap: priv("nano"), strong: pub("cloud-strong"), judge: priv("nano") },
-        disclosurePolicy: policy, zoneRoles: { judge: "judge" },
+        tierBinding: { plan: pub("sonnet"), cheap: priv("nano"), strong: pub("cloud-strong"), judge: priv("nano"), render: priv("nano") },
+        disclosurePolicy: policy, zoneRoles: { judge: "judge", render: "render" },
       })).rejects.toThrow(ZoneGateError);
       expect(created).toEqual([]);
       expect(vi.mocked(generatePreparedContext)).not.toHaveBeenCalled();
@@ -78,8 +78,8 @@ describe("zone gate runs before any model, tool or session starts", () => {
       });
       const result = await runInProcessDefault({ bundle: describeComponentPlan(plan, "synthetic"), userProject: project, profileSource: project, question: "annual revenue report", agentId: "plan_report",
         authChoice: { mode: "api-key", adapter: "openai" },
-        tierBinding: { "plan_report/strong": pub("cloud-strong"), "answer_batch/strong": priv("local-strong"), cheap: priv("nano"), judge: judge() },
-        disclosurePolicy: policy, zoneRoles: { judge: "judge" },
+        tierBinding: { "plan_report/strong": pub("cloud-strong"), "answer_batch/strong": priv("local-strong"), cheap: priv("nano"), judge: judge(), render: priv("nano-render") },
+        disclosurePolicy: policy, zoneRoles: { judge: "judge", render: "render" },
         ...(process.env.WARBLE_TEST_CLI ? { warbleBin: process.env.WARBLE_TEST_CLI } : {}),
         onEvent: (event) => events.push(event),
       });
@@ -88,6 +88,7 @@ describe("zone gate runs before any model, tool or session starts", () => {
       expect(seen.find((entry) => entry.step === "Narrate")?.modelId).toBe("cloud-strong");
       expect(seen.find((entry) => entry.step === "Query")?.modelId).toBe("local-strong");
       expect(seen.find((entry) => entry.step === "Resolve")?.modelId).toBe("nano");
+      // The render role is a zone declaration for the host-owned synthesis stage; no model is constructed for it.
       expect(created.map((entry) => (entry.config as { modelId: string }).modelId).sort()).toEqual(["cloud-strong", "local-strong", "nano", "nano-judge"]);
       // The disclosed child value reached the caller without its definition/SQL, and the trace recorded the decision without the payload.
       expect(result.trace?.steps.filter((step) => step.tool === "egress").map((step) => step.detail)).toEqual(["ask/answer: ok"]);

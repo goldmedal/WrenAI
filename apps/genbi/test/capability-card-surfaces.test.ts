@@ -51,8 +51,8 @@ describe("capability card surfaces", () => {
       expect(card.truncated).toBe(true);
       const result = await runInProcessDefault({ bundle: describeComponentPlan(plan, "synthetic"), userProject: project, profileSource: project, question: "annual revenue report", agentId: "plan_report",
         authChoice: { mode: "api-key", adapter: "openai" },
-        tierBinding: { plan: pub("sonnet"), cheap: priv("nano"), strong: priv("super"), judge: priv("nano-judge") },
-        disclosurePolicy: policy, zoneRoles: { judge: "judge" }, capabilityCard: { maxBytes: 260 },
+        tierBinding: { plan: pub("sonnet"), cheap: priv("nano"), strong: priv("super"), judge: priv("nano-judge"), render: priv("nano-render") },
+        disclosurePolicy: policy, zoneRoles: { judge: "judge", render: "render" }, capabilityCard: { maxBytes: 260 },
         ...(process.env.WARBLE_TEST_CLI ? { warbleBin: process.env.WARBLE_TEST_CLI } : {}),
       });
       expect(result.kind).toBe("answer");

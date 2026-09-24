@@ -7,7 +7,7 @@ const usage = { inputTokens: { total: 2, noCache: 2, cacheRead: 0, cacheWrite: 0
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }], finishReason: { unified: "stop" as const, raw: "stop" }, usage, warnings: [] });
 const call = (name: string, id = "call") => ({ content: [{ type: "tool-call" as const, toolName: name, toolCallId: id, input: JSON.stringify({ request: "child" }) }], finishReason: { unified: "tool-calls" as const, raw: "tool-calls" }, usage, warnings: [] });
 function run(): StepRun {
-  return { tier: "strong", request: "root-only question", input: {}, prompt: "compose", consumes: {}, signal: new AbortController().signal,
+  return { tier: "strong", request: "root-only question", input: {}, prompt: "compose", consumes: {}, children: [], signal: new AbortController().signal,
     tools: { answer: async () => ({ status: "ok", output: { kind: "value", value: 7 } }) },
     toolSchemas: { answer: { type: "object", additionalProperties: false, required: ["request"], properties: { request: { type: "string" } } } }, toolDescriptions: { answer: "Bound answer" } };
 }

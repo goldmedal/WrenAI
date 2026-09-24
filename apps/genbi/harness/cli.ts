@@ -18,6 +18,7 @@ import path from "node:path";
 import { generatePreparedContextAndCatalog, resolveContextLoader } from "./compile/context-loader.js";
 import { buildCapabilityCard } from "./components/capability-card.js";
 import { executionPlanFor } from "./components/display.js";
+import { defaultEntry } from "./components/in-process.js";
 import { describeZoneDryRun, formatZoneDryRun } from "./components/zone-dry-run.js";
 import { readTierBindingFile, type TierBinding } from "./providers/index.js";
 import { describeBundle, resolveDefaultProfileSource, route } from "./route/index.js";
@@ -196,7 +197,7 @@ async function main(): Promise<void> {
       await generatePreparedContextAndCatalog(resolveContextLoader().bin, path.resolve(project), path.join(scratch, "context.json"), catalogPath);
       card = buildCapabilityCard(JSON.parse(await readFile(catalogPath, "utf8")));
     } finally { await rm(scratch, { recursive: true, force: true }); }
-    const dryRun = describeZoneDryRun(plan, "answer_query", binding, { card: { digest: card.digest, bytes: card.bytes, truncated: card.truncated } });
+    const dryRun = describeZoneDryRun(plan, defaultEntry(plan), binding, { card: { digest: card.digest, bytes: card.bytes, truncated: card.truncated } });
     process.stdout.write(formatZoneDryRun(dryRun));
     process.exitCode = dryRun.exitCode;
     return;

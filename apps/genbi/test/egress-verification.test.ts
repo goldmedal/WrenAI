@@ -38,8 +38,11 @@ describe("egress verification: deterministic checks", () => {
   it("refuses a shape mismatch", async () => {
     const outcome = await verify(table([{ region: "a", revenue: 1 }, { region: "b", revenue: 2 }]), slots({ expected_shape: "scalar" }));
     expect(answers(outcome)[0]).toMatchObject({ status: "refused", reason_category: "shape_mismatch" });
+    // A tabular answer fits a narrative slot only through its prose: the summary crosses as `text`, the rows never do.
     const narrativeAsTable = await verify(table([{ revenue: 1 }]), slots({ expected_shape: "narrative" }));
-    expect(answers(narrativeAsTable)[0]).toMatchObject({ status: "refused", reason_category: "shape_mismatch" });
+    expect(answers(narrativeAsTable)[0]).toEqual({ slot_id: "s1", status: "ok", shape: "narrative", text: "done" });
+    const narrativeWithoutProse = await verify({ ...table([{ revenue: 1 }]), summary: "  " }, slots({ expected_shape: "narrative" }));
+    expect(answers(narrativeWithoutProse)[0]).toMatchObject({ status: "refused", reason_category: "shape_mismatch" });
     const notAllowed = await verifyEgress(slots(), ok(table([{ revenue: 1 }])), { policy: { ...policy, allowed_shapes: ["scalar"] }, judge: passJudge });
     expect(answers(notAllowed)[0]).toMatchObject({ status: "refused", reason_category: "shape_mismatch" });
   });
@@ -158,7 +161,7 @@ describe("egress verification: what crosses and what stays", () => {
     expect(text).not.toContain("definition");
     expect(text).not.toContain("sql");
     expect(answers(outcome)[0]).toEqual({ slot_id: "s1", status: "ok", shape: "table", columns: ["region", "revenue"], rows: [{ region: "a", revenue: 1 }], summary: "done" });
-    expect(outcome.provenance).toEqual([{ slot_id: "s1", definition, sql: SQL, source_tables: ["orders"], row_count: 1, columns: ["region", "revenue"] }]);
+    expect(outcome.provenance).toEqual([{ slot_id: "s1", definition, sql: SQL, source_tables: ["orders"], row_count: 1, columns: ["region", "revenue"], verified: true }]);
     // The implicit single slot keeps the tabular contract, also without definition/SQL.
     const implicit = await verifyEgress({ request: "revenue by region", input: {} }, ok({ ...table([{ region: "a", revenue: 1 }]), definition }), { policy, judge: passJudge });
     expect(readSlots({ request: "revenue by region", input: {} })).toMatchObject({ implicit: true, slots: [{ slot_id: "answer", expected_shape: "table" }] });
@@ -256,5 +259,36 @@ describe("egress verification: the seam", () => {
     await new ComponentRunner(plan(), host(undefined, events, seen)).run("report", { request: "report" });
     expect(seen[0]).toMatchObject({ status: "ok", output: { kind: "value", value: { sql: SQL } } });
     expect(events.some((event) => event.kind === "egress")).toBe(false);
+  });
+});
+
+describe("egress verification: the Hub plan_report call shape", () => {
+  const questions = { request: "fill the report", input: { preamble: { period: "FY2025", currency: "USD", filters: ["completed"] },
+    questions: [
+      { slot_id: "total", block_type: "kpi_card", expected_shape: "scalar", question: "total revenue?", unit: "USD" },
+      { slot_id: "by_quarter", block_type: "chart", expected_shape: "series", question: "revenue by quarter?", max_rows: 4 },
+      { slot_id: "refunds", block_type: "kpi_card", expected_shape: "scalar", question: "refund rate?", unit: "%" },
+    ] } };
+  it("reads `input.questions` with block_type and an object preamble as slot declarations", () => {
+    const read = readSlots(questions);
+    expect(read).toMatchObject({ implicit: false, preamble: JSON.stringify(questions.input.preamble) });
+    expect("slots" in read ? read.slots.map((slot) => slot.slot_id) : []).toEqual(["total", "by_quarter", "refunds"]);
+  });
+  it("maps a callee `unanswerable` entry to a refused slot with the `unanswerable` category and keeps its reason text host-side", async () => {
+    const seen: EgressJudgeInput[] = [];
+    const judge: EgressJudge = async (input) => { seen.push(input); return JSON.stringify({ verdict: "pass" }); };
+    const outcome = await verifyEgress(questions, ok([
+      { slot_id: "total", columns: ["total_revenue"], rows: [{ total_revenue: 1284500 }], summary: "total", verified: true, definition },
+      { slot_id: "by_quarter", columns: ["quarter", "revenue"], rows: [{ quarter: "Q1", revenue: 1 }, { quarter: "Q2", revenue: 2 }], summary: "by quarter", verified: true, definition },
+      { slot_id: "refunds", status: "unanswerable", reason: "no refund measure in the semantic context (secret-ish detail)" },
+    ]), { policy, judge });
+    expect(answers(outcome).map((answer) => [answer.slot_id, answer.status, answer.reason_category])).toEqual([
+      ["total", "ok", undefined], ["by_quarter", "ok", undefined], ["refunds", "refused", "unanswerable"]]);
+    expect(answers(outcome)[0]).toMatchObject({ value: 1284500, unit: "USD" });
+    expect(outcome.decisions.find((decision) => decision.slot_id === "refunds")).toMatchObject({ status: "refused", reason_category: "unanswerable", judge: "skipped" });
+    expect(JSON.stringify(outcome.disclosed)).not.toContain("secret-ish");
+    // The object preamble reached the judge serialised, under the untrusted key.
+    expect(seen[0]?.untrusted_preamble).toBe(JSON.stringify(questions.input.preamble));
+    expect(outcome.provenance.map((item) => [item.slot_id, item.verified])).toEqual([["total", true], ["by_quarter", true]]);
   });
 });

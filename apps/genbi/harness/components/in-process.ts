@@ -20,6 +20,7 @@ import { buildCapabilityCard, type CapabilityCard } from "./capability-card.js";
 import { verifyEgress } from "./egress.js";
 import { createModelJudge } from "./egress-judge.js";
 import { normalizeComponentEvidence } from "./normalize.js";
+import { buildSlotTable, isReportComponent, materialiseReportPlan, normalizeReportEvidence, parseReportPlan, reportSteps } from "./report.js";
 import { planDigest } from "./plan.js";
 import { ComponentRunner, type ExecutionPlan } from "./runner.js";
 import { captureWrenAccessIdentity, openWrenComponentAccess } from "./wren-access.js";
@@ -30,7 +31,9 @@ const data = z.object({ columns: z.array(z.string()), rows: z.array(z.record(z.s
 /** Executable format 0.2 path; never flattened into the legacy agent tool union. */
 export async function runInProcessComponents(plan: ExecutionPlan, options: InProcessOptions): Promise<RunAgentResult> {
   if (options.mcpServers) throw new Error("Composed execution requires component-owned host bindings");
-  const entry = options.agentId ?? "answer_query";
+  // The historical default entry is `answer_query`; a composed profile with exactly one entry
+  // (the report profile: `plan_report` alone is an entry) runs that entry when none is named.
+  const entry = options.agentId ?? defaultEntry(plan);
   // The binding is fixed and gated here, before any scratch state, context
   // generation, provider construction or child process exists. A rejected
   // binding therefore produces none of them.
@@ -121,18 +124,37 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
         await checkProject();
         const model = models.get(component.id)?.get(run.tier);
         if (!model) throw new Error("Missing component tier binding");
+        // Host materialisation for a report's narrator: the layout it consumes is resolved from the
+        // slot table (the disclosed child answers) before the model reads it, so the values it sees
+        // are the verified ones and it never has to retype a number. The recorded product stays the
+        // planner's own output; only the consumed view is materialised (decision recorded in the design doc).
+        let consumes = run.consumes;
+        const report = isReportComponent(component) ? reportSteps(component) : undefined;
+        if (report && Object.hasOwn(run.consumes, report.layout.produces)) {
+          const layout = parseReportPlan(run.consumes[report.layout.produces]);
+          if (!layout) throw new Error("The planner did not produce a report layout");
+          consumes = { ...run.consumes, [report.layout.produces]: materialiseReportPlan(layout, buildSlotTable(run.children)) };
+        }
+        // Every part of the assembled model input is fingerprinted, including the request and the
+        // consumed artifacts, so an audit of a public-tier prompt covers the values that crossed.
         const surfaces: Record<string, string> = { ...(run.surfaces ?? { prompt: run.prompt }) };
         if (plan.systemPrompt) surfaces["system"] = plan.systemPrompt;
         if (run.brief !== undefined) surfaces["brief"] = run.brief;
+        surfaces["input"] = JSON.stringify({ request: run.request, input: run.input });
+        surfaces["consumes"] = JSON.stringify(consumes);
         const fingerprint = fingerprintSurfaces(surfaces);
         const stepName = plan.components[component.id]?.steps.find((step) => step.prompt === surfaces["prompt"] && step.tier === run.tier)?.name ?? "?";
         surfaceRecords.push({ component: component.id, step: stepName, tier: run.tier, zone: zoneOf(component.id, run.tier), context: run.contextKind ?? "none",
           algorithm: fingerprint.algorithm, digest: fingerprint.digest, surfaces: fingerprint.surfaces });
-        const result = await runAiComponentStep({ ...run, prompt: [plan.systemPrompt, run.prompt].filter(Boolean).join("\n\n") }, model);
+        const result = await runAiComponentStep({ ...run, consumes, prompt: [plan.systemPrompt, run.prompt].filter(Boolean).join("\n\n") }, model);
         await checkProject();
         return result;
       },
-      async normalize(component, evidence) { await checkProject(); return normalizeComponentEvidence(component, evidence, contexts[component.id]?.snapshot); },
+      async normalize(component, evidence) {
+        await checkProject();
+        // A report's envelope is synthesised by the host from the slot table; every other component keeps the generic path.
+        return isReportComponent(component) ? normalizeReportEvidence(component, evidence) : normalizeComponentEvidence(component, evidence, contexts[component.id]?.snapshot);
+      },
       onEvent(event) {
         if (event.kind === "egress") {
           // Slot id, status and reason category only: the payload never enters the trace.
@@ -166,6 +188,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       ? [{ type: "table", columns: value.data.columns, rows: value.data.rows }]
       : [{ type: "narrative", text: JSON.stringify(result.output.value) }];
     const envelope = { blocks, verified: result.provenance?.verified === true,
+      ...(result.output.kind === "render" && result.output.summary !== undefined ? { summary: result.output.summary } : {}),
       ...(result.provenance?.definition ? { definition: result.provenance.definition } : {}) };
     emitter.emit({ kind: "answer", envelope });
     emitter.emit({ kind: "run.finish", status: "answer" });
@@ -175,4 +198,10 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     emitter.emit({ kind: "run.finish", status: "error" });
     throw error;
   } finally { controller.abort(); await rm(scratch, { recursive: true, force: true }); }
+}
+
+/** `answer_query` when the plan has it, else the plan's single entry; a multi-entry plan without `answer_query` keeps the historical default and fails as before. */
+export function defaultEntry(plan: ExecutionPlan): string {
+  if (plan.entries.includes("answer_query")) return "answer_query";
+  return plan.entries.length === 1 ? plan.entries[0]! : "answer_query";
 }

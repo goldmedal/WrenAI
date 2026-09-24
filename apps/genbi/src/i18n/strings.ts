@@ -41,6 +41,8 @@ export const strings = {
     definitionFilters: 'Filters',
     definitionNoneFallback: '—',
     definitionEmptyFallback: 'none',
+    unavailableValue: 'N/A',
+    unavailableReasonPrefix: 'Not available: ',
     unsupportedBlockPrefix: 'Unsupported block: "',
     unsupportedBlockSuffix: '"',
     couldNotRender: "This content couldn't be rendered",

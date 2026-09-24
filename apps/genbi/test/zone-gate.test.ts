@@ -42,14 +42,15 @@ describe("zone gate", () => {
     expect(result.violations).toMatchObject([{ code: "missing_zone", component: "answer_batch", step: "generate_sql", tier: "strong", zone: "unbound" }]);
     expect(result.violations[0]!.message).toMatch(/declares no zone/);
     const { roles: _roles, ...noJudge } = splitBinding();
-    expect(evaluateZoneGate(reportPlan(), "plan_report", noJudge).violations).toMatchObject([{ code: "missing_judge" }]);
+    // Dropping `roles` loses the render role too; the entry renders a contract from a public terminal step, so that is its own violation.
+    expect(evaluateZoneGate(reportPlan(), "plan_report", noJudge).violations.map((violation) => violation.code)).toEqual(["render_unbound", "missing_judge"]);
   });
   it("rejects a zone-aware binding whose public caller reaches a callee without a disclosure policy", () => {
     const { disclosurePolicy: _policy, roles: _roles, ...tiersOnly } = splitBinding();
     const result = evaluateZoneGate(reportPlan(), "plan_report", tiersOnly);
     expect(result.armed).toBe(true);
-    expect(result.violations).toMatchObject([{ code: "missing_policy", component: "plan_report", step: "plan_layout", tier: "plan", zone: "public" }]);
-    // An all-private caller may compose without a policy: nothing crosses a zone.
+    expect(result.violations.filter((violation) => violation.code !== "render_unbound")).toMatchObject([{ code: "missing_policy", component: "plan_report", step: "plan_layout", tier: "plan", zone: "public" }]);
+    // An all-private caller may compose without a policy: nothing crosses a zone. Its render stage inherits a private tier, so no render role is needed either.
     const allPrivate = { ...tiersOnly, tiers: { ...tiersOnly.tiers, plan: priv("local-planner") } };
     expect(evaluateZoneGate(reportPlan(), "plan_report", allPrivate).violations).toEqual([]);
   });
@@ -68,8 +69,8 @@ describe("zone gate", () => {
   });
   it("is keyed on (mount, tier): a shared tier name binds different zones and models per mount", () => {
     const binding: TierBinding = { tiers: {
-      "plan_report/strong": pub("cloud-strong"), "answer_batch/strong": priv("local-strong"), cheap: priv("nano"), judge: priv("nano") },
-      disclosurePolicy: policy, roles: { judge: "judge" } };
+      "plan_report/strong": pub("cloud-strong"), "answer_batch/strong": priv("local-strong"), cheap: priv("nano"), judge: priv("nano"), render: priv("nano") },
+      disclosurePolicy: policy, roles: { judge: "judge", render: "render" } };
     const plan = reportPlan();
     const caller = plan.components.plan_report!;
     const shared = { ...plan, components: { ...plan.components, plan_report: { ...caller, steps: caller.steps.map((step) => ({ ...step, tier: "strong" })) } } };
@@ -78,7 +79,7 @@ describe("zone gate", () => {
     expect(result.steps.find((step) => step.component === "plan_report")).toMatchObject({ key: "plan_report/strong", zone: "public", spec: { config: { modelId: "cloud-strong" } } });
     expect(result.steps.find((step) => step.step === "generate_sql")).toMatchObject({ key: "answer_batch/strong", zone: "private", spec: { config: { modelId: "local-strong" } } });
     // Flat legacy key for the same tier name would put the callee on the public model: rejected.
-    const flat: TierBinding = { ...binding, tiers: { strong: pub("cloud-strong"), cheap: priv("nano"), judge: priv("nano") } };
+    const flat: TierBinding = { ...binding, tiers: { strong: pub("cloud-strong"), cheap: priv("nano"), judge: priv("nano"), render: priv("nano") } };
     expect(evaluateZoneGate(shared, "plan_report", flat).violations).toMatchObject([{ code: "callee_public", step: "generate_sql", tier: "strong" }]);
   });
   it("is not armed for a legacy binding with no zone information, and reports unbound tiers", () => {
@@ -90,5 +91,27 @@ describe("zone gate", () => {
     const unbound = evaluateZoneGate(reportPlan(), "plan_report", { ...splitBinding(), tiers: withoutCheap });
     expect(unbound.violations).toMatchObject([{ code: "unbound_tier", step: "resolve_intent", tier: "cheap" }]);
     expect(unbound.violations[0]!.message).toMatch(/looked up answer_batch\/cheap, then cheap/);
+  });
+});
+
+describe("zone gate: the render stage is bound explicitly", () => {
+  it("rejects a binding that leaves the render stage on its default tier when that default is public", () => {
+    const { roles, ...rest } = splitBinding();
+    const noRender: TierBinding = { ...rest, roles: { judge: roles!.judge! } };
+    const result = evaluateZoneGate(reportPlan(), "plan_report", noRender);
+    expect(result.violations).toMatchObject([{ code: "render_unbound", component: "plan_report", step: "narrate", tier: "plan", zone: "public" }]);
+    expect(result.violations[0]!.message).toMatch(/roles\.render names no tier.*inherit step plan_report\.narrate \(tier plan, zone public\)/);
+    expect(() => assertZoneGate(reportPlan(), "plan_report", noRender)).toThrow(ZoneGateError);
+  });
+  it("rejects a render role bound to a public tier, and accepts one bound private", () => {
+    const publicRender = { ...splitBinding(), tiers: { ...splitBinding().tiers, render: pub("cloud-render") } };
+    expect(evaluateZoneGate(reportPlan(), "plan_report", publicRender).violations).toMatchObject([{ code: "render_public", tier: "render", zone: "public" }]);
+    expect(evaluateZoneGate(reportPlan(), "plan_report", splitBinding()).violations).toEqual([]);
+    expect(evaluateZoneGate(reportPlan(), "plan_report", splitBinding()).roles).toMatchObject([{ role: "judge", zone: "private" }, { role: "render", zone: "private" }]);
+  });
+  it("does not demand a render role when the stage would inherit a private tier anyway", () => {
+    const { roles, ...rest } = splitBinding();
+    const allPrivate: TierBinding = { ...rest, tiers: { ...rest.tiers, plan: priv("local-planner") }, roles: { judge: roles!.judge! } };
+    expect(evaluateZoneGate(reportPlan(), "plan_report", allPrivate).violations).toEqual([]);
   });
 });

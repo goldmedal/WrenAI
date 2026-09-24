@@ -39,6 +39,7 @@ const fixtureByType: Record<string, AnyBlock> = {
   kpi_card: { type: 'kpi_card', label: 'Label', value: 1 },
   chart: { type: 'chart', chart_type: 'bar', x: 'x', series: ['y'], rows: [{ x: 'a', y: 1 }] },
   narrative: { type: 'narrative', text: 'hello' },
+  unavailable: { type: 'unavailable', label: 'Refund rate', block_type: 'kpi_card', reason_category: 'unanswerable' },
 };
 
 function renderBlock(block: AnyBlock) {

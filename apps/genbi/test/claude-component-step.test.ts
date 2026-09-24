@@ -16,7 +16,7 @@ const result = { type: "result", subtype: "success", uuid: "result", session_id:
   permission_denials: [], modelUsage: { "synthetic-model": { webSearchRequests: 0, inputTokens: 2, outputTokens: 2, cacheReadInputTokens: 2, cacheCreationInputTokens: 1 } }, usage: { input_tokens: 5, output_tokens: 2 } };
 function setup(events: unknown[] = [init, result]) {
   handlers.clear();
-  const run: StepRun = { tier: "cheap", request: "synthetic", input: {}, consumes: {}, prompt: "only this step", signal: new AbortController().signal,
+  const run: StepRun = { tier: "cheap", request: "synthetic", input: {}, consumes: {}, children: [], prompt: "only this step", signal: new AbortController().signal,
     tools: { query: vi.fn(async () => ({ rows: [{ n: 1 }] })) }, toolDescriptions: {}, toolSchemas: { query: { type: "object", required: ["sql"], properties: { sql: { type: "string" } }, additionalProperties: false } } };
   const pending: unknown[] = [...events];
   let options!: Options;
