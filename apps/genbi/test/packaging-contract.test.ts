@@ -21,7 +21,7 @@ describe("installed-package and vendor-contract CI wiring", () => {
     expect(packageJson.files).toContain("managed-wren");
     const manifest = JSON.parse(readFileSync(path.join(packageRoot, "managed-wren", "manifest.json"), "utf8"));
     expect(manifest).toMatchObject({ schema: 1, platform: "darwin-arm64", activation: "staged", licenseApproval: { state: "pending" } });
-    expect(manifest.python.mirror.url).toMatch(/^https:\/\/github\.com\/Canner\/WrenAI\/releases\/download\//);
+    expect(manifest.python.mirror.url).toMatch(/^https:\/\/github\.com\/goldmedal\/WrenAI\/releases\/download\//);
     expect(manifest.wheels[0]).toMatchObject({ distribution: "wrenai", version: "0.13.0" });
   });
 
