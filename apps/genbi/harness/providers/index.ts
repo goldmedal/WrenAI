@@ -3,14 +3,37 @@ export { UnknownAdapterError, UnknownTierError } from "./errors.js";
 export { createProviderRegistry } from "./registry.js";
 export type { AdapterFactory, ProviderRegistry } from "./registry.js";
 
-export { resolveStepModel, resolveTierModel } from "./binding.js";
+export {
+  isZoneAwareBinding,
+  parseTierBindingKey,
+  resolveStepModel,
+  resolveTierModel,
+  resolveTierSpec,
+  tierBindingKey,
+} from "./binding.js";
 export type { AdapterSpec, TierBinding } from "./binding.js";
+
+export {
+  ANSWER_SHAPES,
+  ZONES,
+  answerShapeSchema,
+  disclosurePolicySchema,
+  parseDisclosurePolicy,
+  parseTierBindingDocument,
+  readTierBindingFile,
+  TierBindingParseError,
+  tierBindingDocumentSchema,
+  zoneRolesSchema,
+  zoneSchema,
+} from "./zone.js";
+export type { AnswerShape, DisclosurePolicy, TierBindingDocument, Zone, ZoneRoles } from "./zone.js";
 
 export { createMockAdapter, MOCK_ADAPTER_ID } from "./adapters/mock.js";
 export type { MockAdapterConfig } from "./adapters/mock.js";
 
 export {
   createOpenAICompatibleAdapter,
+  mergeRequestBody,
   OPENAI_COMPATIBLE_ADAPTER_ID,
 } from "./adapters/openai-compatible.js";
 export type { OpenAICompatibleAdapterConfig } from "./adapters/openai-compatible.js";

@@ -1,0 +1,39 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`capability card > is byte-identical across runs and carries names, types, descriptions, relationships, enum meanings, grains and the declared date range 1`] = `
+"# Capability card
+Schema of the bound project: names, types, descriptions, relationships, cubes, enum meanings and declared time grains. It carries no sample values, row counts or SQL; ask the data oracle for values.
+project: card_demo (duckdb)
+
+## Models
+- customers [pk: id] — One row per customer account.
+  - id: INTEGER (not null) — Unique customer id.
+  - name: VARCHAR — Customer display name.
+  - tier: VARCHAR — [enum] Commercial tier; see enum_values.
+  - status: VARCHAR
+- order_lines
+  - order_id: INTEGER
+  - quantity: INTEGER
+- orders [pk: id] — One row per order, amount in USD.
+  - id: INTEGER (not null)
+  - customer_id: INTEGER (relationship: orders_customer)
+  - order_date: DATE — Order date (UTC).
+  - amount: DOUBLE
+  - amount_cents: BIGINT (calculated)
+
+## Relationships
+- orders_customer: orders customers MANY_TO_ONE on orders.customer_id = customers.id
+
+## Cubes
+- order_metrics (base: orders) — Revenue and order counts.
+  measures: total_revenue DOUBLE — Sum of order amounts in USD.; order_count BIGINT
+  dimensions: customer_id INTEGER
+  time dimensions: order_date DATE [grains: day/month/quarter/year; range: 2023-01-01..2024-12-31]
+
+## Views
+- customer_orders — Orders joined to their customer.
+
+## Enum meanings
+- customers.tier: ENT = enterprise; SMB = small business
+- customers.status: A = active; C = churned"
+`;

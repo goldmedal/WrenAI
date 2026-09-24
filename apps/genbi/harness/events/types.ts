@@ -165,6 +165,26 @@ export interface TraceStep {
   readonly detail?: string;
 }
 
+/**
+ * One model call's prompt surfaces, digested per surface and in total (the
+ * prompt-fingerprint contract): what the model was told, never the question.
+ * `context` names which host context the step received — the prepared
+ * snapshot (private zone) or the capability card (public zone) — so an audit
+ * can see the card went only where it was allowed to.
+ */
+export interface PromptSurfaceRecord {
+  readonly component: string;
+  readonly step: string;
+  readonly tier: string;
+  readonly zone: "private" | "public" | "unbound";
+  readonly context: "snapshot" | "card" | "none";
+  readonly algorithm: string;
+  readonly digest: string;
+  readonly surfaces: Readonly<Record<string, string>>;
+}
+
 export interface StepTrace {
   readonly steps: readonly TraceStep[];
+  /** Composed in-process runs only; absent elsewhere. */
+  readonly surfaces?: readonly PromptSurfaceRecord[];
 }

@@ -1,0 +1,35 @@
+name: customers
+properties:
+  description: One row per customer account.
+  sample_values: ["Acme Corp", "Globex"]
+table_reference:
+  catalog: wren
+  schema: public
+  table: customers
+primary_key: id
+columns:
+  - name: id
+    type: INTEGER
+    not_null: true
+    properties:
+      description: Unique customer id.
+  - name: name
+    type: VARCHAR
+    properties:
+      description: Customer display name.
+      sample_values: ["Acme Corp", "Globex", "Initech"]
+  - name: tier
+    type: VARCHAR
+    properties:
+      description: "[enum] Commercial tier; see enum_values."
+      enum_values:
+        ENT: enterprise
+        SMB: small business
+  - name: status
+    type: VARCHAR
+    properties:
+      enum_values:
+        - value: A
+          meaning: active
+        - value: C
+          meaning: churned

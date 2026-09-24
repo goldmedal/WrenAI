@@ -1,0 +1,25 @@
+name: orders
+properties:
+  description: One row per order, amount in USD.
+ref_sql: SELECT * FROM raw_orders WHERE deleted_at IS NULL
+primary_key: id
+columns:
+  - name: id
+    type: INTEGER
+    not_null: true
+  - name: customer_id
+    type: INTEGER
+    relationship: orders_customer
+  - name: order_date
+    type: DATE
+    properties:
+      description: Order date (UTC).
+  - name: amount
+    type: DOUBLE
+  - name: amount_cents
+    type: BIGINT
+    is_calculated: true
+    expression: amount * 100
+  - name: internal_note
+    type: VARCHAR
+    is_hidden: true

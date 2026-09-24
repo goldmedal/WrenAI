@@ -128,6 +128,11 @@ Verify a regeneration rather than trusting it: recompiling an unchanged profile 
 did not intend it to means something else moved — the pin, the Hub, or the generator — and the diff
 should be understood before it is committed.
 
+The same binary also emits the **capability catalog** (`--catalog-out <file>`), the authored,
+descriptive, SQL-free slice of a project that the harness renders into the capability card for
+public-zone steps (`RUNNING.md`, "Zone-aware tier binding"). It is generated at run time next to the
+prepared document and is not committed; `test/fixtures/card-project` is the fixture its tests use.
+
 ### Distributing the context-loader generator
 
 `@wrenai/genbi` pins `@wrenai/context-loader` to one exact version. The package postinstall

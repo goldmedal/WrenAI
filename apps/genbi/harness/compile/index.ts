@@ -6,7 +6,7 @@ export {
   extractContextBindingPath,
   rewriteContextBindingProject,
 } from "./compose-profile.js";
-export { generatePreparedContext, resolveContextLoaderBinary } from "./context-loader.js";
+export { generatePreparedContext, generatePreparedContextAndCatalog, resolveContextLoaderBinary } from "./context-loader.js";
 export {
   ContextLoaderFailedError,
   ContextLoaderNotFoundError,

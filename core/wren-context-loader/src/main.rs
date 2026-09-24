@@ -1,10 +1,12 @@
 //! Render a wren project as a Warble prepared-context document.
 //!
 //! ```text
-//! wren-context-loader <project-dir> [-o <out.json>]
+//! wren-context-loader <project-dir> [-o <out.json>] [--catalog-out <catalog.json>]
 //! ```
 //!
-//! Writes to stdout when `-o` is omitted. A host runs this before `warble compile` and binds the
+//! Writes to stdout when `-o` is omitted. `--catalog-out` additionally writes the **capability
+//! catalog** — the authored, descriptive, SQL-free slice of the project (see `catalog.rs`) — which a
+//! host may render into a card for a planner outside the data zone. A host runs this before `warble compile` and binds the
 //! output with `kind: prepared`, which is how a Warble profile binds a wren project without Warble
 //! itself depending on Wren.
 //!
@@ -16,15 +18,19 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use wren_context_loader::{prepared_document, read_project_dir, MdlContext};
+use wren_context_loader::{
+    capability_catalog, catalog_document, prepared_document, read_project_dir, MdlContext,
+};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (project_dir, out_path) = match parse_args(&args) {
+    let (project_dir, out_path, catalog_path) = match parse_args(&args) {
         Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("{message}");
-            eprintln!("usage: wren-context-loader <project-dir> [-o <out.json>]");
+            eprintln!(
+                "usage: wren-context-loader <project-dir> [-o <out.json>] [--catalog-out <catalog.json>]"
+            );
             return ExitCode::from(2);
         }
     };
@@ -36,6 +42,13 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+
+    if let Some(catalog_path) = catalog_path {
+        if let Err(message) = write_catalog(&project_dir, &catalog_path) {
+            eprintln!("{message}");
+            return ExitCode::from(1);
+        }
+    }
 
     let document = match prepared_document(&context) {
         Ok(document) => document,
@@ -57,15 +70,22 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn parse_args(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
+type ParsedArgs = (PathBuf, Option<PathBuf>, Option<PathBuf>);
+
+fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
     let mut project_dir: Option<PathBuf> = None;
     let mut out_path: Option<PathBuf> = None;
+    let mut catalog_path: Option<PathBuf> = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "-o" | "--out" => {
                 let value = rest.next().ok_or_else(|| format!("{arg} needs a path"))?;
                 out_path = Some(PathBuf::from(value));
+            }
+            "--catalog-out" => {
+                let value = rest.next().ok_or_else(|| format!("{arg} needs a path"))?;
+                catalog_path = Some(PathBuf::from(value));
             }
             other if other.starts_with('-') => return Err(format!("unknown flag '{other}'")),
             other => {
@@ -77,7 +97,32 @@ fn parse_args(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
         }
     }
     let project_dir = project_dir.ok_or_else(|| "a project directory is required".to_string())?;
-    Ok((project_dir, out_path))
+    Ok((project_dir, out_path, catalog_path))
+}
+
+/// Write the capability catalog. A directory that is not a wren project yields an empty catalog
+/// (no models), mirroring how the prepared document reports `parseable: false` rather than
+/// failing: the host decides what an empty card means.
+fn write_catalog(project_dir: &Path, catalog_path: &Path) -> Result<(), String> {
+    let sources = read_project_dir(project_dir)
+        .map_err(|e| format!("failed to read {}: {e}", project_dir.display()))?;
+    let catalog = match &sources {
+        Some(sources) => capability_catalog(sources),
+        None => capability_catalog(&wren_context_loader::ProjectSources {
+            wren_project_yml: String::new(),
+            model_ymls: Vec::new(),
+            relationships_yml: None,
+            cubes_yml: None,
+            cube_ymls: Vec::new(),
+            views: Vec::new(),
+            knowledge_sql_mds: Vec::new(),
+            dashboards_yml: None,
+        }),
+    };
+    let document = catalog_document(&catalog)
+        .map_err(|e| format!("failed to serialize the capability catalog: {e}"))?;
+    std::fs::write(catalog_path, document)
+        .map_err(|e| format!("failed to write {}: {e}", catalog_path.display()))
 }
 
 /// Read and assemble the project, turning an assembly failure into an unparseable context rather

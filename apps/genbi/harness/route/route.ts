@@ -45,9 +45,9 @@ export async function route(options: RouteOptions): Promise<RouteResult> {
   const { warnings } = enforceCompliance(authChoice, { deployment });
 
   if (authChoice.mode === "subscription") {
-    if (options.tierBinding !== undefined) {
+    if (options.tierBinding !== undefined || options.disclosurePolicy !== undefined || options.zoneRoles !== undefined) {
       throw new Error(
-        "tierBinding (hybrid in-process per-tier routing) has no effect under a subscription " +
+        "tierBinding (with disclosurePolicy/zoneRoles: hybrid in-process per-tier routing) has no effect under a subscription " +
           "authChoice — dispatched has no adapter/tier binding of its own; use modelsConfig instead " +
           "(warble-agent-sdk's own --models-config per-step routing)",
       );
@@ -118,6 +118,8 @@ export async function route(options: RouteOptions): Promise<RouteResult> {
     ...(options.bundle !== undefined ? { bundle: options.bundle } : {}),
     ...(options.mcpServers !== undefined ? { mcpServers: options.mcpServers } : {}),
     ...(options.tierBinding !== undefined ? { tierBinding: options.tierBinding } : {}),
+    ...(options.disclosurePolicy !== undefined ? { disclosurePolicy: options.disclosurePolicy } : {}),
+    ...(options.zoneRoles !== undefined ? { zoneRoles: options.zoneRoles } : {}),
     ...(options.onEvent !== undefined ? { onEvent: options.onEvent } : {}),
     ...(options.agentId !== undefined ? { agentId: options.agentId } : {}),
   });

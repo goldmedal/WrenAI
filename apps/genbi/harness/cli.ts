@@ -3,6 +3,7 @@ import { parseArgs } from "node:util";
 import { createDefaultLoginProbe } from "./auth/index.js";
 import {
   buildTierBindingFromFlags,
+  CliUsageError,
   determineExitCode,
   parseChatTimeoutMs,
   resolveAuthChoice,
@@ -11,7 +12,15 @@ import {
 } from "./cli-args.js";
 import type { CliFlags } from "./cli-args.js";
 import { enforceCompliance } from "./compliance/index.js";
-import { resolveDefaultProfileSource, route } from "./route/index.js";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { generatePreparedContextAndCatalog, resolveContextLoader } from "./compile/context-loader.js";
+import { buildCapabilityCard } from "./components/capability-card.js";
+import { executionPlanFor } from "./components/display.js";
+import { describeZoneDryRun, formatZoneDryRun } from "./components/zone-dry-run.js";
+import { readTierBindingFile, type TierBinding } from "./providers/index.js";
+import { describeBundle, resolveDefaultProfileSource, route } from "./route/index.js";
 
 const USAGE = `Usage: wren-harness <question> --project <dir> [options]
 
@@ -41,6 +50,17 @@ Options:
                           per-tier YAML config, forwarded verbatim as --models-config <path> to
                           "warble-agent-sdk chat". Known limitation: warble's render stage still
                           wall-hits on non-"render: none" components under a non-Anthropic tier.
+  --tier-binding <path>   Hybrid privacy split, in-process only: a JSON tier binding document
+                          {"tiers": {"<tier>"|"<mount>/<tier>": {"adapter","config","zone"}},
+                           "disclosure_policy": {...}, "roles": {"judge": "<key>", "render": "<key>"}}.
+                          Keys may be mount-qualified so a caller and callee sharing a tier name bind
+                          different models. Mutually exclusive with --tier-adapter. A zone on any entry
+                          (or a disclosure_policy / roles block) arms the zone gate, which rejects a
+                          public or unset zone on any callee or data-bearing step before any model runs.
+  --zone-dry-run          In-process only: compile the profile, print every step's component, tier,
+                          binding key, zone, adapter, model, endpoint host and thinking setting plus
+                          every alias call edge, run the zone gate and exit (0 ok, 1 gate violation).
+                          Starts no model, opens no network connection and needs no credentials.
   --chat-timeout-ms <n>   dispatched only (subscription): overrides the default 10-minute hang guard
                           on a "warble-agent-sdk chat" invocation. Raise this for a legitimately
                           slower cold-start turn (e.g. right after onboarding a project) rather
@@ -84,6 +104,8 @@ async function main(): Promise<void> {
       deployment: { type: "string" },
       "tier-adapter": { type: "string", multiple: true },
       "models-config": { type: "string" },
+      "tier-binding": { type: "string" },
+      "zone-dry-run": { type: "boolean" },
       "chat-timeout-ms": { type: "string" },
       help: { type: "boolean" },
     },
@@ -115,6 +137,8 @@ async function main(): Promise<void> {
     ...(values.deployment !== undefined ? { deployment: values.deployment } : {}),
     ...(values["tier-adapter"] !== undefined ? { tierAdapters: values["tier-adapter"] } : {}),
     ...(values["models-config"] !== undefined ? { modelsConfig: values["models-config"] } : {}),
+    ...(values["tier-binding"] !== undefined ? { tierBindingFile: values["tier-binding"] } : {}),
+    ...(values["zone-dry-run"] === true ? { zoneDryRun: true } : {}),
     ...(chatTimeoutMs !== undefined ? { chatTimeoutMs } : {}),
   };
 
@@ -138,8 +162,45 @@ async function main(): Promise<void> {
   // Error, caught like any other error below) if the wrong one is supplied
   // for the resolved authChoice.mode, so no separate CLI-level guard is
   // duplicated here.
+  if (flags.tierAdapters !== undefined && flags.tierBindingFile !== undefined) {
+    throw new CliUsageError("--tier-adapter and --tier-binding are mutually exclusive; declare the binding in one place");
+  }
+  const fileBinding: TierBinding | undefined =
+    flags.tierBindingFile !== undefined ? await readTierBindingFile(flags.tierBindingFile) : undefined;
   const tierBinding =
-    flags.tierAdapters !== undefined ? buildTierBindingFromFlags(flags.tierAdapters) : undefined;
+    fileBinding?.tiers ?? (flags.tierAdapters !== undefined ? buildTierBindingFromFlags(flags.tierAdapters) : undefined);
+  const zoneOptions = {
+    ...(tierBinding !== undefined ? { tierBinding } : {}),
+    ...(fileBinding?.disclosurePolicy !== undefined ? { disclosurePolicy: fileBinding.disclosurePolicy } : {}),
+    ...(fileBinding?.roles !== undefined ? { zoneRoles: fileBinding.roles } : {}),
+  };
+
+  if (flags.zoneDryRun === true) {
+    if (authChoice.mode === "subscription") {
+      throw new CliUsageError("--zone-dry-run audits the in-process composed runtime; it does not apply to subscription mode");
+    }
+    const bundle = await describeBundle({ authChoice, profileSource, userProject: project,
+      ...(flags.warbleBin !== undefined ? { warbleBin: flags.warbleBin } : {}) });
+    if (bundle.vercel_bundle_version !== "0.2") {
+      throw new CliUsageError("--zone-dry-run needs a composed (vercel bundle 0.2) profile; this profile compiled to the legacy agent format");
+    }
+    const plan = executionPlanFor(bundle);
+    if (!plan) throw new Error("Composed display has no trusted execution plan");
+    const binding: TierBinding = { tiers: tierBinding ?? {}, ...(fileBinding?.disclosurePolicy !== undefined ? { disclosurePolicy: fileBinding.disclosurePolicy } : {}),
+      ...(fileBinding?.roles !== undefined ? { roles: fileBinding.roles } : {}) };
+    // The card public-zone steps would receive: generated by code from the bound project, no model involved.
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "genbi-zone-dry-run-"));
+    let card: ReturnType<typeof buildCapabilityCard> | undefined;
+    try {
+      const catalogPath = path.join(scratch, "catalog.json");
+      await generatePreparedContextAndCatalog(resolveContextLoader().bin, path.resolve(project), path.join(scratch, "context.json"), catalogPath);
+      card = buildCapabilityCard(JSON.parse(await readFile(catalogPath, "utf8")));
+    } finally { await rm(scratch, { recursive: true, force: true }); }
+    const dryRun = describeZoneDryRun(plan, "answer_query", binding, { card: { digest: card.digest, bytes: card.bytes, truncated: card.truncated } });
+    process.stdout.write(formatZoneDryRun(dryRun));
+    process.exitCode = dryRun.exitCode;
+    return;
+  }
 
   const result = await route({
     authChoice,
@@ -151,7 +212,7 @@ async function main(): Promise<void> {
     ...(flags.warbleBin !== undefined ? { warbleBin: flags.warbleBin } : {}),
     ...(flags.agentSdkBin !== undefined ? { agentSdkBin: flags.agentSdkBin } : {}),
     ...(flags.out !== undefined ? { outDir: flags.out } : {}),
-    ...(tierBinding !== undefined ? { tierBinding } : {}),
+    ...zoneOptions,
     ...(flags.modelsConfig !== undefined ? { modelsConfig: flags.modelsConfig } : {}),
     ...(flags.chatTimeoutMs !== undefined ? { chatTimeoutMs: flags.chatTimeoutMs } : {}),
   });
