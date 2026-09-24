@@ -49,7 +49,7 @@ rejected. An initialize acknowledgement alone is never certification.
 
 ## Server-owned permission mapping
 
-The generated Codex 0.146.0 schema documents mutually exclusive forms:
+The generated Codex 0.156.1 schema documents mutually exclusive forms:
 
 | Operation | Inline policy | Named permission profile |
 | --- | --- | --- |
@@ -62,6 +62,9 @@ protected-read rules and cannot be combined with a named profile. Each launch
 builds its sole `genbi-scoped` profile from the host-owned `NativeRuntimeSpec`:
 
 - Workspace write, managed generation/tool directories/project/data roots read.
+- Shared scratch roots `/private/tmp` and `/private/var/tmp` denied, with only
+  narrower host-owned workspace grants. Codex 0.156.1 respects these exclusions
+  in implicit scratch permissions; the retired 0.146.0 baseline did not.
 - Selected session Wren home read-only; original project `.env` and vendor login
   home denied. Selected database-secret material remains owned by the existing
   Wren-home materializer, not copied by this adapter.
@@ -189,13 +192,14 @@ scope/environment, direct events, command/PTTY controls and cleanup failures.
 `scripts/codex-backend-probe.mjs` exercises the compiled driver on the exact macOS
 baseline with synthetic login/Wren fixtures, positive file/network/liveness
 controls, PTY resize, timeout and disconnect descendant cleanup. It never starts
-a thread/model turn. It runs beside the existing exact vendor probes in macOS CI.
+a thread/model turn. The runner repeats it with both shared scratch roots as
+`TMPDIR`, in addition to the normal user temp directory, in macOS CI.
 Packed-install acceptance loads these modules through `npx` with checkout access
 blocked and proves that fixture protocol success cannot make production ready.
 
-The certified registry remains empty; the managed manifest remains staged with
-licence approval pending. Real approved-runtime and authenticated named-profile
-turn acceptance are not claimed. Release approval, exact certification evidence
+The certified registry remains empty. The 0.156.1 version is a candidate baseline,
+not an execution grant. An approved managed runtime alone does not certify the
+vendor backend. Authenticated named-profile turn acceptance is not claimed. Release approval, exact certification evidence
 and later application wiring must all precede activation.
 
 Protocol reference: [Codex App Server](https://developers.openai.com/codex/app-server).

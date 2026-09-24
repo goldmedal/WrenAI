@@ -171,8 +171,8 @@ process.stdout.write(JSON.stringify({ manifest_version: '0.1', target: 'codex:lo
 `);
   chmodSync(codexLocal, 0o700);
   writeFileSync(staleCodexLocal, "#!/bin/sh\necho stale dispatcher\n"); chmodSync(staleCodexLocal, 0o700);
-  writeFileSync(codexBin, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.146.0'; else exit 97; fi\n"); chmodSync(codexBin, 0o700);
-  writeFileSync(path.join(codexPackage, "package.json"), JSON.stringify({ name: "@openai/codex", version: "0.146.0" }));
+  writeFileSync(codexBin, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.156.1'; else exit 97; fi\n"); chmodSync(codexBin, 0o700);
+  writeFileSync(path.join(codexPackage, "package.json"), JSON.stringify({ name: "@openai/codex", version: "0.156.1" }));
   writeFileSync(staleCodexBin, "#!/bin/sh\necho 'codex-cli 0.145.0'\n"); chmodSync(staleCodexBin, 0o700);
   // The fixture no longer git-inits its directory, so a binary taken straight from it is not
   // inside any checkout. That is the *checkout* arm of the identity split all the same: a bare
@@ -282,7 +282,7 @@ describe("local GenBI contract check", () => {
       provider: "codex",
       dispatcher: "codex-local",
       source: "npm:@openai/codex",
-      version: "0.146.0",
+      version: "0.156.1",
     });
     expect(selected.probes).toEqual(expect.arrayContaining([
       "dispatch:native(analysis/codex)", "dispatch:native(setup/codex)", "dispatch:native(context_enrichment/codex)",

@@ -121,8 +121,8 @@ function productionService(dir: string, producer: string, wrenShim: string, term
   const codexRoot = mkdtempSync(path.join(tmpdir(), "genbi-native-preflight-codex-")); dirs.push(codexRoot);
   const codexBinDirectory = path.join(codexRoot, "bin"); mkdirSync(codexBinDirectory);
   const codexBin = path.join(codexBinDirectory, "codex");
-  writeFileSync(codexBin, "#!/bin/sh\necho codex-cli 0.146.0\n"); chmodSync(codexBin, 0o700);
-  writeFileSync(path.join(codexRoot, "package.json"), JSON.stringify({ name: "@openai/codex", version: "0.146.0" }));
+  writeFileSync(codexBin, "#!/bin/sh\necho codex-cli 0.156.1\n"); chmodSync(codexBin, 0o700);
+  writeFileSync(path.join(codexRoot, "package.json"), JSON.stringify({ name: "@openai/codex", version: "0.156.1" }));
   const codexClosure = createHash("sha256");
   const visitCodex = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
