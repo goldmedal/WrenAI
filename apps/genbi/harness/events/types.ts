@@ -183,8 +183,44 @@ export interface PromptSurfaceRecord {
   readonly surfaces: Readonly<Record<string, string>>;
 }
 
+/**
+ * One model call's provider-reported token counts, attributed to the step
+ * and the provider that served it. Counts only, never payloads. A provider
+ * that reports nothing is recorded as zeros, not omitted. `depth` is 0 for a
+ * root step and 1+ inside a child run; the egress judge is recorded under the
+ * callee it judged, as step `egress_judge` on the judge tier.
+ */
+export interface UsageRecord {
+  readonly component: string;
+  readonly step: string;
+  readonly tier: string;
+  readonly depth: number;
+  readonly zone: "private" | "public" | "unbound";
+  readonly adapter: string;
+  readonly model: string;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+}
+
+/** Usage summed per provider (zone, adapter, model); `calls` counts the records summed. */
+export interface ProviderUsage {
+  readonly zone: UsageRecord["zone"];
+  readonly adapter: string;
+  readonly model: string;
+  readonly calls: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+}
+
+export interface UsageTrace {
+  readonly steps: readonly UsageRecord[];
+  readonly providers: readonly ProviderUsage[];
+}
+
 export interface StepTrace {
   readonly steps: readonly TraceStep[];
   /** Composed in-process runs only; absent elsewhere. */
   readonly surfaces?: readonly PromptSurfaceRecord[];
+  /** Composed in-process runs only; absent elsewhere. */
+  readonly usage?: UsageTrace;
 }
