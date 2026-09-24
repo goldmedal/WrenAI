@@ -10,7 +10,7 @@ import { buildCapabilityCard } from "../harness/components/capability-card.js";
 import { describeComponentPlan } from "../harness/components/display.js";
 import type { StepRun } from "../harness/components/runner.js";
 import { COMPONENT_LIMITS } from "../harness/components/runner.js";
-import { openWrenComponentAccess } from "../harness/components/wren-access.js";
+import { GovernedWrenError, openWrenComponentAccess } from "../harness/components/wren-access.js";
 import { ZoneGateError } from "../harness/components/zone-gate.js";
 import { parseDisclosurePolicy, type AdapterSpec } from "../harness/providers/index.js";
 import { runInProcessDefault } from "../harness/route/in-process.js";
@@ -56,6 +56,8 @@ const TABLES: Record<string, { columns: string[]; rows: Record<string, unknown>[
   // The query returns more rows than the slot's max_rows (5): the egress step refuses this slot on `row_limit`.
   [SQL.largest_orders]: { columns: ["order_id", "amount"], rows: Array.from({ length: 8 }, (_, i) => ({ order_id: 10400 + i, amount: 18400 - i * 300 })) },
 };
+// A first-shot SQL that queries a cube as a table: the governed transport rejects it as model_not_found.
+const CUBE_AS_TABLE = "SELECT avg_order_value FROM order_metrics";
 const PREAMBLE = { period: "fiscal year 2025 (2025-01-01 to 2025-12-31)", currency: "USD", filters: ["completed orders only"] };
 const SLOTS = [
   { slot_id: "total_revenue", block_type: "kpi_card", expected_shape: "scalar", question: "What was total revenue for the period?", unit: "USD" },
@@ -112,7 +114,7 @@ const roles = { judge: "judge", render: "render" };
 interface Captured { readonly step: string; readonly tier: string; readonly modelId: string; readonly brief?: string; readonly prompt: string; readonly request: string; readonly input: unknown; readonly consumes: unknown; readonly output: string }
 
 /** The fake models, one behaviour per step, dispatched on what the host hands the step (tools, consumes). */
-function installFakeModels(options: { mutateNarration: boolean }) {
+function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: string }) {
   const calls: Captured[] = [];
   const askRequests: unknown[] = [];
   const askResults: unknown[] = [];
@@ -143,6 +145,13 @@ function installFakeModels(options: { mutateNarration: boolean }) {
       for (const slot of SLOTS) {
         const sql = (SQL as Record<string, string>)[slot.slot_id];
         if (sql === undefined) { entries.push({ slot_id: slot.slot_id, status: "unanswerable", reason: "the semantic context defines no refund measure" }); continue; }
+        if (slot.slot_id === options.toolErrorSlot) {
+          // The model sees the tool error, gives up on this one slot and keeps answering the rest.
+          const error = await run.tools["query"]!({ sql: CUBE_AS_TABLE }).then(() => undefined, (rejection: unknown) => rejection);
+          if (!(error instanceof GovernedWrenError)) throw new Error("expected the governed transport to reject the cube-as-table query");
+          entries.push({ slot_id: slot.slot_id, status: "unanswerable", reason: `${error.errorClass}: order_metrics is a cube, not a model` });
+          continue;
+        }
         const observed = await run.tools["query"]!({ sql }) as { columns: string[]; rows: unknown[] };
         // The model's own copy of the rows is deliberately wrong for one slot: the observed rows must win.
         const rows = slot.slot_id === "total_revenue" ? [[999]] : observed.rows;
@@ -157,11 +166,11 @@ function installFakeModels(options: { mutateNarration: boolean }) {
   return { calls, askRequests, askResults };
 }
 
-async function runReport(project: string, options: { mutateNarration?: boolean; zoneRoles?: Record<string, string>; tierBinding?: Record<string, AdapterSpec> } = {}) {
+async function runReport(project: string, options: { mutateNarration?: boolean; toolErrorSlot?: string; zoneRoles?: Record<string, string>; tierBinding?: Record<string, AdapterSpec> } = {}) {
   const { plan, ir } = await loadReportPlan(project);
-  const fakes = installFakeModels({ mutateNarration: options.mutateNarration ?? false });
+  const fakes = installFakeModels({ mutateNarration: options.mutateNarration ?? false, ...(options.toolErrorSlot ? { toolErrorSlot: options.toolErrorSlot } : {}) });
   vi.mocked(openWrenComponentAccess).mockResolvedValue({
-    async query(input) { const table = TABLES[input.sql]; if (!table) throw new Error(`unexpected SQL: ${input.sql}`); return structuredClone(table); },
+    async query(input) { if (input.sql === CUBE_AS_TABLE) throw new GovernedWrenError("model_not_found"); const table = TABLES[input.sql]; if (!table) throw new Error(`unexpected SQL: ${input.sql}`); return structuredClone(table); },
     async inspect() { return {}; }, async close() {},
   });
   const events: AgentEvent[] = [];
@@ -265,6 +274,46 @@ describe("M1: the annual revenue report end to end, offline", () => {
       expect(blocks.find((block) => block.slot_id === "invented")).toBeUndefined();
       expect(JSON.stringify(result.envelope)).not.toMatch(/999|Invented/);
       expect((result.envelope as { verified: boolean }).verified).toBe(true);
+    } finally { await rm(project, { recursive: true, force: true }); }
+  });
+
+  it("a tool error on one slot of the batch child fails that slot only: it crosses as refused, renders unavailable with its category, and the rest of the report is filled", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "genbi-report-tool-error-"));
+    try {
+      const { result, events, contract, askResults } = await runReport(project, { toolErrorSlot: "avg_order_value" });
+      // The child is not callee_failed and the run succeeds.
+      expect(result.kind).toBe("answer");
+      if (result.kind !== "answer") throw new Error("unreachable");
+      const envelope = result.envelope as { blocks: Record<string, unknown>[]; verified: boolean };
+      // The tool error happened inside the child, and no repair step ran for it.
+      const childTools = events.filter((event): event is Extract<AgentEvent, { kind: "tool.result" }> => event.kind === "tool.result" && event.tool === "query");
+      expect(childTools.filter((event) => event.status === "error")).toHaveLength(1);
+      expect(childTools.filter((event) => event.status === "success")).toHaveLength(7);
+      const childSteps = events.filter((event): event is Extract<AgentEvent, { kind: "step.start" }> => event.kind === "step.start" && event.depth === 1);
+      expect(childSteps.map((event) => event.name)).toEqual(["resolve_intent", "generate_sql"]);
+      // The failed slot crosses the egress step as refused with a reason category; its reason text and SQL stay host-side.
+      const disclosed = askResults[0] as { status: string; output: { value: { answers: { slot_id: string; status: string; reason_category?: string }[] } } };
+      expect(disclosed.status).toBe("ok");
+      expect(disclosed.output.value.answers.map((answer) => [answer.slot_id, answer.status, answer.reason_category])).toEqual([
+        ["total_revenue", "ok", undefined], ["order_count", "ok", undefined], ["avg_order_value", "refused", "unanswerable"], ["revenue_by_quarter", "ok", undefined],
+        ["revenue_by_month", "ok", undefined], ["top_customers", "ok", undefined], ["growth_story", "ok", undefined],
+        ["largest_orders", "refused", "row_limit"], ["refund_rate", "refused", "unanswerable"]]);
+      expect(JSON.stringify(disclosed)).not.toMatch(/order_metrics|model_not_found|SELECT/);
+      expect(result.trace?.steps.filter((step) => step.tool === "egress").map((step) => step.detail)).toContain("ask/avg_order_value: refused (unanswerable)");
+      // The envelope: that cell is unavailable with its category, every other answerable cell is filled.
+      const data = envelope.blocks.filter((block) => block.type !== "definition");
+      expect(data.map((block) => [block.type, block.slot_id])).toEqual([
+        ["kpi_card", "total_revenue"], ["kpi_card", "order_count"], ["unavailable", "avg_order_value"], ["chart", "revenue_by_quarter"], ["chart", "revenue_by_month"],
+        ["table", "top_customers"], ["narrative", "growth_story"], ["unavailable", "largest_orders"], ["unavailable", "refund_rate"]]);
+      expect(data[2]).toMatchObject({ type: "unavailable", label: "Average order value", block_type: "kpi_card", reason_category: "unanswerable", slot_id: "avg_order_value" });
+      expect(data[0]).toMatchObject({ value: 1284500 });
+      expect(data[5]).toMatchObject({ rows: [["Northwind Traders", 96200], ["Blue Yonder Airlines", 88750], ["Contoso Ltd", 81400], ["Fabrikam Inc", 74900], ["Tailspin Toys", 69300]] });
+      // Provenance is attached to the filled cells only.
+      expect(envelope.blocks.filter((block) => block.type === "definition").map((block) => block.slot_id)).toEqual([
+        "total_revenue", "order_count", "revenue_by_quarter", "revenue_by_month", "top_customers", "growth_story"]);
+      expect(JSON.stringify(envelope)).not.toMatch(/order_metrics|model_not_found|129\.34/);
+      expect(envelope.verified).toBe(true);
+      expect(normalizeComponentResult(JSON.stringify(envelope), contract).value.status).toBe("ok");
     } finally { await rm(project, { recursive: true, force: true }); }
   });
 
