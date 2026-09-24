@@ -18,7 +18,7 @@ import type { NativeWrenRuntime } from "./native-wren-runtime.js";
 
 const SHA256 = z.string().regex(/^[a-f0-9]{64}$/);
 const RELATIVE = z.string().min(1).refine((value) => !path.isAbsolute(value) && !value.split(/[\\/]/).includes(".."));
-const URL = z.string().url().refine((value) => value.startsWith("https://github.com/Canner/WrenAI/releases/download/"));
+const URL = z.string().url().refine((value) => value.startsWith("https://github.com/goldmedal/WrenAI/releases/download/"));
 const stagedDigest = z.union([SHA256, z.literal("staged")]);
 
 const managedWrenManifestSchema = z.object({

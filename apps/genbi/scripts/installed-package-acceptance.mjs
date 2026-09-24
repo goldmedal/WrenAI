@@ -282,7 +282,7 @@ async function managedWrenFixture(root) {
   const pythonTreeSha256 = digestFile(`install/bin/python3.11\0${"700"}\0file\0${digestFile(await readFile(python))}`);
   const packageDigest = digestFile(`__init__.py\0${"600"}\0file\0${digestFile("__version__ = '0.13.0'\n")}`);
   const sitePackagesDigest = digestFile([`dependency/__init__.py\0${"644"}\0file\0${digestFile("dependency = 1\n")}`, `wren/__init__.py\0${"600"}\0file\0${digestFile("__version__ = '0.13.0'\n")}`].join("\n"));
-  const wheelName = path.basename(wheel); const closureSha256 = digestFile(`${wheelName}\0${wheelSha256}`); const release = "https://github.com/Canner/WrenAI/releases/download/managed-wren-fixture";
+  const wheelName = path.basename(wheel); const closureSha256 = digestFile(`${wheelName}\0${wheelSha256}`); const release = "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-fixture";
   return { archive, wheel, manifest: {
     schema: 1, activation: "approved", platform: "darwin-arm64", compatibility: { genbi: "0.0.4", profile: "genbi-native-v4", wren: "0.13.0" },
     python: { implementation: "cpython", version: "3.11.16", upstream: { release: "20260901", url: "https://example.invalid/python.tar.gz", sha256: archiveSha256 }, mirror: { url: `${release}/python.tar.gz`, sha256: archiveSha256 }, interpreterPath: "python/install/bin/python3.11" },

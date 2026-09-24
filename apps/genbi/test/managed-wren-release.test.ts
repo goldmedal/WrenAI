@@ -14,7 +14,7 @@ const wheel = "wrenai-0.13.0-py3-none-any.whl";
 
 function fixture() {
   const pythonBytes = "python fixture"; const wheelBytes = "wheel fixture";
-  const tag = "managed-wren-fixture"; const mirror = `https://github.com/Canner/WrenAI/releases/download/${tag}/`;
+  const tag = "managed-wren-fixture"; const mirror = `https://github.com/goldmedal/WrenAI/releases/download/${tag}/`;
   const source = "https://files.pythonhosted.org/packages/fixture/";
   const wheels = [{ distribution: "wrenai", version: "0.13.0", filename: wheel, sourceUrl: source + wheel, sha256: hash(wheelBytes), url: mirror + wheel }];
   return {
@@ -48,7 +48,7 @@ describe("managed Wren protected publish exactness", () => {
       (_candidate: any, inputs: any[]) => { inputs.push({ ...inputs[0], filename: "extra-1.0.whl", sourceUrl: "https://files.pythonhosted.org/packages/fixture/extra-1.0.whl" }); },
       (_candidate: any, inputs: any[]) => { inputs.length = 0; },
       (candidate: any, _inputs: any[]) => { candidate.wheels[0].sourceUrl = "https://files.pythonhosted.org/packages/fixture/renamed.whl"; },
-      (candidate: any, _inputs: any[]) => { candidate.wheels[0].url = "https://github.com/Canner/WrenAI/releases/download/other/" + wheel; },
+      (candidate: any, _inputs: any[]) => { candidate.wheels[0].url = "https://github.com/goldmedal/WrenAI/releases/download/other/" + wheel; },
     ]) {
       const candidate = JSON.parse(JSON.stringify(value.candidate)); const inputs = JSON.parse(JSON.stringify(value.wheelInputs)); mutate(candidate, inputs);
       expect(() => verifyExactPublishInventory(candidate, inputs)).toThrow();
