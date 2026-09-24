@@ -222,6 +222,35 @@ class ReleaseMetadataTests(unittest.TestCase):
             helper["notices"](self.release, inputs)
         self.assertFalse((self.release / "THIRD_PARTY_NOTICES.txt").exists())
 
+    def test_retained_documents_and_new_wheel_documents_bind_complete_notices(self):
+        inputs = json.loads((SCRIPT.parent.parent / "managed-wren/release-inputs.json").read_text())
+        dependency = {"distribution": "fixture", "filename": "fixture-1.0.whl",
+                      "version": "1.0", "sourceUrl": "https://example.test/fixture-1.0.whl",
+                      "sha256": "b" * 64, "license": "MIT"}
+        old = {**dependency, "documents": [{"path": "LICENSE", "sha256": "c" * 64, "source": {"url": "https://example.test/LICENSE"}}]}
+        raw = [json.dumps({"archiveSha256": inputs["python"]["sha256"]}).encode(),
+               b"retained notices", json.dumps({"wheels": [old]}).encode()]
+        for item, data in zip(inputs["licenseEvidence"]["retained"], raw):
+            item["sha256"] = hashlib.sha256(data).hexdigest()
+        with zipfile.ZipFile(self.release / "wheels" / inputs["wrenai"]["filename"], "w") as archive:
+            archive.writestr("wrenai.dist-info/licenses/LICENSE", "overview")
+            archive.writestr("wrenai.dist-info/licenses/LICENSE-APACHE-2.0", "Apache fixture")
+        helper = runpy.run_path(str(SCRIPT))
+        inventory = self.release / "wheel-license-inventory.json"
+        inventory.write_text(json.dumps({"wheels": [dependency, {"distribution": "wrenai"}]}))
+        with patch("urllib.request.urlopen", side_effect=[io.BytesIO(data) for data in raw]):
+            helper["notices"](self.release, inputs)
+        result = json.loads(inventory.read_text())
+        self.assertEqual(result["wheels"][0], old)
+        self.assertEqual(result["wheels"][1]["documents"][1]["sha256"], hashlib.sha256(b"Apache fixture").hexdigest())
+        self.assertEqual(result["wheels"][1]["documents"][1]["source"]["wheelSha256"], inputs["wrenai"]["sha256"])
+        self.assertEqual(result["noticesSha256"], hashlib.sha256((self.release / "THIRD_PARTY_NOTICES.txt").read_bytes()).hexdigest())
+        for key in ("filename", "version", "sourceUrl", "sha256", "license"):
+            changed = {**dependency, key: "different"}
+            inventory.write_text(json.dumps({"wheels": [changed, {"distribution": "wrenai"}]}))
+            with patch("urllib.request.urlopen", side_effect=[io.BytesIO(data) for data in raw]), self.assertRaisesRegex(SystemExit, "differs"):
+                helper["notices"](self.release, inputs)
+
 
 if __name__ == "__main__":
     unittest.main()
