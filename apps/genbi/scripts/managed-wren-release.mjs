@@ -1,34 +1,30 @@
 #!/usr/bin/env node
 /** Generate and verify exact managed-Wren release evidence; it never publishes. */
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, readlink, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { runtimeTreeDigest, preparePythonTree } from "../managed-wren/runtime-tree.cjs";
+
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const digest = (value) => createHash("sha256").update(value).digest("hex");
-const fileDigest = async (target) => digest(await readFile(target));
 const stableJson = (value) => Array.isArray(value) ? "[" + value.map(stableJson).join(",") + "]" : value && typeof value === "object" ? "{" + Object.keys(value).sort().map((key) => JSON.stringify(key) + ":" + stableJson(value[key])).join(",") + "}" : JSON.stringify(value);
 const filenameFromUrl = (url) => decodeURIComponent(new URL(url).pathname.split("/").at(-1) ?? "");
 const exactName = (value) => /^[A-Za-z0-9._+%-]+$/.test(value);
 const exactHash = (value) => /^[a-f0-9]{64}$/.test(value);
-const treeDigest = async (root) => {
-  const entries = [];
-  const visit = async (directory) => {
-    for (const name of (await readdir(directory)).sort()) {
-      if (name === "__pycache__") continue;
-      const target = path.join(directory, name); const metadata = await lstat(target); const mode = (metadata.mode & 0o777).toString(8);
-      if (metadata.isSymbolicLink()) { const canonical = await realpath(target); const relative = path.relative(root, canonical); if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("runtime link escapes tree"); entries.push(path.relative(root, target) + "\0" + mode + "\0link\0" + await readlink(target)); }
-      else if (metadata.isDirectory()) await visit(target); else if (metadata.isFile()) entries.push(path.relative(root, target) + "\0" + mode + "\0file\0" + await fileDigest(target)); else throw new Error("unsupported runtime entry: " + target);
-    }
-  };
-  await visit(root); return digest(entries.join("\n"));
-};
+export function validateRuntimeTag(value) {
+  if (typeof value !== "string" || !/^managed-wren-[A-Za-z0-9][A-Za-z0-9._-]{0,100}$/.test(value) || value.includes("..") || value.endsWith(".") || value.endsWith(".lock")) {
+    throw new Error("runtime tag must be a safe managed-wren-* release tag");
+  }
+  return value;
+}
+const treeDigest = runtimeTreeDigest;
 
 /** The protected job consumes this exact inventory; it never resolves PyPI. */
 export function verifyExactPublishInventory(candidate, wheelInputs) {
   if (!candidate || candidate.activation !== "staged" || candidate.platform !== "darwin-arm64") throw new Error("invalid candidate manifest");
-  if (!candidate.python || !/^https:/.test(candidate.python.upstream?.url) || !/^https:\/\/github\.com\/Canner\/WrenAI\/releases\/download\//.test(candidate.python.mirror?.url) || !exactHash(candidate.python.mirror?.sha256) || candidate.python.mirror.sha256 !== candidate.python.upstream?.sha256) throw new Error("invalid exact Python candidate");
+  if (!candidate.python || !/^https:/.test(candidate.python.upstream?.url) || !/^https:\/\/github\.com\/goldmedal\/WrenAI\/releases\/download\//.test(candidate.python.mirror?.url) || !exactHash(candidate.python.mirror?.sha256) || candidate.python.mirror.sha256 !== candidate.python.upstream?.sha256) throw new Error("invalid exact Python candidate");
   const pythonFilename = filenameFromUrl(candidate.python.upstream.url);
   if (!exactName(pythonFilename) || filenameFromUrl(candidate.python.mirror.url) !== pythonFilename) throw new Error("Python mirror filename differs from approved source");
   if (!Array.isArray(candidate.wheels) || !Array.isArray(wheelInputs) || candidate.wheels.length === 0) throw new Error("missing wheel closure");
@@ -66,7 +62,8 @@ export function approvedManifest(candidate) {
 }
 
 async function generate(output, runtimeTag) {
-  if (!output || !runtimeTag || !/^[A-Za-z0-9._-]+$/.test(runtimeTag)) throw new Error("usage: managed-wren-release.mjs <output-directory> <runtime-tag>");
+  if (!output) throw new Error("usage: managed-wren-release.mjs <output-directory> <runtime-tag>");
+  validateRuntimeTag(runtimeTag);
   const inputs = JSON.parse(await readFile(path.join(packageRoot, "managed-wren", "release-inputs.json"), "utf8"));
   for (const artifact of [inputs.python, inputs.wrenai]) if (!artifact || !/^https:/.test(artifact.url) || !exactHash(artifact.sha256) || !exactName(artifact.filename)) throw new Error("invalid exact release input");
   const wheelInputs = JSON.parse(await readFile(path.join(output, "wheel-inputs.json"), "utf8"));
@@ -74,7 +71,7 @@ async function generate(output, runtimeTag) {
   const wheelLicenses = new Map(wheelInputs.map((wheel) => [wheel.filename, wheel.license]));
   const wheels = wheelInputs.map((wheel) => {
     if (!wheel || !/^[a-z0-9][a-z0-9._-]*$/.test(wheel.distribution) || !/^[A-Za-z0-9!+._-]+$/.test(wheel.version) || !exactName(wheel.filename) || !/^https:/.test(wheel.sourceUrl) || filenameFromUrl(wheel.sourceUrl) !== wheel.filename || !exactHash(wheel.sha256)) throw new Error("invalid selected wheel closure");
-    return { distribution: wheel.distribution, version: wheel.version, filename: wheel.filename, sourceUrl: wheel.sourceUrl, sha256: wheel.sha256, url: "https://github.com/Canner/WrenAI/releases/download/" + runtimeTag + "/" + wheel.filename };
+    return { distribution: wheel.distribution, version: wheel.version, filename: wheel.filename, sourceUrl: wheel.sourceUrl, sha256: wheel.sha256, url: "https://github.com/goldmedal/WrenAI/releases/download/" + runtimeTag + "/" + wheel.filename };
   }).sort((a, b) => a.filename.localeCompare(b.filename));
   const rootInput = wheelInputs.find((wheel) => wheel.distribution === "wrenai");
   if (!rootInput || rootInput.version !== inputs.wrenai.version || rootInput.filename !== inputs.wrenai.filename || rootInput.sourceUrl !== inputs.wrenai.url || rootInput.sha256 !== inputs.wrenai.sha256) throw new Error("selected wrenai wheel differs from exact release input");
@@ -84,7 +81,7 @@ async function generate(output, runtimeTag) {
   const sitePackagesPath = path.join(output, "runtime", "venv", "lib", "python3.11", "site-packages");
   const pythonTreeSha256 = await treeDigest(path.join(output, "runtime", "python")); const packageTreeSha256 = await treeDigest(path.join(sitePackagesPath, "wren")); const sitePackagesTreeSha256 = await treeDigest(sitePackagesPath);
   const closureSha256 = digest(wheels.map((wheel) => wheel.filename + "\0" + wheel.sha256).sort().join("\n"));
-  const manifest = { schema: 1, activation: "staged", platform: "darwin-arm64", compatibility: { genbi: inputs.compatibility.genbi, profile: inputs.compatibility.profile, wren: inputs.wrenai.version }, python: { implementation: "cpython", version: inputs.python.version, upstream: { release: inputs.python.release, url: inputs.python.url, sha256: inputs.python.sha256 }, mirror: { url: "https://github.com/Canner/WrenAI/releases/download/" + runtimeTag + "/" + inputs.python.filename, sha256: inputs.python.sha256 }, interpreterPath: "python/bin/python3.11" }, wheels, runtime: { pythonArchivePath: "python.tar.gz", venvInterpreterPath: "venv/bin/python", launcherPath: "venv/bin/wren", module: "wren.cli:app", packagePath: "venv/lib/python3.11/site-packages/wren", sitePackagesPath: "venv/lib/python3.11/site-packages", pythonTreeSha256, packageTreeSha256, sitePackagesTreeSha256, closureSha256 }, licenseApproval: { state: "pending" } };
+  const manifest = { schema: 1, activation: "staged", platform: "darwin-arm64", compatibility: { genbi: inputs.compatibility.genbi, profile: inputs.compatibility.profile, wren: inputs.wrenai.version }, python: { implementation: "cpython", version: inputs.python.version, upstream: { release: inputs.python.release, url: inputs.python.url, sha256: inputs.python.sha256 }, mirror: { url: "https://github.com/goldmedal/WrenAI/releases/download/" + runtimeTag + "/" + inputs.python.filename, sha256: inputs.python.sha256 }, interpreterPath: "python/bin/python3.11" }, wheels, runtime: { pythonArchivePath: "python.tar.gz", venvInterpreterPath: "venv/bin/python", launcherPath: "venv/bin/wren", module: "wren.cli:app", packagePath: "venv/lib/python3.11/site-packages/wren", sitePackagesPath: "venv/lib/python3.11/site-packages", pythonTreeSha256, packageTreeSha256, sitePackagesTreeSha256, closureSha256 }, licenseApproval: { state: "pending" } };
   verifyExactPublishInventory(manifest, wheelInputs);
   const inventory = { schema: 1, status: "pending-explicit-approval", components: [{ name: "python-build-standalone", version: "cpython-" + inputs.python.release, declaredLicense: "MPL-2.0", artifact: inputs.python.filename }, { name: "CPython", version: inputs.python.version, declaredLicense: "PSF-2.0", artifact: inputs.python.filename }, ...wheels.map((wheel) => ({ name: wheel.distribution, version: wheel.version, declaredLicense: wheelLicenses.get(wheel.filename) ?? "UNKNOWN", artifact: wheel.filename }))], note: "The protected release environment must approve the completed expanded wheel and bundled-library inventory before public assets or an approved manifest can be emitted." };
   const provenance = { schema: 1, inputs, selectedWheels: wheelInputs, stagedManifestSha256: digest(stableJson(manifest)), generatedAt: new Date().toISOString() };
@@ -96,6 +93,16 @@ async function generate(output, runtimeTag) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
+  if (command === "prepare-python") {
+    if (args.length !== 1) throw new Error("usage: managed-wren-release.mjs prepare-python <extracted-python-directory>");
+    preparePythonTree(path.resolve(args[0]));
+    return;
+  }
+  if (command === "validate-tag") {
+    if (args.length !== 1) throw new Error("usage: managed-wren-release.mjs validate-tag <runtime-tag>");
+    validateRuntimeTag(args[0]);
+    return;
+  }
   if (command === "verify-publish") {
     const [reviewDirectory, assetsDirectory] = args; if (!reviewDirectory || !assetsDirectory) throw new Error("usage: managed-wren-release.mjs verify-publish <review-directory> <assets-directory>");
     const candidate = JSON.parse(await readFile(path.join(reviewDirectory, "managed-wren-manifest.candidate.json"), "utf8"));

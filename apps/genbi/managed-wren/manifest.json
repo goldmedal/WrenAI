@@ -16,7 +16,7 @@
       "sha256": "50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9"
     },
     "mirror": {
-      "url": "https://github.com/Canner/WrenAI/releases/download/managed-wren-v0.0.4/cpython-3.11.16%2B20260901-aarch64-apple-darwin-install_only.tar.gz",
+      "url": "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-v0.0.4/cpython-3.11.16%2B20260901-aarch64-apple-darwin-install_only.tar.gz",
       "sha256": "50424fa409e8ae84b82a3052522f64695b47dff2158b70bb7358e0ebd6c085c9"
     },
     "interpreterPath": "python/bin/python3.11"
@@ -26,7 +26,7 @@
       "distribution": "wrenai",
       "version": "0.13.0",
       "filename": "wrenai-0.13.0-py3-none-any.whl",
-      "url": "https://github.com/Canner/WrenAI/releases/download/managed-wren-v0.0.4/wrenai-0.13.0-py3-none-any.whl",
+      "url": "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-v0.0.4/wrenai-0.13.0-py3-none-any.whl",
       "sourceUrl": "https://files.pythonhosted.org/packages/7f/40/2de81f1a3fe332ebfb8ec5db0161ce4b521dee5c1d0d4adf9c5693651b51/wrenai-0.13.0-py3-none-any.whl",
       "sha256": "1cb14927c9a1e1925a7295c2772e5852254c6cc370db640ccc33b6cd04e95dae"
     }

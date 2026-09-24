@@ -28,8 +28,8 @@ function fixture() {
   const manifest = {
     schema: 1, activation: "approved", platform: "darwin-arm64",
     compatibility: { genbi: "0.0.4", profile: "genbi-native-v4", wren: "0.13.0" },
-    python: { implementation: "cpython", version: "3.11.16", upstream: { release: "20260901", url: "https://example.invalid/upstream", sha256: archiveDigest }, mirror: { url: "https://github.com/Canner/WrenAI/releases/download/managed-wren-v0.0.4/python.tar.gz", sha256: archiveDigest }, interpreterPath: "python/install/bin/python3.11" },
-    wheels: [{ distribution: "wrenai", version: "0.13.0", filename: "wrenai-0.13.0-py3-none-any.whl", url: "https://github.com/Canner/WrenAI/releases/download/managed-wren-v0.0.4/wrenai-0.13.0-py3-none-any.whl", sourceUrl: "https://files.pythonhosted.org/wrenai-0.13.0-py3-none-any.whl", sha256: wheelDigest }],
+    python: { implementation: "cpython", version: "3.11.16", upstream: { release: "20260901", url: "https://example.invalid/upstream", sha256: archiveDigest }, mirror: { url: "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-v0.0.4/python.tar.gz", sha256: archiveDigest }, interpreterPath: "python/install/bin/python3.11" },
+    wheels: [{ distribution: "wrenai", version: "0.13.0", filename: "wrenai-0.13.0-py3-none-any.whl", url: "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-v0.0.4/wrenai-0.13.0-py3-none-any.whl", sourceUrl: "https://files.pythonhosted.org/wrenai-0.13.0-py3-none-any.whl", sha256: wheelDigest }],
     runtime: { pythonArchivePath: "python.tar.gz", venvInterpreterPath: "venv/bin/python", launcherPath: "venv/bin/wren", module: "wren.cli:app", packagePath: "venv/lib/python3.11/site-packages/wren", sitePackagesPath: "venv/lib/python3.11/site-packages", pythonTreeSha256: digest(`install/bin/python3.11\0${"700"}\0file\0${digest("#!/bin/sh\nexit 0\n")}`), packageTreeSha256: "staged", sitePackagesTreeSha256: "staged", closureSha256: "staged" },
     licenseApproval: { state: "approved", evidence: "release-evidence" },
   } as const;
@@ -54,9 +54,9 @@ afterEach(() => {
   while (roots.length) rmSync(roots.pop()!, { recursive: true, force: true });
 });
 
-function provisionFixture(version = "0.13.0") {
+function provisionFixture(version = "0.13.0", directory = "runtime", archiveMode = 0o700) {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), "genbi-managed-wren-provision-"))); roots.push(root);
-  const packageRoot = path.join(root, "installed-package"); const runtimeRoot = path.join(root, "runtime"); const source = path.join(root, "python-source");
+  const packageRoot = path.join(root, "installed-package"); const runtimeRoot = path.join(root, directory); const source = path.join(root, "python-source");
   mkdirSync(path.join(packageRoot, "managed-wren"), { recursive: true, mode: 0o700 }); mkdirSync(runtimeRoot, { mode: 0o700 }); mkdirSync(path.join(source, "python", "install", "bin"), { recursive: true, mode: 0o700 }); chmodSync(runtimeRoot, 0o700);
   const python = path.join(source, "python", "install", "bin", "python3.11");
   const fakePython = [
@@ -82,14 +82,15 @@ function provisionFixture(version = "0.13.0") {
     "",
   ].join("\n");
   writeFileSync(python, fakePython, { mode: 0o700 });
+  chmodSync(python, archiveMode); chmodSync(path.dirname(python), archiveMode);
   const archive = path.join(root, "python.tar.gz"); execFileSync("tar", ["-czf", archive, "-C", source, "."]);
   const archiveBytes = readFileSync(archive); const wheelBytes = Buffer.from(`fixture wheel ${version}\n`);
   const base = {
     schema: 1, activation: "approved", platform: "darwin-arm64",
     compatibility: { genbi: "0.0.4", profile: "genbi-native-v4", wren: version },
-    python: { implementation: "cpython", version: "3.11.16", upstream: { release: "20260901", url: "https://example.invalid/upstream", sha256: digest(archiveBytes) }, mirror: { url: `https://github.com/Canner/WrenAI/releases/download/fixture-${version}/python.tar.gz`, sha256: digest(archiveBytes) }, interpreterPath: "python/install/bin/python3.11" },
-    wheels: [{ distribution: "wrenai", version, filename: `wrenai-${version}-py3-none-any.whl`, url: `https://github.com/Canner/WrenAI/releases/download/fixture-${version}/wrenai-${version}-py3-none-any.whl`, sourceUrl: `https://files.pythonhosted.org/fixture/wrenai-${version}-py3-none-any.whl`, sha256: digest(wheelBytes) }],
-    runtime: { pythonArchivePath: "python.tar.gz", venvInterpreterPath: "venv/bin/python", launcherPath: "venv/bin/wren", module: "wren.cli:app", packagePath: "venv/lib/python3.11/site-packages/wren", sitePackagesPath: "venv/lib/python3.11/site-packages", pythonTreeSha256: digest(`install/bin/python3.11\0${"700"}\0file\0${digest(fakePython)}`), packageTreeSha256: digest(`__init__.py\0${"600"}\0file\0${digest(`__version__ = '${version}'\n`)}`), sitePackagesTreeSha256: digest([`dependency/__init__.py\0${"644"}\0file\0${digest("dependency = 1\n")}`, `wren/__init__.py\0${"600"}\0file\0${digest(`__version__ = '${version}'\n`)}`].join("\n")), closureSha256: "staged" },
+    python: { implementation: "cpython", version: "3.11.16", upstream: { release: "20260901", url: "https://example.invalid/upstream", sha256: digest(archiveBytes) }, mirror: { url: `https://github.com/goldmedal/WrenAI/releases/download/fixture-${version}/python.tar.gz`, sha256: digest(archiveBytes) }, interpreterPath: "python/install/bin/python3.11" },
+    wheels: [{ distribution: "wrenai", version, filename: `wrenai-${version}-py3-none-any.whl`, url: `https://github.com/goldmedal/WrenAI/releases/download/fixture-${version}/wrenai-${version}-py3-none-any.whl`, sourceUrl: `https://files.pythonhosted.org/fixture/wrenai-${version}-py3-none-any.whl`, sha256: digest(wheelBytes) }],
+    runtime: { pythonArchivePath: "python.tar.gz", venvInterpreterPath: "venv/bin/python", launcherPath: "venv/bin/wren", module: "wren.cli:app", packagePath: "venv/lib/python3.11/site-packages/wren", sitePackagesPath: "venv/lib/python3.11/site-packages", pythonTreeSha256: digest(`install/bin/python3.11\0${(archiveMode & ~0o022).toString(8)}\0file\0${digest(fakePython)}`), packageTreeSha256: digest(`__init__.py\0${"600"}\0file\0${digest(`__version__ = '${version}'\n`)}`), sitePackagesTreeSha256: digest([`dependency/__init__.py\0${"644"}\0file\0${digest("dependency = 1\n")}`, `wren/__init__.py\0${"600"}\0file\0${digest(`__version__ = '${version}'\n`)}`].join("\n")), closureSha256: "staged" },
     licenseApproval: { state: "approved", evidence: "fixture" },
   } as const;
   const manifest = { ...base, runtime: { ...base.runtime, closureSha256: managedWrenClosureDigest(base as never) } };
@@ -189,6 +190,30 @@ describe("managed Wren runtime", () => {
     expect(value.requests).toHaveLength(requestCount);
   }, 20_000);
 
+  it("narrows fresh PBS write permissions but rejects later permission tampering without repair", async () => {
+    const value = provisionFixture("0.13.0", "Application Support", 0o777); value.installFetch();
+    const record = await provisionManagedWrenRuntime(value);
+    const python = path.join(record.generation_root, value.manifest.python.interpreterPath);
+    expect(lstatSync(python).mode & 0o777).toBe(0o755);
+    expect(lstatSync(path.dirname(python)).mode & 0o777).toBe(0o755);
+    expect(resolveManagedWrenRuntime(value)).toEqual(record);
+    for (const target of [python, path.dirname(python)]) {
+      chmodSync(target, 0o775);
+      expect(() => resolveManagedWrenRuntime(value)).toThrow(ManagedWrenRuntimeError);
+      await expect(provisionManagedWrenRuntime(value)).rejects.toBeInstanceOf(ManagedWrenRuntimeError);
+      expect(lstatSync(target).mode & 0o777).toBe(0o775);
+      chmodSync(target, 0o755);
+    }
+  });
+
+  it("relocates and revalidates a managed launcher under a root containing spaces", async () => {
+    const value = provisionFixture("0.13.0", "Application Support"); value.installFetch();
+    const installed = await provisionManagedWrenRuntime({ packageRoot: value.packageRoot, runtimeRoot: value.runtimeRoot });
+    expect(readFileSync(installed.launcher, "utf8")).toMatch(/^#!\/bin\/sh\n/);
+    expect(readFileSync(installed.launcher, "utf8")).not.toContain(".staging-");
+    expect(resolveManagedWrenRuntime({ packageRoot: value.packageRoot, runtimeRoot: value.runtimeRoot })).toEqual(installed);
+  });
+
   it("waits for a concurrent first-use owner and both callers receive the same generation", async () => {
     const value = provisionFixture(); let release!: () => void; const paused = new Promise<void>((resolve) => { release = resolve; }); let firstFetch = true;
     value.installFetch(async () => { if (firstFetch) { firstFetch = false; await paused; } });
@@ -219,7 +244,7 @@ describe("managed Wren runtime", () => {
   }, 20_000);
 
   it("provisions from a byte-identical approved manifest anchored by the staged package, then reuses its cache before fetch", async () => {
-    const value = provisionFixture(); const approved = JSON.stringify(value.manifest); const approvedUrl = "https://github.com/Canner/WrenAI/releases/download/fixture/manifest.json";
+    const value = provisionFixture(); const approved = JSON.stringify(value.manifest); const approvedUrl = "https://github.com/goldmedal/WrenAI/releases/download/fixture/manifest.json";
     const staged = { ...value.manifest, activation: "staged", licenseApproval: { state: "pending" }, approvedManifest: { url: approvedUrl, sha256: digest(approved) } };
     writeFileSync(path.join(value.packageRoot, "managed-wren", "manifest.json"), JSON.stringify(staged));
     const requests: string[] = [];
@@ -241,7 +266,7 @@ describe("managed Wren runtime", () => {
   }, 20_000);
 
   it("serializes staged first use and rejects a malicious approved-manifest cache without network recovery", async () => {
-    const value = provisionFixture(); const approved = JSON.stringify(value.manifest); const approvedUrl = "https://github.com/Canner/WrenAI/releases/download/fixture/manifest.json";
+    const value = provisionFixture(); const approved = JSON.stringify(value.manifest); const approvedUrl = "https://github.com/goldmedal/WrenAI/releases/download/fixture/manifest.json";
     const staged = { ...value.manifest, activation: "staged", licenseApproval: { state: "pending" }, approvedManifest: { url: approvedUrl, sha256: digest(approved) } };
     writeFileSync(path.join(value.packageRoot, "managed-wren", "manifest.json"), JSON.stringify(staged));
     let release!: () => void; const paused = new Promise<void>((resolve) => { release = resolve; }); let manifestFetch = true;
@@ -273,7 +298,7 @@ describe("managed Wren runtime", () => {
 
   it("rejects an approved manifest whose compatibility or immutable release identity differs from its staged anchor", async () => {
     const value = provisionFixture(); const approved = JSON.parse(JSON.stringify(value.manifest)); approved.compatibility.wren = "0.13.1";
-    const bytes = JSON.stringify(approved); const url = "https://github.com/Canner/WrenAI/releases/download/fixture/manifest.json";
+    const bytes = JSON.stringify(approved); const url = "https://github.com/goldmedal/WrenAI/releases/download/fixture/manifest.json";
     const staged = { ...value.manifest, activation: "staged", licenseApproval: { state: "pending" }, approvedManifest: { url, sha256: digest(bytes) } };
     writeFileSync(path.join(value.packageRoot, "managed-wren", "manifest.json"), JSON.stringify(staged));
     const fetch = vi.fn(async () => new Response(bytes)); vi.stubGlobal("fetch", fetch);
@@ -352,7 +377,7 @@ describe("managed Wren runtime", () => {
     writeFileSync(path.join(root, "wheel-inputs.json"), JSON.stringify([wheel]));
     execFileSync(process.execPath, [path.resolve("scripts", "managed-wren-release.mjs"), root, "managed-wren-fixture"], { cwd: path.resolve("."), stdio: "pipe" });
     const candidate = JSON.parse(readFileSync(path.join(root, "managed-wren-manifest.candidate.json"), "utf8"));
-    expect(candidate).toMatchObject({ activation: "staged", wheels: [{ distribution: wheel.distribution, version: wheel.version, filename: wheel.filename, url: "https://github.com/Canner/WrenAI/releases/download/managed-wren-fixture/wrenai-0.13.0-py3-none-any.whl" }] });
+    expect(candidate).toMatchObject({ activation: "staged", wheels: [{ distribution: wheel.distribution, version: wheel.version, filename: wheel.filename, url: "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-fixture/wrenai-0.13.0-py3-none-any.whl" }] });
     expect(candidate.runtime.packageTreeSha256).not.toBe("staged"); expect(candidate.runtime.closureSha256).not.toBe("staged");
     expect(candidate.runtime.pythonTreeSha256).toBe(managedWrenTreeDigest(pythonRoot));
     symlinkSync("/bin/sh", path.join(pythonRoot, "escape"));
