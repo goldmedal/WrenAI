@@ -34,6 +34,11 @@
         "filename": "THIRD_PARTY_NOTICES.txt",
         "url": "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-v0.0.4/THIRD_PARTY_NOTICES.txt",
         "sha256": "05067752be36fad8a9b659d6b5516af016f4bcf5b939f84c87ff9e5a4c0841dc"
+      },
+      {
+        "filename": "wheel-license-inventory.json",
+        "url": "https://github.com/goldmedal/WrenAI/releases/download/managed-wren-v0.0.4/wheel-license-inventory.json",
+        "sha256": "a397aa74484e439b94b2262d42bbb7f05b3356adbb671604a92e8d0e1af5d870"
       }
     ]
   }

@@ -132,7 +132,7 @@ def notices(release, inputs):
         raise SystemExit("retained license review does not cover selected Python")
     retained = {}
     for item in evidence["retained"]:
-        if (item["filename"] not in ("pbs-license-inventory.json", "THIRD_PARTY_NOTICES.txt")
+        if (item["filename"] not in ("pbs-license-inventory.json", "THIRD_PARTY_NOTICES.txt", "wheel-license-inventory.json")
                 or item["filename"] in retained
                 or not item["url"].startswith("https://github.com/goldmedal/WrenAI/releases/download/")):
             raise SystemExit("invalid retained license evidence")
@@ -147,6 +147,15 @@ def notices(release, inputs):
     (release / "pbs-license-inventory.json").write_bytes(retained["pbs-license-inventory.json"])
     text = retained["THIRD_PARTY_NOTICES.txt"].decode("utf-8")
     root = inputs["wrenai"]
+    inventory = json.loads((release / "wheel-license-inventory.json").read_text())
+    previous = {row["distribution"]: row for row in json.loads(retained["wheel-license-inventory.json"])["wheels"]}
+    for row in inventory["wheels"]:
+        if row["distribution"] == "wrenai":
+            continue
+        old = previous.get(row["distribution"], {})
+        if any(row.get(key) != old.get(key) for key in ("filename", "sha256", "version", "sourceUrl", "license")):
+            raise SystemExit("retained wheel license review differs from selected dependency")
+        row["documents"] = old["documents"]
     text += "\n\n=== Selected fork Wren wheel " + root["version"] + " ===\n"
     text += "Source wheel: " + root["url"] + "\nSHA-256: " + root["sha256"] + "\n"
     with zipfile.ZipFile(release / "wheels" / root["filename"]) as archive:
@@ -155,8 +164,15 @@ def notices(release, inputs):
         if not all(any(name.endswith("/" + license_name) for name in names)
                    for license_name in ("LICENSE", "LICENSE-APACHE-2.0")):
             raise SystemExit("fork wheel distribution license missing")
+        documents = []
         for name in names:
-            text += "\n--- " + name + " ---\n" + archive.read(name).decode("utf-8") + "\n"
+            raw = archive.read(name)
+            text += "\n--- " + name + " ---\n" + raw.decode("utf-8") + "\n"
+            documents.append({"path": name, "source": {"wheelSha256": root["sha256"], "url": root["url"]}, "sha256": hashlib.sha256(raw).hexdigest()})
+        next(row for row in inventory["wheels"] if row["distribution"] == "wrenai")["documents"] = documents
+    inventory["schema"] = 2
+    inventory["noticesSha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    (release / "wheel-license-inventory.json").write_text(json.dumps(inventory, indent=2))
     (release / "THIRD_PARTY_NOTICES.txt").write_text(text)
 
 

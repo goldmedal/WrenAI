@@ -213,7 +213,8 @@ class ReleaseMetadataTests(unittest.TestCase):
         inputs = json.loads((SCRIPT.parent.parent / "managed-wren/release-inputs.json").read_text())
         with zipfile.ZipFile(self.release / "wheels" / inputs["wrenai"]["filename"], "w") as archive:
             archive.writestr("wrenai.dist-info/licenses/LICENSE", "See LICENSE-APACHE-2.0")
-        raw = [json.dumps({"archiveSha256": inputs["python"]["sha256"]}).encode(), b"retained notices"]
+        raw = [json.dumps({"archiveSha256": inputs["python"]["sha256"]}).encode(), b"retained notices", b'{"wheels":[]}']
+        (self.release / "wheel-license-inventory.json").write_text('{"wheels":[{"distribution":"wrenai"}]}')
         for item, data in zip(inputs["licenseEvidence"]["retained"], raw):
             item["sha256"] = hashlib.sha256(data).hexdigest()
         helper = runpy.run_path(str(SCRIPT))
