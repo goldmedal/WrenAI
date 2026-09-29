@@ -117,7 +117,7 @@ export function createCodexRuntimeComposition(options: Options) {
       await mkdir(workspace, { mode: 0o700 }); await mkdir(home, { mode: 0o700 });
       const wrenHome = createEmptyCodexWrenHome(workspace);
       const spec = buildNativeRuntimeSpec({ backend: "codex-app-server", vendor: "codex", executables: [vendor, producer, node, wren, python],
-        toolDirectories: [path.dirname(node.executable), "/usr/bin", "/bin", path.dirname(runtime.launcher)], workspace, home,
+        toolDirectories: await Promise.all([path.dirname(node.executable), "/usr/bin", "/bin", path.dirname(runtime.launcher)].map((directory) => realpath(directory))), workspace, home,
         binding, sessionWrenHome: wrenHome.home, codexHome: loginHome });
       buildCodexSessionPolicy(spec, runtime, wrenHome, true, models.orchestrator);
       const compiled = await compileProfile({ profileSource: options.profileSource, userProject: binding.path, mode: "native", warbleBin: producer.executable });

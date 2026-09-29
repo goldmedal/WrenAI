@@ -66,6 +66,7 @@ describe("Codex application composition", () => {
     expect(result.input.model).toBe("driver"); expect(result.input.spec.workspace).not.toBe(f.binding.path);
     expect(result.input.spec.childEnvironment.HOME).not.toBe(os.homedir());
     expect(result.input.spec.childEnvironment.CODEX_HOME).toBe(path.join(f.root, "login"));
+    expect(result.input.spec.toolDirectories).toEqual([...new Set([path.dirname(realpathSync(process.execPath)), realpathSync("/usr/bin"), realpathSync("/bin")])]);
     expect(buildCodexSessionPolicy).toHaveBeenCalledBefore(vi.mocked(compileProfile));
     const captured = vi.mocked(prepareCapturedCodexDirectTools).mock.calls[0]![2];
     expect(captured.wrenEnvironment).toMatchObject({ WREN_PROJECT_HOME: f.binding.path, WREN_HOME: path.join(f.root, "wren-home") });
