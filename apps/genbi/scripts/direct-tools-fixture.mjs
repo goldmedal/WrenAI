@@ -13,7 +13,7 @@ export async function installedDirectToolsFixture(packageRoot) {
   const identity = { session_id: "packed-fixture", vendor: "codex", auth_identity: "fixture", runtime_generation: "fixture",
     binding: { project_identity: "synthetic", generation: "1", revision: "1" } };
   let queries = 0;
-  const tools = await prepareCodexDirectTools({ irDocument, scope: { binding: identity.binding, entry: { kind: "agent", verb: "answer_query", prompt: "count" } },
+  const createTools = () => prepareCodexDirectTools({ irDocument, scope: { binding: identity.binding, entry: { kind: "agent", verb: "answer_query", prompt: "count" } },
     accountEmail: "fixture@example.invalid", producerBinary, expiresAt: Date.now() + 30_000, signal: new AbortController().signal,
     bindings: { identity, currentIdentity: () => identity, assertCurrent() {}, verifierBinary: producerBinary,
       contexts: Object.fromEntries(ir.components.map((node) => [node.id, { binding: node.context_binding, snapshot: { context_version: 2, parseable: true } }])),
@@ -21,10 +21,11 @@ export async function installedDirectToolsFixture(packageRoot) {
       async step(run) { if (run.tools.query_read_only) await run.tools.query_read_only({ sql: "SELECT count(*) FROM orders" }); return { value: "synthetic" }; },
       async normalize() { return { status: "ok", output: { kind: "value", value: 99 } }; },
     } });
+  let tools = await createTools();
   let handlers;
   const send = (value) => handlers.data(Buffer.from(JSON.stringify(value) + "\n"));
-  const item = { type: "dynamicToolCall", id: "call", tool: tools.definitions[0].name, status: "inProgress" };
-  const completed = { ...item, status: "completed", success: true };
+  let item = { type: "dynamicToolCall", id: "call", tool: tools.definitions[0].name, status: "inProgress" };
+  let completed = { ...item, status: "completed", success: true };
   const transport = { listen(value) { handlers = value; }, async close() {}, write(line) {
     const m = JSON.parse(line);
     if (m.id === "tool-request") {
@@ -56,4 +57,53 @@ export async function installedDirectToolsFixture(packageRoot) {
     assert.throws(() => session.startCommand({ command: ["/bin/sh"] }));
   } finally { await session.close(); }
   await assert.rejects(tools.call(item.tool, { request: "late" }, "late", new AbortController().signal));
+  const { Store } = await import(moduleAt("dist-server/server/db.js"));
+  const { NativeSessionService } = await import(moduleAt("dist-server/server/native-sessions.js"));
+  const { RuntimeHost, runtimeReady } = await import(moduleAt("dist-server/server/runtime-host/index.js"));
+  const { createApp } = await import(moduleAt("dist-server/server/app.js"));
+  const { conversationSocket } = await import(moduleAt("dist-server/server/conversation-socket.js"));
+  const { randomUUID } = await import("node:crypto");
+  const store = new Store(":memory:");
+  store.setRuntimeSettings({ ...store.getRuntimeSettings(), subscriptionProvider: "codex", subscriptionDriverModel: "driver", tierModels: [{ tier: "cheap", model: "cheap" }, { tier: "strong", model: "strong" }] });
+  const service = new NativeSessionService({ store, terminalManager: async () => { throw Error("PTY fallback"); },
+    getBinding: () => ({ identity: "synthetic", generation: 1, revision: "1", path: "/synthetic" }), workspaceRoot: undefined,
+    warbleBin: producerBinary, irPaths: {},
+    runtimeHost: new RuntimeHost({ selected: "codex-app-server", deployment: "production", localAvailable: () => false,
+      vendorProbes: { "codex-app-server": async () => ({ readiness: runtimeReady("0.156.1", []), diagnostic: { phase: "capability" } }) } }),
+    directCodex: {
+      backend: { prepareLaunch: () => ({ runtime: {}, assertActive() {}, release() {} }),
+        open: async (_permit, input) => CodexSession.connect(transport, { cwd: "/scope", codexHome: "/login", profile: "genbi-scoped", args: [], environment: {}, commandEnvironment: {}, configuration: {} }, input.assertScopeActive, input.onEvent, undefined, input.tools) },
+      async prepare({ session, assertActive }) {
+        identity.session_id = session.id; identity.runtime_generation = String(session.runtimeGeneration);
+        tools = await createTools();
+        item = { ...item, tool: tools.definitions[0].name }; completed = { ...item, status: "completed", success: true };
+        return { input: { spec: {}, wrenHome: {}, tools, assertScopeActive: assertActive }, async dispose() {} };
+      },
+    },
+  });
+  try {
+    const app = createApp({ store, nativeSessions: service });
+    const response = await app.request("/api/native-sessions", { method: "POST", body: JSON.stringify({ purpose: "analysis", intent: "start_separate", idempotencyKey: randomUUID() }) });
+    assert.equal(response.status, 201);
+    const launch = await response.json(); assert.equal(launch.session.transport, "conversation");
+    const frames = [];
+    const ws = { send: (line) => frames.push(JSON.parse(line)), close() { throw Error("Unexpected socket close"); } };
+    const socket = conversationSocket(service, launch.session.id, launch.capability, "0");
+    socket.onOpen({}, ws); const before = queries;
+    socket.onMessage({ data: JSON.stringify({ type: "prompt", text: "count orders" }) }, ws);
+    const deadline = Date.now() + 5_000;
+    while (!frames.some((frame) => frame.type === "event" && frame.event.method === "turn/completed")) {
+      if (Date.now() > deadline) throw Error("Installed conversation timed out");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(queries > before); socket.onClose();
+    assert.equal(service.get(launch.session.id).status, "detached");
+    const replay = [];
+    const attached = service.attachConversation(launch.session.id, launch.capability, (frame) => replay.push(frame));
+    assert.equal(replay[0].type, "replay"); attached.detach();
+    const stopped = await app.request(`/api/native-sessions/${launch.session.id}/stop`, { method: "POST", body: JSON.stringify({ capability: launch.capability }) });
+    assert.equal(stopped.status, 204); assert.equal(service.get(launch.session.id).status, "stopped");
+    assert.equal(service.attachConversation(launch.session.id, launch.capability, () => {}), undefined);
+  } finally { await service.shutdown(); store.close(); }
+
 }

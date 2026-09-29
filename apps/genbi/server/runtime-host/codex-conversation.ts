@@ -79,7 +79,7 @@ export class CodexConversation {
   private rejectStopped!: (error: CodexConversationError) => void;
   private readonly stopped = new Promise<never>((_, reject) => { this.rejectStopped = reject; });
 
-  constructor(backend: Backend, permit: CodexLaunchPermit, input: OpenInput) {
+  constructor(backend: Backend, permit: CodexLaunchPermit, input: OpenInput, private readonly onState?: (state: ConversationState, failure?: ConversationFailure) => void) {
     void this.stopped.catch(() => {});
     // Defer open until ownership of both promises exists; synchronous fake peers
     // and early events must obey the same lifecycle as the production backend.
@@ -136,6 +136,7 @@ export class CodexConversation {
   private transition(state: ConversationState, code?: ConversationFailure): void {
     this.state = state;
     if (code) this.failed = code;
+    this.onState?.(state, this.failed);
     this.record({ type: "state", sequence: ++this.sequence, state, ...(this.failed ? { failure: this.failed } : {}),
       ...(this.backendReason ? { backendReason: this.backendReason } : {}) });
   }

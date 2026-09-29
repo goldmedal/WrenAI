@@ -41,3 +41,8 @@
 .sessions-workbench.is-compact .sessions-toolbar-title span { display: none; }
 .sessions-workbench.is-compact .sessions-terminal-wrap { padding: 8px; }
 .sessions-workbench.is-compact .sessions-toolbar-actions .ant-btn { padding-inline: 6px; }
+
+.sessions-conversation { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; gap: 12px; padding: 16px; }
+.sessions-conversation-messages { flex: 1; min-height: 0; overflow-y: auto; }
+.sessions-conversation form { display: flex; flex-wrap: wrap; gap: 8px; }
+.sessions-conversation form textarea { flex-basis: 100%; }

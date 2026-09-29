@@ -67,6 +67,7 @@ export type NativeSetupRecoveryState = "working" | "needs_input" | "needs_decisi
 export type NativeSetupRecoveryCode = "in_progress" | "user_action_required" | "continue_or_stop" | "retryable" | "completion_reported";
 
 export interface NativeSessionRow {
+  readonly transport?: "conversation";
   readonly id: string;
   readonly purpose: NativeSessionPurpose;
   readonly vendor: NativeSessionVendor;
@@ -806,6 +807,7 @@ export class Store {
     this.addColumnIfMissing("enrichment_approvals", "nonce", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("enrichment_approvals", "expires_at", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("native_sessions", "entry_verb", "TEXT");
+    this.addColumnIfMissing("native_sessions", "transport", "TEXT");
     this.addColumnIfMissing("native_sessions", "dispatch_profile", "TEXT");
     this.addColumnIfMissing("native_sessions", "dispatch_target", "TEXT");
     this.addColumnIfMissing("native_sessions", "runtime_generation", "INTEGER");
@@ -849,6 +851,7 @@ export class Store {
   // ---------------------------------------------------------------------
 
   createNativeSession(params: {
+    transport?: "conversation";
     id: string; purpose: NativeSessionPurpose; vendor: NativeSessionVendor; agent: string; entryVerb?: string | undefined;
     scopeKind: NativeSessionScopeKind; scopeId: string; projectIdentity?: string;
     bindingGeneration?: number; projectRevision?: string;
@@ -856,10 +859,10 @@ export class Store {
   }): NativeSessionRow {
     const now = this.now().toISOString();
     this.db.prepare(
-      `INSERT INTO native_sessions (id, purpose, vendor, agent, entry_verb, scope_kind, scope_id, project_identity, binding_generation, project_revision, dispatch_profile, dispatch_target, runtime_generation, status, created_at, updated_at, started_at, ended_at, exit_code, failure)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, NULL, NULL, NULL, NULL)`,
+      `INSERT INTO native_sessions (id, purpose, vendor, agent, entry_verb, scope_kind, scope_id, project_identity, binding_generation, project_revision, dispatch_profile, dispatch_target, runtime_generation, status, created_at, updated_at, started_at, ended_at, exit_code, failure, transport)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, NULL, NULL, NULL, NULL, ?)`,
     ).run(params.id, params.purpose, params.vendor, params.agent, params.entryVerb ?? null, params.scopeKind, params.scopeId,
-      params.projectIdentity ?? null, params.bindingGeneration ?? null, params.projectRevision ?? null, params.dispatchProfile ?? null, params.dispatchTarget ?? null, params.runtimeGeneration ?? null, now, now);
+      params.projectIdentity ?? null, params.bindingGeneration ?? null, params.projectRevision ?? null, params.dispatchProfile ?? null, params.dispatchTarget ?? null, params.runtimeGeneration ?? null, now, now, params.transport ?? null);
     return this.getNativeSession(params.id)!;
   }
 
@@ -2352,6 +2355,7 @@ function rowToSession(row: Record<string, unknown>): SessionRow {
 
 function rowToNativeSession(row: Record<string, unknown>): NativeSessionRow {
   return {
+    ...(row["transport"] === "conversation" ? { transport: "conversation" as const } : {}),
     id: str(row, "id"), purpose: str(row, "purpose") as NativeSessionPurpose,
     vendor: str(row, "vendor") as NativeSessionVendor, agent: str(row, "agent"), entryVerb: strOrNull(row, "entry_verb"),
     scopeKind: str(row, "scope_kind") as NativeSessionScopeKind, scopeId: str(row, "scope_id"),
