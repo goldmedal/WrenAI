@@ -2,6 +2,9 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { normalizeComponentRequest, type ComponentInvocationResult } from "@warble/claude-agent-sdk";
 import { readSlots, type EgressDecision, type EgressProvenance } from "./egress.js";
+import { reportedUsage, type StepUsage } from "./usage.js";
+
+export type { StepUsage } from "./usage.js";
 
 export interface ComponentTool { readonly name: string; readonly source: string }
 export interface ComponentStep {
@@ -32,7 +35,6 @@ export const COMPONENT_LIMITS = Object.freeze({
   depth: 8, calls: 32, steps: 40, childSteps: 12,
   requestBytes: 65_536, resultBytes: 1_048_576, timeoutMs: 120_000,
 });
-export interface StepUsage { readonly inputTokens: number; readonly outputTokens: number }
 export interface StepResponse {
   readonly value: unknown;
   readonly failed?: boolean;
@@ -64,6 +66,8 @@ export interface ChildVerificationContext {
   readonly step: string;
   readonly alias: string;
   readonly callee: string;
+  /** The callee's invocation depth (the caller's depth plus one). */
+  readonly depth: number;
   /** The normalized alias-call request (request text plus `input`), as the child received it. */
   readonly request: { readonly request: string; readonly input: Readonly<Record<string, unknown>> };
 }
@@ -122,7 +126,7 @@ export interface RunnerHost {
   onEvent?(event: ComponentEvent): void;
 }
 export interface ComponentEvent {
-  readonly kind: "step.start" | "step.finish" | "call.start" | "call.finish" | "tool.start" | "tool.finish" | "egress";
+  readonly kind: "step.start" | "step.finish" | "call.start" | "call.finish" | "tool.start" | "tool.finish" | "egress" | "usage";
   readonly invocation: string;
   readonly parent: string | null;
   readonly component: string;
@@ -135,6 +139,8 @@ export interface ComponentEvent {
   readonly slot?: string;
   readonly egress?: EgressDecision["status"];
   readonly reason?: string;
+  /** `usage` events: one per completed step call, zeros when the transport reported none. */
+  readonly usage?: StepUsage;
 }
 
 const normalizedResult = z.discriminatedUnion("status", [
@@ -397,7 +403,7 @@ export class ComponentRunner {
               assertActive();
               // The egress seam: the caller only ever receives `disclosed`. The raw
               // child result exists on this stack frame and nowhere else.
-              const verified = await this.verifyChild({ caller: id, step: step.name, alias: edge.alias, callee: edge.component,
+              const verified = await this.verifyChild({ caller: id, step: step.name, alias: edge.alias, callee: edge.component, depth: depth + 1,
                 request: normalizeComponentRequest(savedInput, COMPONENT_LIMITS.requestBytes) }, raw);
               assertActive();
               for (const decision of verified.decisions) {
@@ -431,10 +437,10 @@ export class ComponentRunner {
           }, binding);
           // Keep observed usage even if cancellation makes a completion unusable.
           void pending.then((result) => {
-            if (result.usage) for (const key of ["inputTokens", "outputTokens"] as const) {
-              const count = result.usage[key];
-              if (Number.isSafeInteger(count) && count >= 0) this.usage[key] += count;
-            }
+            const usage = reportedUsage(result.usage);
+            this.usage.inputTokens += usage.inputTokens;
+            this.usage.outputTokens += usage.outputTokens;
+            this.host.onEvent?.({ ...event, kind: "usage", step: step.name, usage });
           }).catch(() => {});
           const response = await this.wait(pending);
           accepting = false;

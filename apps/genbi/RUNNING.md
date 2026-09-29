@@ -267,6 +267,15 @@ layout, so an audit can check what the cloud received: the card, the slot
 questions and the verified values, never the snapshot, the SQL or the `wren`
 brief. The UI renders an `unavailable` cell as N/A with its reason category.
 
+Every composed in-process run also carries `trace.usage`: one record per model
+call (`component`, `step`, `tier`, `depth` — 0 for a root step, 1+ inside a
+child run — `zone`, `adapter`, `model`, `inputTokens`, `outputTokens`), the
+egress judge's calls recorded as step `egress_judge` under the callee it
+judged, and `providers`, the same counts summed per zone, adapter and model.
+The counts are what each provider reported; a provider that reports none is
+recorded as zeros. The records carry no prompt, question, SQL, row or output
+text. A run that ends in an error returns no result, and so no usage.
+
 ## The UI
 
 In a second terminal:

@@ -1,5 +1,6 @@
 import { generateText, type LanguageModel } from "ai";
 import type { EgressJudge, EgressJudgeInput } from "./egress.js";
+import { reportedUsage, type StepUsage } from "./usage.js";
 
 /**
  * The judge's standing instructions. The question text is handed to the
@@ -18,10 +19,11 @@ export const EGRESS_JUDGE_INSTRUCTIONS = [
   "Never restate the answer's rows or values in your reply.",
 ].join("\n");
 
-/** An egress judge realized by a language model; the model runs on a private-zone tier. */
-export function createModelJudge(model: LanguageModel): EgressJudge {
+/** An egress judge realized by a language model; the model runs on a private-zone tier. `onUsage` receives each completed call's counts. */
+export function createModelJudge(model: LanguageModel, onUsage?: (usage: StepUsage) => void): EgressJudge {
   return async (input: EgressJudgeInput, signal: AbortSignal) => {
-    const { text } = await generateText({ model, system: EGRESS_JUDGE_INSTRUCTIONS, prompt: JSON.stringify(input), abortSignal: signal });
+    const { text, usage } = await generateText({ model, system: EGRESS_JUDGE_INSTRUCTIONS, prompt: JSON.stringify(input), abortSignal: signal });
+    onUsage?.(reportedUsage(usage));
     return text;
   };
 }

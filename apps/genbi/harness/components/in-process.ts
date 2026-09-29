@@ -2,14 +2,15 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { fingerprintSurfaces } from "@warble/claude-agent-sdk";
 import { generatePreparedContext, generatePreparedContextAndCatalog, resolveContextLoader } from "../compile/context-loader.js";
 import { hashDirectory } from "../compile/fingerprint.js";
 import { resolveWarbleBinary } from "../compile/resolve-binary.js";
-import type { PromptSurfaceRecord, TraceStep } from "../events/types.js";
+import type { PromptSurfaceRecord, StepTrace, TraceStep, UsageRecord } from "../events/types.js";
 import { createAgentEventEmitter } from "../events/emitter.js";
-import { createDefaultProviderRegistry, isZoneAwareBinding, resolveTierModel, resolveTierSpec, type TierBinding } from "../providers/index.js";
+import { createDefaultProviderRegistry, isZoneAwareBinding, resolveTierModel, resolveTierSpec, type AdapterSpec, type TierBinding } from "../providers/index.js";
 import { deriveAdapterSpec } from "../route/adapter-spec.js";
 import type { InProcessOptions } from "../route/types.js";
 import type { RunAgentResult } from "../session/types.js";
@@ -23,6 +24,7 @@ import { normalizeComponentEvidence } from "./normalize.js";
 import { buildSlotTable, isReportComponent, materialiseReportPlan, normalizeReportEvidence, parseReportPlan, reportSteps } from "./report.js";
 import { planDigest } from "./plan.js";
 import { ComponentRunner, type ExecutionPlan } from "./runner.js";
+import { modelIdOf, summariseUsage, type StepUsage } from "./usage.js";
 import { captureWrenAccessIdentity, openWrenComponentAccess } from "./wren-access.js";
 import { assertZoneGate } from "./zone-gate.js";
 
@@ -52,6 +54,8 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
   const emitter = createAgentEventEmitter(options.onEvent);
   const traceSteps: TraceStep[] = [];
   const surfaceRecords: PromptSurfaceRecord[] = [];
+  const usageRecords: UsageRecord[] = [];
+  const trace = (): StepTrace => ({ steps: traceSteps.sort((a, b) => a.ordinal - b.ordinal), surfaces: surfaceRecords, usage: summariseUsage(usageRecords) });
   const toolOrder = new Map<string, number>();
   const zoneAware = isZoneAwareBinding(binding);
   emitter.emit({ kind: "run.start", mode: "A", agentId: entry });
@@ -89,6 +93,11 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     const identity = { session: randomUUID(), vendor: "in-process", account: planDigest(binding), generation: randomUUID(),
       project, bindingRevision: planDigest([fingerprint, accessIdentity.digest]), contextDigest: planDigest(contexts), planDigest: plan.identity };
     const models = new Map<string, Map<string, ReturnType<typeof resolveTierModel>>>();
+    // Counts only, attributed to the provider that served the call; the payload never enters the record.
+    const recordUsage = (at: Pick<UsageRecord, "component" | "step" | "tier" | "depth">, spec: AdapterSpec | undefined, model: LanguageModel | undefined, usage: StepUsage) => {
+      usageRecords.push({ ...at, zone: spec?.zone ?? "unbound", adapter: spec?.adapter ?? "unbound", model: model ? modelIdOf(model) : "unbound",
+        inputTokens: usage.inputTokens, outputTokens: usage.outputTokens });
+    };
     // The egress verification seam is installed whenever a disclosure policy is
     // bound. The gate has already required a private judge tier for it, so a
     // missing judge here is an internal error, not a degrade.
@@ -96,11 +105,13 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     const judgeKey = binding.roles?.judge;
     const judgeSpec = judgeKey !== undefined ? binding.tiers[judgeKey] : undefined;
     if (policy && !judgeSpec) throw new Error("Egress verification requires a bound judge tier");
-    const judge = judgeSpec ? createModelJudge(registry.create(judgeSpec.adapter, judgeSpec.config)) : undefined;
+    const judgeModel = judgeSpec ? registry.create(judgeSpec.adapter, judgeSpec.config) : undefined;
     const broker = createComponentBroker({ plan, contexts, verifierBinary: await resolveWarbleBinary(options.warbleBin),
       identity, currentIdentity: () => signal.aborted ? undefined : identity,
       ...(policy ? { verifyChild: async (context, result, parent) => {
         await checkProject();
+        const judge = judgeModel ? createModelJudge(judgeModel, (usage) => recordUsage({ component: context.callee, step: "egress_judge", tier: judgeKey!, depth: context.depth },
+          judgeSpec, judgeModel, usage)) : undefined;
         return verifyEgress(context.request, result, { policy, ...(judge ? { judge } : {}), signal: parent });
       } } : {}),
       async prepare(component, _identity, parent): Promise<ComponentAccess> {
@@ -156,6 +167,12 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
         return isReportComponent(component) ? normalizeReportEvidence(component, evidence) : normalizeComponentEvidence(component, evidence, contexts[component.id]?.snapshot);
       },
       onEvent(event) {
+        if (event.kind === "usage" && event.step) {
+          const tier = plan.components[event.component]?.steps.find((step) => step.name === event.step)?.tier ?? "unbound";
+          recordUsage({ component: event.component, step: event.step, tier, depth: event.depth }, resolveTierSpec(binding, tier, event.component)?.spec,
+            models.get(event.component)?.get(tier), event.usage ?? { inputTokens: 0, outputTokens: 0 });
+          return;
+        }
         if (event.kind === "egress") {
           // Slot id, status and reason category only: the payload never enters the trace.
           traceSteps.push({ id: `${event.callId}:egress:${event.slot}`, tool: "egress", outcome: event.egress === "refused" ? "error" : "success",
@@ -181,7 +198,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       const envelope = { blocks: [], verified: false };
       emitter.emit({ kind: "refusal", reason: result.message, envelope });
       emitter.emit({ kind: "run.finish", status: "refusal" });
-      return { kind: "refusal", reason: result.message, envelope, trace: { steps: traceSteps.sort((a, b) => a.ordinal - b.ordinal), surfaces: surfaceRecords } };
+      return { kind: "refusal", reason: result.message, envelope, trace: trace() };
     }
     const value = result.output.kind === "value" ? data.safeParse(result.output.value) : undefined;
     const blocks = result.output.kind === "render" ? result.output.blocks : value?.success
@@ -192,7 +209,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       ...(result.provenance?.definition ? { definition: result.provenance.definition } : {}) };
     emitter.emit({ kind: "answer", envelope });
     emitter.emit({ kind: "run.finish", status: "answer" });
-    return { kind: "answer", envelope, trace: { steps: traceSteps.sort((a, b) => a.ordinal - b.ordinal), surfaces: surfaceRecords } };
+    return { kind: "answer", envelope, trace: trace() };
   } catch (error) {
     emitter.emit({ kind: "error", message: "Component preparation or execution failed." });
     emitter.emit({ kind: "run.finish", status: "error" });

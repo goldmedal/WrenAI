@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ComponentRunner, type ComponentBinding, type ExecutionPlan, type RunnerHost, type StepRun } from "../harness/components/runner.js";
+import { ComponentRunner, type ComponentBinding, type ComponentEvent, type ExecutionPlan, type RunnerHost, type StepRun } from "../harness/components/runner.js";
 
 function plan(): ExecutionPlan {
   return {
@@ -63,6 +63,25 @@ describe("host-owned component runner", () => {
     expect(f.completed).toEqual(["answer", "answer", "dashboard"]);
     expect(runner.observedUsage).toEqual({ inputTokens: 6, outputTokens: 3 });
     expect(f.closed.sort()).toEqual(["answer", "dashboard"]);
+  });
+
+  it("emits one usage event per step call, root and child, with zeros for a transport that reports none or a malformed count", async () => {
+    const events: ComponentEvent[] = [];
+    const f = fixture(async (step) => step.prompt === "layout" ? [await step.tools.answer!({ request: "first" })] : step.tools.query!({ sql: "select 1" }));
+    const reported = f.host.runStep;
+    const host: RunnerHost = { ...f.host, onEvent: (event) => events.push(event),
+      async runStep(step, binding) {
+        const response = await reported(step, binding);
+        // The child reports nothing; the root reports one valid and one malformed count.
+        return step.prompt === "layout" ? { ...response, usage: { inputTokens: 5, outputTokens: -1 } } : { value: response.value };
+      } };
+    const runner = new ComponentRunner(plan(), host);
+    expect((await runner.run("dashboard", { request: "dashboard" })).status).toBe("ok");
+    expect(events.filter((event) => event.kind === "usage").map(({ component, step, depth, usage }) => ({ component, step, depth, usage }))).toStrictEqual([
+      { component: "answer", step: "query", depth: 1, usage: { inputTokens: 0, outputTokens: 0 } },
+      { component: "dashboard", step: "layout", depth: 0, usage: { inputTokens: 5, outputTokens: 0 } },
+    ]);
+    expect(runner.observedUsage).toEqual({ inputTokens: 5, outputTokens: 0 });
   });
 
   it("refuses stale step tools after completion", async () => {
