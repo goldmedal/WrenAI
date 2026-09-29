@@ -14,7 +14,7 @@ import type { RpcTransport } from "../server/runtime-host/codex-rpc.js";
 const runtime = { manifest_digest: "a".repeat(64), closure_digest: "b".repeat(64), generation_root: "/generation" };
 const vendor = { name: "vendor", executable: "/codex", identity: `sha256:${"c".repeat(64)}`, digest: `sha256:${"c".repeat(64)}` };
 const policy = { cwd: "/scope", codexHome: "/login", profile: "genbi-scoped", args: ["app-server"], environment: {}, commandEnvironment: {}, configuration: {} };
-const row = { state: "certified_row", platform: "darwin-arm64", version: "0.146.0", executableSha256: "c".repeat(64), source: "https://example.invalid/codex", protocolSha256: "d".repeat(64), contracts: [...CODEX_REQUIRED_CONTRACTS], evidence: { deterministicProbesSha256: "a".repeat(64), packedAcceptanceSha256: "b".repeat(64), releaseApprovalSha256: "c".repeat(64) } };
+const row = { state: "certified_row", platform: "darwin-arm64", version: "0.156.1", executableSha256: "c".repeat(64), source: "https://example.invalid/codex", protocolSha256: "d".repeat(64), contracts: [...CODEX_REQUIRED_CONTRACTS], evidence: { deterministicProbesSha256: "a".repeat(64), packedAcceptanceSha256: "b".repeat(64), releaseApprovalSha256: "c".repeat(64) } };
 class Peer implements RpcTransport {
   handlers!: Parameters<RpcTransport["listen"]>[0];
   close = vi.fn(async () => {});
@@ -22,7 +22,7 @@ class Peer implements RpcTransport {
   listen(value: Parameters<RpcTransport["listen"]>[0]) { this.handlers = value; }
   write(line: string) {
     const message = JSON.parse(line); if (!message.id || this.hang) return;
-    const result = message.method === "initialize" ? { codexHome: "/login", platformFamily: "unix", platformOs: "macos", userAgent: "codex_cli_rs/0.146.0 fixture" } : message.method === "config/read" ? { config: {} } : { data: [{ id: "genbi-scoped", allowed: true }], nextCursor: null };
+    const result = message.method === "initialize" ? { codexHome: "/login", platformFamily: "unix", platformOs: "macos", userAgent: "codex_cli_rs/0.156.1 fixture" } : message.method === "config/read" ? { config: {} } : { data: [{ id: "genbi-scoped", allowed: true }], nextCursor: null };
     this.handlers.data(Buffer.from(JSON.stringify({ id: message.id, result }) + "\n"));
   }
 }
@@ -32,7 +32,7 @@ const input = () => ({ spec: { executables: { vendor } } as any, wrenHome: {} as
 beforeEach(() => {
   mocks.rows.splice(0, mocks.rows.length, row); mocks.platform = "darwin"; mocks.arch = "arm64";
   mocks.resolve.mockReset().mockReturnValue(runtime); mocks.attest.mockReset().mockReturnValue(vendor); mocks.assertIdentity.mockReset();
-  mocks.version.mockReset().mockReturnValue("codex-cli 0.146.0\n"); mocks.policy.mockReset().mockReturnValue(policy); mocks.spawn.mockReset().mockImplementation(() => new Peer());
+  mocks.version.mockReset().mockReturnValue("codex-cli 0.156.1\n"); mocks.policy.mockReset().mockReturnValue(policy); mocks.spawn.mockReset().mockImplementation(() => new Peer());
 });
 afterEach(async () => { for (const value of backends.splice(0)) await value.shutdown().catch(() => {}); });
 describe("Codex backend grants", () => {

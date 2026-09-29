@@ -78,7 +78,12 @@ export function buildCodexSessionPolicy(spec: NativeRuntimeSpec, runtime: Manage
   for (const root of readRoots) {
     if (root === path.parse(root).root || within(root, os.homedir()) || within(root, codexHome) || within(codexHome, root)) deny();
   }
-  const filesystem: Record<string, unknown> = { ":minimal": "read" };
+  // Platform defaults include shared scratch directories. The certified vendor
+  // must enforce these exclusions even against those implicit grants; session
+  // workspace grants below remain explicit and more specific.
+  const filesystem: Record<string, unknown> = {
+    ":minimal": "read", "/private/tmp": "deny", "/private/var/tmp": "deny",
+  };
   for (const root of readRoots) filesystem[root] = "read";
   filesystem[cwd] = "write";
   // A selected Wren profile is readable, never editable by the agent. Narrow

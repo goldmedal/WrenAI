@@ -6,6 +6,7 @@ on:
       - '.github/workflows/managed-wren-runtime.yml'
       - '.github/workflows/managed-wren-release-ci.yml'
       - 'apps/genbi/scripts/managed-wren-release*'
+      - 'apps/genbi/scripts/managed-wren-source*'
       - 'apps/genbi/managed-wren/**'
   push:
     branches: [main]
@@ -13,6 +14,7 @@ on:
       - '.github/workflows/managed-wren-runtime.yml'
       - '.github/workflows/managed-wren-release-ci.yml'
       - 'apps/genbi/scripts/managed-wren-release*'
+      - 'apps/genbi/scripts/managed-wren-source*'
       - 'apps/genbi/managed-wren/**'
 
 permissions:

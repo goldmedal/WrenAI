@@ -4,7 +4,7 @@ import type { RpcTransport } from "../server/runtime-host/codex-rpc.js";
 import type { CodexSessionPolicy } from "../server/runtime-host/codex-policy.js";
 
 const policy: CodexSessionPolicy = { cwd: "/scope", codexHome: "/login", profile: "genbi-scoped", args: [], environment: {}, commandEnvironment: { PATH: "/tools", CODEX_HOME: null }, configuration: { approval_policy: "never" } };
-const thread = { id: "thread-1", cwd: "/scope", cliVersion: "0.146.0", ephemeral: true };
+const thread = { id: "thread-1", cwd: "/scope", cliVersion: "0.156.1", ephemeral: true };
 const turn = (status = "inProgress") => ({ id: "turn-1", status, items: [] });
 class Peer implements RpcTransport {
   handlers!: Parameters<RpcTransport["listen"]>[0];
@@ -17,7 +17,7 @@ class Peer implements RpcTransport {
   write(line: string) {
     const message = JSON.parse(line); this.messages.push(message);
     if (this.custom?.(message)) return;
-    if (message.method === "initialize") this.response(message.id, { codexHome: "/login", platformFamily: "unix", platformOs: "macos", userAgent: "codex_cli_rs/0.146.0 fixture" });
+    if (message.method === "initialize") this.response(message.id, { codexHome: "/login", platformFamily: "unix", platformOs: "macos", userAgent: "codex_cli_rs/0.156.1 fixture" });
     else if (message.method === "config/read") this.response(message.id, { config: policy.configuration });
     else if (message.method === "permissionProfile/list") this.response(message.id, { data: [{ id: "genbi-scoped", allowed: true }], nextCursor: null });
     else if (message.method === "thread/start") { this.event("thread/started", { thread }); this.response(message.id, { thread }); }

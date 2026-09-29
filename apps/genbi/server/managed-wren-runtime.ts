@@ -25,7 +25,7 @@ const managedWrenManifestSchema = z.object({
   schema: z.literal(1),
   activation: z.enum(["staged", "approved"]),
   platform: z.literal("darwin-arm64"),
-  compatibility: z.object({ genbi: z.string().regex(/^\d+\.\d+\.\d+$/), profile: z.literal("genbi-native-v4"), wren: z.string().regex(/^\d+\.\d+\.\d+$/) }).strict(),
+  compatibility: z.object({ genbi: z.string().regex(/^\d+\.\d+\.\d+$/), profile: z.literal("genbi-native-v4"), wren: z.string().regex(/^\d+\.\d+\.\d+(?:\+genbi\.[1-9]\d*)?$/) }).strict(),
   python: z.object({
     implementation: z.literal("cpython"), version: z.string().regex(/^3\.11\.\d+$/),
     upstream: z.object({ release: z.string().regex(/^\d{8}$/), url: z.string().url(), sha256: SHA256 }).strict(),

@@ -16,7 +16,7 @@ import { CodexSession } from "../dist-server/server/runtime-host/codex-session.j
 if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("darwin-arm64 required");
 if (!process.env.CODEX_BIN || !path.isAbsolute(process.env.CODEX_BIN)) throw new Error("absolute CODEX_BIN required");
 const codex = realpathSync(process.env.CODEX_BIN);
-assert.equal(execFileSync(codex, ["--version"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } }).trim(), "codex-cli 0.146.0");
+assert.equal(execFileSync(codex, ["--version"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } }).trim(), "codex-cli 0.156.1");
 const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "genbi-codex-backend-")));
 const dir = (name) => { const target = path.join(root, name); mkdirSync(target, { recursive: true, mode: 0o700 }); return target; };
 const workspace = dir("workspace"), login = dir("login"), home = dir("home"), generation = dir("runtime"), bin = dir("runtime/bin");

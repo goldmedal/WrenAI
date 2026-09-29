@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 
-const expected = { codex: "0.146.0", claude: "2.1.259", sandboxRuntime: "0.0.75" };
+const expected = { codex: "0.156.1", claude: "2.1.259", sandboxRuntime: "0.0.75" };
 const spikeDirectory = path.join(process.cwd(), "scripts", "runtime-sandbox-spike");
 const toolRoot = process.env.GENBI_VENDOR_TOOL_ROOT;
 const isolatedHome = await mkdtemp(path.join(os.tmpdir(), "genbi-vendor-contract-"));
@@ -46,6 +46,12 @@ try {
   const nativePackage = path.dirname(vendorRequire.resolve("@openai/codex-darwin-arm64/package.json"));
   const nativeCodex = path.join(nativePackage, "vendor", "aarch64-apple-darwin", "bin", "codex");
   await run(process.execPath, [path.join(process.cwd(), "scripts", "codex-backend-probe.mjs")], { ...probeEnv, CODEX_BIN: nativeCodex });
+  // macOS platform defaults used to grant shared scratch access despite explicit
+  // path restrictions. User-temp-only coverage cannot detect that regression.
+  for (const sharedTemp of ["/private/tmp", "/private/var/tmp"]) {
+    await run(process.execPath, [path.join(process.cwd(), "scripts", "codex-backend-probe.mjs")],
+      { ...probeEnv, CODEX_BIN: nativeCodex, TMPDIR: sharedTemp });
+  }
   await run(process.execPath, [path.join(process.cwd(), "scripts", "codex-component-probe.mjs")], { ...probeEnv, CODEX_BIN: nativeCodex });
   await run(process.execPath, [path.join(process.cwd(), "scripts", "claude-component-probe.mjs")], probeEnv);
   process.stdout.write(`${JSON.stringify({

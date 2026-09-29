@@ -24,7 +24,7 @@ describe("Codex exact certification", () => {
   it.each([
     [{ platform: "linux-arm64" }, "runtime_platform_unsupported"],
     [{ versionOutput: "codex-cli 0.147.0" }, "codex_cli_version_unsupported"],
-    [{ versionOutput: "secret /private/path 0.146.0" }, "codex_cli_version_malformed"],
+    [{ versionOutput: "secret /private/path 0.156.1" }, "codex_cli_version_malformed"],
     [{ executableSha256: "f".repeat(64) }, "codex_identity_uncertified"],
     [{ source: "https://example.invalid/other-source" }, "codex_identity_uncertified"],
     [{ protocolSha256: "f".repeat(64) }, "codex_app_server_protocol_incompatible"],

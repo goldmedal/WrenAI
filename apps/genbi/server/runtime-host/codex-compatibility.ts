@@ -2,12 +2,12 @@ import { z } from "zod";
 import { runtimeNotReady, runtimeReady } from "./policy.js";
 import type { RuntimeBackendProbeResult } from "./types.js";
 
-export const CODEX_BASELINE_VERSION = "0.146.0";
+export const CODEX_BASELINE_VERSION = "0.156.1";
 export const CODEX_REQUIRED_CONTRACTS = [
   "initialize", "config/read", "thread/start", "turn/start", "turn/interrupt",
   "permissionProfile/list", "thread/start.permissions", "turn/start.permissions", "command/exec.permissionProfile",
   "command/exec", "command/exec/write", "command/exec/resize", "command/exec/terminate",
-  "protected_read", "network_deny", "timeout_cleanup", "connection_cleanup",
+  "protected_read", "shared_temp_isolation", "network_deny", "timeout_cleanup", "connection_cleanup",
 ] as const;
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const codexCertificationSchema = z.object({

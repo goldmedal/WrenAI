@@ -519,7 +519,7 @@ async function verifyInstalledCodexBackend(input) {
         const message = JSON.parse(line); messages.push(message);
         if (!message.id) return;
         let result;
-        if (message.method === 'initialize') result = { codexHome: '/login', platformFamily: 'unix', platformOs: 'macos', userAgent: 'codex_cli_rs/0.146.0 fixture' };
+        if (message.method === 'initialize') result = { codexHome: '/login', platformFamily: 'unix', platformOs: 'macos', userAgent: 'codex_cli_rs/0.156.1 fixture' };
         else if (message.method === 'config/read') result = { config: {} };
         else if (message.method === 'permissionProfile/list') result = { data: [{ id: 'genbi-scoped', allowed: true }], nextCursor: null };
         else if (message.method === 'command/exec') {
