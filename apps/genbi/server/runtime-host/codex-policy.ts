@@ -6,6 +6,8 @@ import type { ManagedWrenRuntimeRecord } from "../managed-wren-runtime.js";
 import type { CodexWrenHome } from "../native-wren-home.js";
 import { CodexRpcError } from "./codex-rpc.js";
 
+import { codexComponentConfiguration } from "./codex-component-step.js";
+
 export const CODEX_PERMISSION_PROFILE = "genbi-scoped";
 export interface CodexSessionPolicy {
   readonly cwd: string;
@@ -37,7 +39,7 @@ function toml(value: unknown): string {
 }
 
 /** Pure, resolve-only policy construction from host-owned scope, never request JSON. */
-export function buildCodexSessionPolicy(spec: NativeRuntimeSpec, runtime: ManagedWrenRuntimeRecord, home: CodexWrenHome): CodexSessionPolicy {
+export function buildCodexSessionPolicy(spec: NativeRuntimeSpec, runtime: ManagedWrenRuntimeRecord, home: CodexWrenHome, directTools = false): CodexSessionPolicy {
   assertNativeRuntimeSpec(spec);
   if (spec.backend !== "codex-app-server" || spec.vendor !== "codex" || !spec.childEnvironment.CODEX_HOME || spec.mcp) deny();
   if (spec.executables.wren?.executable !== runtime.launcher || spec.executables.python?.executable !== runtime.venv_python) deny();
@@ -107,7 +109,7 @@ export function buildCodexSessionPolicy(spec: NativeRuntimeSpec, runtime: Manage
   // App-server may read its login; commands receive neither its home variable
   // nor any provider credentials. No ambient environment spread is used.
   const { CODEX_HOME: _loginHome, ...shellEnvironment } = environment;
-  const config: Record<string, unknown> = {
+  const config: Record<string, unknown> = directTools ? { ...codexComponentConfiguration(CODEX_PERMISSION_PROFILE) } : {
     default_permissions: CODEX_PERMISSION_PROFILE,
     permissions: { [CODEX_PERMISSION_PROFILE]: { filesystem, network: { enabled: false } } },
     approval_policy: "never",
@@ -123,8 +125,9 @@ export function buildCodexSessionPolicy(spec: NativeRuntimeSpec, runtime: Manage
       "shell_snapshot", "standalone_web_search",
     ].map((name) => [name, false])),
   };
+  if (directTools) { delete environment.WREN_HOME; delete environment.WREN_PROJECT_HOME; }
   const args = Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${toml(value)}`]);
   args.push("app-server", "--stdio", "--strict-config");
   return Object.freeze({ cwd, codexHome, profile: CODEX_PERMISSION_PROFILE, args: Object.freeze(args),
-    environment: Object.freeze(environment), commandEnvironment: Object.freeze({ ...shellEnvironment, CODEX_HOME: null }), configuration: Object.freeze(config) });
+    environment: Object.freeze(environment), commandEnvironment: Object.freeze(directTools ? {} : { ...shellEnvironment, CODEX_HOME: null }), configuration: Object.freeze(config) });
 }

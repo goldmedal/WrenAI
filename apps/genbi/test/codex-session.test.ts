@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CodexSessionTools } from "../server/runtime-host/codex-direct-tools.js";
 import { CodexSession } from "../server/runtime-host/codex-session.js";
 import type { RpcTransport } from "../server/runtime-host/codex-rpc.js";
 import type { CodexSessionPolicy } from "../server/runtime-host/codex-policy.js";
@@ -19,6 +20,7 @@ class Peer implements RpcTransport {
     if (this.custom?.(message)) return;
     if (message.method === "initialize") this.response(message.id, { codexHome: "/login", platformFamily: "unix", platformOs: "macos", userAgent: "codex_cli_rs/0.156.1 fixture" });
     else if (message.method === "config/read") this.response(message.id, { config: policy.configuration });
+    else if (message.method === "account/read") this.response(message.id, { requiresOpenaiAuth: true, account: { type: "chatgpt", email: "fixture@example.invalid" } });
     else if (message.method === "permissionProfile/list") this.response(message.id, { data: [{ id: "genbi-scoped", allowed: true }], nextCursor: null });
     else if (message.method === "thread/start") { this.event("thread/started", { thread }); this.response(message.id, { thread }); }
     else if (message.method === "turn/start") this.response(message.id, { turn: turn() });
@@ -26,9 +28,9 @@ class Peer implements RpcTransport {
   }
   last(method: string) { return [...this.messages].reverse().find((message) => message.method === method)!; }
 }
-async function fixture() {
+async function fixture(tools?: CodexSessionTools) {
   const peer = new Peer(); const emit = vi.fn(); const revalidate = vi.fn();
-  const session = await CodexSession.connect(peer, policy, revalidate, emit);
+  const session = await CodexSession.connect(peer, policy, revalidate, emit, undefined, tools);
   return { peer, emit, revalidate, session };
 }
 describe("Codex session protocol", () => {
@@ -183,5 +185,70 @@ describe("Codex command and PTY", () => {
     const { peer, session } = await fixture(); const command = session.startCommand({ command: ["one"] });
     peer.response(peer.last("command/exec").id!, { exitCode: 0, stdout: "duplicate/private", stderr: "" });
     await expect(command.completed).rejects.toMatchObject({ reason: "protocol" });
+  });
+});
+
+function toolFixture() {
+  const tools: CodexSessionTools = {
+    accountEmail: "fixture@example.invalid",
+    definitions: [{ name: "run_selected", description: "Selected entry", inputSchema: { type: "object" } }],
+    assertCurrent: vi.fn(), call: vi.fn(async () => ({ status: "ok" })), close: vi.fn(async () => {}),
+  };
+  return tools;
+}
+const toolItem = { id: "call-1", type: "dynamicToolCall", tool: "run_selected", status: "inProgress" };
+async function startToolTurn(tools = toolFixture()) {
+  const f = await fixture(tools); await f.session.startThread();
+  const running = f.session.runTurn("question"); void running.catch(() => {});
+  await Promise.resolve();
+  f.peer.event("turn/started", { threadId: thread.id, turn: turn() });
+  f.peer.event("item/started", { threadId: thread.id, turnId: "turn-1", item: toolItem });
+  const request = (overrides = {}) => f.peer.handlers.data(Buffer.from(JSON.stringify({ id: "server-call", method: "item/tool/call", params: {
+    threadId: thread.id, turnId: "turn-1", callId: "call-1", tool: "run_selected", arguments: { request: "question" }, ...overrides,
+  } }) + "\n"));
+  return { ...f, tools, running, request };
+}
+describe("direct-session tool RPC", () => {
+  it("offers fixed host tools, checks account, executes once and returns typed results", async () => {
+    const f = await startToolTurn();
+    expect(f.peer.last("thread/start").params).toMatchObject({ dynamicTools: f.tools.definitions, runtimeWorkspaceRoots: [] });
+    expect(() => f.session.startCommand({ command: ["/bin/sh"] })).toThrow();
+    f.request();
+    await vi.waitFor(() => expect(f.tools.call).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(f.peer.messages.some((m: any) => m.id === "server-call" && m.result?.success)).toBe(true));
+    const completed = { ...toolItem, status: "completed", success: true };
+    f.peer.event("item/completed", { threadId: thread.id, turnId: "turn-1", item: completed });
+    f.peer.event("turn/completed", { threadId: thread.id, turn: { ...turn("completed"), items: [completed] } });
+    expect((await f.running).status).toBe("completed");
+    await f.session.close(); expect(f.tools.close).toHaveBeenCalledOnce();
+  });
+  it.each([{ threadId: "adjacent" }, { turnId: "old-turn" }, { tool: "query_read_only" }, { callId: "unknown-item" }, { namespace: "mcp" }])("rejects unbound RPC scope %j", async (overrides) => {
+    const f = await startToolTurn(); f.request(overrides);
+    await expect(f.running).rejects.toMatchObject({ reason: "protocol" });
+    expect(f.tools.call).not.toHaveBeenCalled(); await f.session.close();
+  });
+  it("rejects wrong account before starting a thread", async () => {
+    const tools = toolFixture();
+    await expect(fixture({ ...tools, accountEmail: "other@example.invalid" })).rejects.toThrow();
+    expect(tools.call).not.toHaveBeenCalled(); expect(tools.close).toHaveBeenCalledOnce();
+  });
+  it("aborts pending host access on disconnect and joins cleanup", async () => {
+    const tools = toolFixture(); let seen: AbortSignal | undefined;
+    vi.mocked(tools.call).mockImplementation(async (_name, _input, _id, signal) => {
+      seen = signal;
+      return await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(Error("aborted")), { once: true }));
+    });
+    const f = await startToolTurn(tools); f.request();
+    await vi.waitFor(() => expect(seen).toBeDefined()); f.peer.handlers.end();
+    await expect(f.running).rejects.toThrow(); await f.session.close();
+    expect(seen!.aborted).toBe(true); expect(tools.close).toHaveBeenCalledOnce();
+  });
+  it("rejects completion while a tool is pending and never sends a late result", async () => {
+    const tools = toolFixture(); let finish!: () => void;
+    vi.mocked(tools.call).mockImplementation(() => new Promise((resolve) => { finish = () => resolve({ private: "late" }); }));
+    const f = await startToolTurn(tools); f.request(); await vi.waitFor(() => expect(finish).toBeDefined());
+    f.peer.event("turn/completed", { threadId: thread.id, turn: turn("completed") });
+    finish(); await expect(f.running).rejects.toThrow(); await f.session.close();
+    expect(f.peer.messages.some((m: any) => m.id === "server-call" && m.result)).toBe(false);
   });
 });

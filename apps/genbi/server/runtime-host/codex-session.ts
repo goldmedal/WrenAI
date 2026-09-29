@@ -6,6 +6,8 @@ import type { CodexSessionPolicy } from "./codex-policy.js";
 import { CodexRpcClient, CodexRpcError, object, type RpcTransport } from "./codex-rpc.js";
 import { isDeepStrictEqual } from "node:util";
 
+import type { CodexSessionTools } from "./codex-direct-tools.js";
+
 type Turn = z.infer<typeof codexTurnSchema>;
 const sizeSchema = z.object({ cols: z.number().int().min(1).max(500), rows: z.number().int().min(1).max(500) }).strict();
 const commandSchema = z.object({
@@ -44,6 +46,11 @@ interface ActiveTurn {
   timer: ReturnType<typeof setTimeout>;
   detach(): void;
   items: Map<string, { type: string; completed: boolean }>;
+  readonly toolsAbort: AbortController;
+  readonly calls: Set<string>;
+  pendingTools: number;
+  ready: Promise<void>;
+  releaseTools(): void;
 }
 
 /**
@@ -53,6 +60,8 @@ interface ActiveTurn {
  */
 export class CodexSession {
   private readonly rpc: CodexRpcClient;
+  private readonly tools: CodexSessionTools | undefined;
+  private toolsClosing?: Promise<void>;
   private threadId?: string;
   private startingThread = false;
   private threadEventId?: string;
@@ -63,19 +72,24 @@ export class CodexSession {
   private closePromise?: Promise<void>;
   private constructor(
     transport: RpcTransport, private readonly policy: CodexSessionPolicy,
-    private readonly revalidate: () => void, private readonly emit: (event: CodexEvent) => void,
+    private readonly revalidate: () => void, private readonly emit: (event: CodexEvent) => void, tools?: CodexSessionTools,
   ) {
-    this.rpc = new CodexRpcClient(transport, ({ method, params }) => this.receive(parseCodexEvent(method, params)));
+    this.tools = tools ? Object.freeze({ accountEmail: tools.accountEmail, definitions: structuredClone(tools.definitions),
+      assertCurrent: tools.assertCurrent.bind(tools), call: tools.call.bind(tools), close: tools.close.bind(tools) }) : undefined;
+    this.rpc = new CodexRpcClient(transport, ({ method, params }) => this.receive(parseCodexEvent(method, params)), 1_048_576,
+      this.tools ? (request) => this.callTool(request.method, request.params) : undefined);
     this.rpc.onFailure((error) => {
       this.closed = true;
       if (this.turn) this.settleTurn(undefined, error);
       this.commands.clear();
+      void this.closeTools().catch(() => {});
     });
   }
-  static async connect(transport: RpcTransport, policy: CodexSessionPolicy, revalidate: () => void, emit: (event: CodexEvent) => void, created?: (session: CodexSession) => void): Promise<CodexSession> {
-    const session = new CodexSession(transport, policy, revalidate, emit);
+  static async connect(transport: RpcTransport, policy: CodexSessionPolicy, revalidate: () => void, emit: (event: CodexEvent) => void, created?: (session: CodexSession) => void, tools?: CodexSessionTools): Promise<CodexSession> {
+    const session = new CodexSession(transport, policy, revalidate, emit, tools);
     try {
       created?.(session);
+      session.tools?.assertCurrent();
       const initialized = parse(z.object({ codexHome: z.literal(policy.codexHome), platformFamily: z.literal("unix"), platformOs: z.literal("macos"), userAgent: z.string().min(1) }), await session.rpc.request("initialize", {
         clientInfo: { name: "genbi", version: "0.0.4" }, capabilities: { experimentalApi: true },
       }));
@@ -92,13 +106,18 @@ export class CodexSession {
       const profiles = parse(z.object({ data: z.array(z.object({ id: z.string(), allowed: z.boolean() })), nextCursor: z.null().optional() }), await session.rpc.request("permissionProfile/list", { cwd: policy.cwd }));
       if (profiles.data.filter((p) => p.id === policy.profile && p.allowed).length !== 1) throw new CodexRpcError("permission");
       if (session.closed) throw new CodexRpcError("closed");
+      if (session.tools) {
+        parse(z.object({ requiresOpenaiAuth: z.literal(true), account: z.object({ type: z.literal("chatgpt"), email: z.literal(session.tools.accountEmail) }) }),
+          await session.rpc.request("account/read", { refreshToken: false }));
+        session.tools.assertCurrent();
+      }
       session.ready = true;
       return session;
     } catch (error) { await session.close(); throw error; }
   }
   private check(): void {
     if (this.closed || !this.ready) throw new CodexRpcError("closed");
-    try { this.revalidate(); } catch { this.rpc.fail("protocol"); throw new CodexRpcError("protocol"); }
+    try { this.revalidate(); this.tools?.assertCurrent(); } catch { this.rpc.fail("protocol"); throw new CodexRpcError("protocol"); }
   }
   private protocolFailure(): never { this.rpc.fail("protocol"); throw new CodexRpcError("protocol"); }
   async startThread(): Promise<string> {
@@ -108,7 +127,8 @@ export class CodexSession {
     try {
       const result = parse(z.object({ thread: codexThreadSchema }), await this.rpc.request("thread/start", {
         cwd: this.policy.cwd, permissions: this.policy.profile, approvalPolicy: "never", ephemeral: true,
-        runtimeWorkspaceRoots: [this.policy.cwd], environments: [], dynamicTools: [],
+        runtimeWorkspaceRoots: this.tools ? [] : [this.policy.cwd], environments: [], dynamicTools: this.tools?.definitions ?? [],
+        ...(this.tools ? { baseInstructions: "Use the provided tool for the selected analytical request. Component steps, data access and persistence are owned by the host.", developerInstructions: "" } : {}),
         allowProviderModelFallback: false,
       }));
       this.validateThread(result.thread);
@@ -130,8 +150,11 @@ export class CodexSession {
     if (options.signal?.aborted) { await this.close(); throw new CodexRpcError("cancelled"); }
     const abort = () => this.rpc.fail("cancelled");
     let active!: ActiveTurn;
+    let releaseTools!: () => void;
+    const ready = new Promise<void>((resolve) => { releaseTools = resolve; });
     const completion = new Promise<Turn>((resolve, reject) => {
       active = { resolve, reject, started: false, early: [], earlyBytes: 0, items: new Map(),
+        toolsAbort: new AbortController(), calls: new Set(), pendingTools: 0, ready, releaseTools,
         timer: setTimeout(() => this.rpc.fail("timeout"), timeoutMs),
         detach: () => options.signal?.removeEventListener("abort", abort),
       };
@@ -143,12 +166,13 @@ export class CodexSession {
     try {
       const result = parse(z.object({ turn: codexTurnSchema }), await this.rpc.request("turn/start", {
         threadId: this.threadId, input: [{ type: "text", text }], cwd: this.policy.cwd,
-        permissions: this.policy.profile, approvalPolicy: "never", runtimeWorkspaceRoots: [this.policy.cwd], environments: [],
+        permissions: this.policy.profile, approvalPolicy: "never", runtimeWorkspaceRoots: this.tools ? [] : [this.policy.cwd], environments: [],
       }, Math.min(timeoutMs, 10_000)));
       if (this.turn !== active || result.turn.status !== "inProgress") this.protocolFailure();
       active.id = result.turn.id;
       const queued = active.early; active.early = []; active.earlyBytes = 0;
       for (const event of queued) this.receive(event);
+      active.releaseTools();
       return await completion;
     } catch (error) {
       this.rpc.fail(error instanceof CodexRpcError ? error.reason : "protocol");
@@ -161,6 +185,7 @@ export class CodexSession {
     const active = this.turn;
     if (!active?.id) throw new CodexRpcError("protocol");
     try {
+      active.toolsAbort.abort();
       parse(z.object({}).strict(), await this.rpc.request("turn/interrupt", { threadId: this.threadId, turnId: active.id }, 2_000));
       // An ack is not completion. Bound how long a silent peer may keep working.
       if (this.turn === active) { clearTimeout(active.timer); active.timer = setTimeout(() => this.rpc.fail("timeout"), 2_000); }
@@ -168,6 +193,7 @@ export class CodexSession {
   }
   startCommand(input: CodexCommandInput, signal?: AbortSignal): CodexCommand {
     this.check();
+    if (this.tools) throw new CodexRpcError("permission");
     const command = parse(commandSchema, input);
     if (this.commands.size >= 16 || !command.command[0]) throw new CodexRpcError("protocol");
     const id = randomUUID();
@@ -213,7 +239,7 @@ export class CodexSession {
   private settleTurn(value?: Turn, error?: unknown): void {
     const active = this.turn;
     if (!active) return;
-    this.turn = undefined; clearTimeout(active.timer); active.detach();
+    this.turn = undefined; clearTimeout(active.timer); active.detach(); active.toolsAbort.abort(); active.releaseTools();
     if (value) active.resolve(value); else active.reject(error);
   }
   private receive(event: CodexEvent): void {
@@ -235,6 +261,7 @@ export class CodexSession {
     if (event.method === "thread/status/changed") { this.emit(event); return; }
     const active = this.turn;
     if (!active) this.protocolFailure();
+    if (this.tools && "item" in event.params && !["userMessage", "agentMessage", "reasoning", "dynamicToolCall", "contextCompaction"].includes(event.params.item.type)) this.protocolFailure();
     if (!active!.id) {
       active!.earlyBytes += Buffer.byteLength(JSON.stringify(event));
       if (active!.early.length >= 128 || active!.earlyBytes > 1_048_576) this.protocolFailure();
@@ -246,20 +273,57 @@ export class CodexSession {
       if (active!.started || event.params.turn.status !== "inProgress") this.protocolFailure();
       active!.started = true;
     } else if (event.method === "turn/completed") {
-      if (event.params.turn.status === "inProgress") this.protocolFailure();
+      if (event.params.turn.status === "inProgress" || (active!.pendingTools && event.params.turn.status === "completed")) this.protocolFailure();
+      if (this.tools && event.params.turn.status === "completed") {
+        const returned = new Set<string>();
+        for (const item of event.params.turn.items) {
+          const observed = active!.items.get(item.id);
+          if (!observed?.completed || observed.type !== item.type || returned.has(item.id)) this.protocolFailure();
+          returned.add(item.id);
+        }
+        if (returned.size !== active!.items.size) this.protocolFailure();
+      }
       this.emit(event); this.settleTurn(event.params.turn); return;
     } else if (event.method === "item/started") {
+      const received = event.params.item;
+      if (received.type === "dynamicToolCall" && (!this.tools || !this.tools.definitions.some((tool) => tool.name === received.tool))) this.protocolFailure();
       if (active!.items.has(event.params.item.id) || active!.items.size >= 512) this.protocolFailure();
       active!.items.set(event.params.item.id, { type: event.params.item.type, completed: false });
     } else if (event.method === "item/completed") {
       const item = active!.items.get(event.params.item.id);
       if (!item || item.completed || item.type !== event.params.item.type) this.protocolFailure();
+      if (event.params.item.type === "dynamicToolCall" && (!active!.calls.has(event.params.item.id) || active!.pendingTools)) this.protocolFailure();
       item!.completed = true;
     } else if ("itemId" in event.params) {
       const item = active!.items.get(event.params.itemId);
       if (!item || item.completed) this.protocolFailure();
     }
     this.emit(event);
+  }
+  private async callTool(method: string, params: unknown): Promise<unknown> {
+    this.check();
+    const call = parse(z.object({ threadId: z.string().min(1), turnId: z.string().min(1), callId: z.string().min(1).max(256),
+      tool: z.string().min(1), arguments: z.unknown(), namespace: z.null().optional() }).strict(), params);
+    const active = this.turn;
+    if (method !== "item/tool/call" || !this.tools || !active || call.threadId !== this.threadId
+      || !this.tools.definitions.some((tool) => tool.name === call.tool) || active.calls.has(call.callId)
+      || active.calls.size >= 32 || active.pendingTools || Buffer.byteLength(JSON.stringify(call.arguments) ?? "") > 65_536) this.protocolFailure();
+    active.calls.add(call.callId); active.pendingTools++;
+    try {
+      await active.ready;
+      this.check(); active.toolsAbort.signal.throwIfAborted();
+      const item = active.items.get(call.callId);
+      if (this.turn !== active || call.turnId !== active.id || !active.started || item?.type !== "dynamicToolCall" || item.completed) this.protocolFailure();
+      const result = await this.tools.call(call.tool, call.arguments, `${active.id}:${call.callId}`, active.toolsAbort.signal);
+      this.check(); active.toolsAbort.signal.throwIfAborted();
+      if (this.turn !== active) this.protocolFailure();
+      const text = JSON.stringify(result);
+      if (text === undefined || Buffer.byteLength(text) > 1_048_000) this.protocolFailure();
+      return { contentItems: [{ type: "inputText", text }], success: true };
+    } finally { active.pendingTools--; }
+  }
+  private closeTools(): Promise<void> {
+    return this.toolsClosing ??= Promise.resolve().then(() => this.tools?.close()).catch(() => { throw new CodexRpcError("cleanup"); });
   }
   /** Disconnect and BFF shutdown use the same bounded, connection-owned close. */
   onFailure(listener: (error: CodexRpcError) => void): () => void {
@@ -268,7 +332,9 @@ export class CodexSession {
 
   close(): Promise<void> {
     this.closed = true;
-    this.closePromise ??= this.rpc.close();
+    this.closePromise ??= Promise.allSettled([this.rpc.close(), this.closeTools()]).then((results) => {
+      if (results.some((result) => result.status === "rejected")) throw new CodexRpcError("cleanup");
+    });
     return this.closePromise;
   }
 }

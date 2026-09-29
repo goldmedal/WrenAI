@@ -9,7 +9,7 @@ composition.
 
 `CodexRpcClient` consumes newline-delimited JSON, registers pending requests
 before writing, and correlates replies by connection-local numeric IDs.
-Malformed frames, unsolicited server requests, duplicate/unknown response IDs,
+Malformed frames, unregistered server requests, duplicate/unknown response IDs,
 transport loss, cancellation, and timeouts invalidate the whole connection.
 Pending requests reject with fixed errors; remote error messages and stderr are
 never retained in diagnostics. Incoming and outgoing frames are bounded to
@@ -59,7 +59,8 @@ The generated Codex 0.156.1 schema documents mutually exclusive forms:
 
 The backend always uses the right-hand column. Inline SandboxPolicy has no
 protected-read rules and cannot be combined with a named profile. Each launch
-builds its sole `genbi-scoped` profile from the host-owned `NativeRuntimeSpec`:
+builds its sole `genbi-scoped` profile from the host-owned `NativeRuntimeSpec`.
+The command-only path retains these restrictions:
 
 - Workspace write, managed generation/tool directories/project/data roots read.
 - Shared scratch roots `/private/tmp` and `/private/var/tmp` denied, with only
@@ -83,6 +84,42 @@ namespace is admitted. No arbitrary caller config/env/policy/cwd override exists
 on the command interface. Symlinks, glob-bearing policy paths and credential-root
 read grants are rejected. The vendor, not GenBI, enforces the sandbox.
 
+## Host-owned direct analytical tools
+
+`prepareCapturedCodexDirectTools` captures the project fingerprint, prepared
+context and Wren credential identity using the existing component runtime. It
+calls the released `produce-session` contract for exactly one pinned analytical
+entry, including entries without child calls. It validates the emitted IR,
+component declarations, host contract and plan digests before creating admission.
+The temporary host files are removed; no `.codex` or MCP configuration is emitted.
+
+The result is a host-only `CodexSessionTools` object passed as `tools` to backend
+`open`. The caller must close it if launch is abandoned; once connected, the
+session owns its cleanup. It binds the account, session, runtime generation and
+project binding and requires an explicit expiration time and lifetime signal.
+A single generated root tool accepts only `{ request }`; paths, credentials,
+component/step selection and connection parameters are not model inputs. All
+step execution remains in the component broker, including dashboard-to-answer
+calls, context checks, query guards, cancellation and root-only persistence.
+
+Direct-tool policy disables shell/file tools and command RPC, uses the same named
+profile with filesystem and network denied, and supplies no runtime workspace
+roots. The vendor environment has neither `WREN_HOME` nor `WREN_PROJECT_HOME`.
+MCP stays empty and project `.codex` rejection remains in force. The dedicated
+vendor login remains separate; initialization verifies `account/read` against
+the captured approved account before any thread starts.
+
+Tool calls must match the active connection, thread, turn, advertised name and
+started tool item. Only one call is admitted at a time, with at most 32 per turn,
+64 KiB arguments and bounded results. Replayed IDs, extra authority fields,
+expired/revoked identities and late results fail closed. Interrupt/disconnect
+aborts pending host work; close awaits admission cleanup. Typed tool events carry
+only their projected status, not raw request parameters or vendor result payloads.
+
+This composition seam does not register a production backend, add a certification
+row or provide a browser route. The durable Sessions/API/UI owner remains
+responsible for launch fences and attachment authorization.
+
 ## Launch and generation ownership
 
 Phase 5 composition must call `prepareLaunch()` **before** writing durable session
@@ -102,8 +139,8 @@ failures retain the lease; do not garbage-collect it on a failed close.
 
 `probe()` can supply RuntimeHost's Codex-only vendor probe seam; it never changes
 the other backends' results. No existing API, Ask/Setup/native Sessions routing,
-or default backend selection is changed by these modules. Scoped MCP/broker
-integration and browser event UI remain later composition work.
+or default backend selection is changed by these modules. Connecting the scoped
+tool seam to the Sessions owner and browser event UI remains later composition work.
 
 ## Direct events versus command/PTY
 
@@ -141,8 +178,7 @@ text. After close, a capability can read the retained tail only if the enclosing
 Sessions authorization still permits it; revocation and durable lifecycle state
 belong to that owner.
 
-This bridge is not registered in the current application composition. Scoped
-producer/Wren/MCP materialization, durable Sessions/API/UI wiring, and structured
+This bridge is not registered in the current application composition. Durable Sessions/API/UI wiring and structured
 Ask/Setup injection still need their own acceptance before activation. In
 particular, it does not enable MCP or bypass the project `.codex` rejection.
 

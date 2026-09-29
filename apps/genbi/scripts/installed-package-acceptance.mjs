@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { closeServerBounded, runBounded, spawnProcessGroup, stopProcessTree } from "./process-cleanup.mjs";
+import { installedDirectToolsFixture } from "./direct-tools-fixture.mjs";
 import { readSseFrames } from "./sse-frames.mjs";
 
 const packageRoot = path.resolve(process.cwd());
@@ -72,6 +73,11 @@ try {
   await verifyInstalledCodexBackend({ installRoot, installedPackageRoot, sourceAuditHook, workspaceRoot, port, fixtureEndpoint: fixtureProvider.endpoint });
   await verifyInstalledManagedWrenProvision({ installRoot, installedPackageRoot, sourceAuditHook, workspaceRoot, port, fixtureEndpoint: fixtureProvider.endpoint, tempRoot });
 
+  markPhase("direct-codex-tools");
+  await run("npx", ["--no-install", "--", "node", "--input-type=module", "--eval",
+    `await (${installedDirectToolsFixture.toString()})(${JSON.stringify(installedPackageRoot)});`],
+    { cwd: installRoot, env: controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint }) });
+
   markPhase("start");
   await writeFile(sourceAuditHook, createSourceAuditHook(), { mode: 0o600 });
   const childEnv = controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint });
@@ -96,6 +102,7 @@ try {
       { name: "tarball excludes checkout-only scripts, tests, fixtures, and examples", ok: true },
       { name: "fresh installed package keeps readiness offline, rejects altered approval bytes, then provisions exact local fixture bytes without checkout, ambient Python, or index resolution", ok: true },
       { name: "fresh install launches through npx with package-manager PATH", ok: true },
+      { name: "installed direct Codex tools preserve one root and governed step authority without checkout or model access", ok: true },
       { name: "installed Codex driver handles deterministic command events while the production backend remains unavailable", ok: true },
       { name: "first-run Setup connect terminal flow works without checkout access or development escapes", ok: true },
       { name: "fresh install binds through a verified package-local context loader with no Rust toolchain or checkout access", ok: true },

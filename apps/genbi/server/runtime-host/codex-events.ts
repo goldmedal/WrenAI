@@ -15,6 +15,7 @@ export const codexItemSchema = z.discriminatedUnion("type", [
   z.object({ ...itemBase, type: z.literal("commandExecution"), command: text, cwd: text, status: state, aggregatedOutput: text.nullish(), exitCode: z.number().int().nullish() }),
   z.object({ ...itemBase, type: z.literal("fileChange"), status: state, changes: z.array(z.object({ path: text, diff: text, kind: z.discriminatedUnion("type", [z.object({ type: z.literal("add") }), z.object({ type: z.literal("delete") }), z.object({ type: z.literal("update"), move_path: text.nullish() })]) })) }),
   z.object({ ...itemBase, type: z.literal("contextCompaction") }),
+  z.object({ ...itemBase, type: z.literal("dynamicToolCall"), tool: z.string().min(1).max(256), namespace: z.null().optional(), status: z.enum(["inProgress", "completed", "failed"]), success: z.boolean().nullable().optional() }),
 ]);
 export const codexTurnSchema = z.object({ id, status: z.enum(["inProgress", "completed", "interrupted", "failed"]), items: z.array(codexItemSchema).max(512) });
 export const codexThreadSchema = z.object({ id, cwd: text, cliVersion: z.string(), ephemeral: z.boolean() });

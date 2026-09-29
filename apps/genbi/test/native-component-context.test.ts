@@ -4,7 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { generatePreparedContext } from "../harness/compile/context-loader.js";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
 import { captureWrenAccessIdentity, openWrenComponentAccess } from "../harness/components/wren-access.js";
-import { prepareCapturedNativeComponentHost, type NativeComponentContextOptions } from "../server/native-component-context.js";
+import { prepareCapturedCodexDirectTools, prepareCapturedNativeComponentHost, type NativeComponentContextOptions } from "../server/native-component-context.js";
+import { prepareCodexDirectTools } from "../server/runtime-host/codex-direct-tools.js";
+vi.mock("../server/runtime-host/codex-direct-tools.js", () => ({ prepareCodexDirectTools: vi.fn() }));
 vi.mock("../harness/compile/context-loader.js", () => ({ generatePreparedContext: vi.fn() }));
 vi.mock("../harness/compile/fingerprint.js", () => ({ hashDirectory: vi.fn() }));
 vi.mock("../harness/components/wren-access.js", () => ({ captureWrenAccessIdentity: vi.fn(), openWrenComponentAccess: vi.fn() }));
@@ -64,4 +66,19 @@ describe("native captured context preparation", () => {
     await expect(prepareCapturedNativeComponentHost(JSON.stringify(ir), scope, options)).rejects.toThrow();
     expect(generatePreparedContext).not.toHaveBeenCalled();
   });
+});
+
+it("captures direct Codex context through the same project and credential identity boundary", async () => {
+  const { ir, scope, options } = setup("codex");
+  scope.entry = { kind: "agent", verb: "answer_query", prompt: "synthetic" };
+  await prepareCapturedCodexDirectTools(JSON.stringify(ir), scope, { ...options, producerBinary: "/fixture/producer", expiresAt: Date.now() + 60_000 });
+  expect(prepareCodexDirectTools).toHaveBeenCalledOnce();
+  const captured = vi.mocked(prepareCodexDirectTools).mock.calls[0]![0];
+  expect(captured).toMatchObject({ accountEmail: options.vendor.accountEmail, scope, producerBinary: "/fixture/producer" });
+  expect(captured.bindings.contexts.answer_query?.snapshot).toEqual({ context_version: 2, parseable: true });
+  expect(options.vendor.open).not.toHaveBeenCalled();
+  expect(openWrenComponentAccess).not.toHaveBeenCalled();
+  await expectScratchRemoved();
+  vi.mocked(options.currentIdentity).mockReturnValue({ ...options.identity, auth_identity: "rotated" });
+  expect(() => captured.bindings.assertCurrent()).toThrow();
 });
