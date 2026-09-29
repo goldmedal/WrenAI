@@ -50,6 +50,8 @@ export function auditAdapterSpec(spec: AdapterSpec): AdapterAudit {
     try { endpointHost = new URL(baseURL).host; } catch { endpointHost = `(invalid baseURL: ${baseURL})`; }
   } else if (spec.adapter === "anthropic") {
     endpointHost = "api.anthropic.com (adapter default)";
+  } else if (spec.adapter === "openai") {
+    endpointHost = "api.openai.com (adapter default)";
   } else if (spec.adapter === "mock") {
     endpointHost = "(none: mock)";
   }
