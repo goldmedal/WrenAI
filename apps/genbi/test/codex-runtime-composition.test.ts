@@ -7,12 +7,13 @@ import { CodexAppServerBackend } from "../server/runtime-host/codex-app-server.j
 import { runtimeReady, runtimeNotReady } from "../server/runtime-host/policy.js";
 import { buildCodexSessionPolicy } from "../server/runtime-host/codex-policy.js";
 import { compileProfile } from "../harness/compile/index.js";
+import { resolveContextLoaderBinary } from "../harness/compile/context-loader.js";
 import { prepareCapturedCodexDirectTools } from "../server/native-component-context.js";
 import { Store } from "../server/db.js";
 import type { NativeArtifactService } from "../server/native-artifacts.js";
 import type { NativeSessionRow } from "../server/db.js";
 vi.mock("../harness/compile/index.js", () => ({ compileProfile: vi.fn() }));
-vi.mock("../harness/compile/context-loader.js", () => ({ resolveContextLoaderBinary: () => process.execPath }));
+vi.mock("../harness/compile/context-loader.js", () => ({ resolveContextLoaderBinary: vi.fn() }));
 vi.mock("../server/native-component-context.js", () => ({ prepareCapturedCodexDirectTools: vi.fn() }));
 vi.mock("../server/runtime-host/codex-policy.js", () => ({ buildCodexSessionPolicy: vi.fn() }));
 vi.mock("../server/runtime-host/codex-app-server.js", async (original) => {
@@ -28,7 +29,11 @@ function fixture() {
   mkdirSync(login, { mode: 0o700 }); mkdirSync(project);
   writeFileSync(path.join(login, "auth.json"), "fixture-not-a-login", { mode: 0o600 });
   const ir = path.join(root, "ir.json"); writeFileSync(ir, "{}");
-  const runtime = { launcher: realpathSync(process.execPath), venv_python: realpathSync(process.execPath) };
+  // These attested roles never execute through the mocked backend/compiler.
+  // Avoid repeatedly hashing the full Node binary for every synthetic role.
+  const executable = path.join(root, "fixture-runtime"); writeFileSync(executable, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+  vi.mocked(resolveContextLoaderBinary).mockReturnValue(executable);
+  const runtime = { launcher: executable, venv_python: executable };
   const permit = { runtime, assertActive: vi.fn(), release: vi.fn() };
   const transport = { write: vi.fn(), listen: vi.fn(), close: vi.fn(async () => {}) };
   const backend = { probe: vi.fn(async () => ({ readiness: runtimeReady("fixture", []), diagnostic: { phase: "capability" } })),
@@ -41,9 +46,9 @@ function fixture() {
   store.setRuntimeSettings({ ...store.getRuntimeSettings(), authMode: "subscription", subscriptionProvider: "codex", subscriptionDriverModel: "driver", apiKeyModel: "step" });
   let binding = { identity: "project", path: project, generation: 1, revision: "v1" };
   const artifacts = { issue: vi.fn(() => ({ credential: "host-only" })), revoke: vi.fn(), save: vi.fn(), persistAnswer: vi.fn() };
-  const composition = createCodexRuntimeComposition({ configuration: readCodexBootConfiguration({ GENBI_CODEX_RUNTIME: "app-server", GENBI_CODEX_EXECUTABLE: process.execPath,
+  const composition = createCodexRuntimeComposition({ configuration: readCodexBootConfiguration({ GENBI_CODEX_RUNTIME: "app-server", GENBI_CODEX_EXECUTABLE: executable,
     GENBI_CODEX_SOURCE: "https://example.invalid/codex", WREN_HARNESS_CODEX_HOME: login, GENBI_CODEX_ACCOUNT_EMAIL: "fixture@example.invalid" }),
-    packageRoot: root, producerBinary: process.execPath, profileSource: "fixture", store, getBinding: () => binding, sourceWrenHome: () => path.join(root, "wren-home"), artifacts: artifacts as unknown as NativeArtifactService });
+    packageRoot: root, producerBinary: executable, profileSource: "fixture", store, getBinding: () => binding, sourceWrenHome: () => path.join(root, "wren-home"), artifacts: artifacts as unknown as NativeArtifactService });
   const controller = new AbortController();
   const input = { options: { authChoice: { mode: "subscription" as const, provider: "codex" as const }, profileSource: "fixture", userProject: project, question: "count" },
     scope: { sessionId: "session", turnId: "turn", signal: controller.signal, assertCurrent: vi.fn() }, permit: permit as never };
@@ -66,7 +71,7 @@ describe("Codex application composition", () => {
     expect(result.input.model).toBe("driver"); expect(result.input.spec.workspace).not.toBe(f.binding.path);
     expect(result.input.spec.childEnvironment.HOME).not.toBe(os.homedir());
     expect(result.input.spec.childEnvironment.CODEX_HOME).toBe(path.join(f.root, "login"));
-    expect(result.input.spec.toolDirectories).toEqual([...new Set([path.dirname(realpathSync(process.execPath)), realpathSync("/usr/bin"), realpathSync("/bin")])]);
+    expect(result.input.spec.toolDirectories).toEqual([...new Set([path.dirname(realpathSync(process.execPath)), realpathSync("/usr/bin"), realpathSync("/bin"), f.root])]);
     expect(buildCodexSessionPolicy).toHaveBeenCalledBefore(vi.mocked(compileProfile));
     const captured = vi.mocked(prepareCapturedCodexDirectTools).mock.calls[0]![2];
     expect(captured.wrenEnvironment).toMatchObject({ WREN_PROJECT_HOME: f.binding.path, WREN_HOME: path.join(f.root, "wren-home") });
