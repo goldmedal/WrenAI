@@ -61,6 +61,24 @@ describe("per-slot failure isolation in a batch-shaped child", () => {
     expect(strong.doGenerateCalls).toHaveLength(4);
     expect(f.executed).toEqual([SQL.a, SQL.b, SQL.c]);
   });
+  it("a six-slot batch with one failed attempt per slot is answered, not cut off by the step's loop cap", async () => {
+    const six = ["s1", "s2", "s3", "s4", "s5", "s6"];
+    const good = (slot: string) => `SELECT COUNT(*) AS n FROM orders_${slot}`;
+    for (const [index, slot] of six.entries()) ROWS[good(slot)] = index + 1;
+    const turns = six.flatMap((slot) => [query(`SELECT COUNT(*) AS n FROM missing_${slot}`, `${slot}-1`), query(good(slot), `${slot}-2`)]);
+    const final = six.map((slot) => ({ slot_id: slot, columns: ["n"], rows: [[0]], verified: true, definition: { sql: good(slot), source_tables: [], filters: [] } }));
+    const strong = new MockLanguageModelV4({ doGenerate: [...turns, text(final)] });
+    const f = host(strong);
+    const prompts: string[] = [];
+    const recording: RunnerHost = { ...f.host, async runStep(run, binding) { prompts.push(run.prompt); return f.host.runStep(run, binding); } };
+    const questions = six.map((slot) => ({ slot_id: slot, expected_shape: "scalar", question: `question ${slot}` }));
+    const result = await new ComponentRunner(plan(), recording).run("answer_batch", { request: "fill the report", input: { questions } });
+    expect(result).toMatchObject({ status: "ok", output: { kind: "value", value: six.map((slot, index) => ({ slot_id: slot, rows: [{ n: index + 1 }], verified: true })) } });
+    // generate_sql took twelve tool turns and the answer; repair_sql never ran.
+    expect(prompts).toEqual(["resolve", "generate"]);
+    expect(strong.doGenerateCalls).toHaveLength(13);
+    expect(f.executed).toHaveLength(12);
+  });
   it("keeps the single-answer rule for a request without slots: an unrepaired tool error is callee_failed", async () => {
     const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.b, "b1"), text("gave up"), query(SQL.b, "b2"), text("still nothing")] });
     const f = host(strong);

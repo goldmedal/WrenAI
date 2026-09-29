@@ -66,4 +66,20 @@ describe("fresh AI SDK governed steps", () => {
     const runaway = new MockLanguageModelV4({ doGenerate: async () => call("answer", `call-${count++}`) });
     expect((await runAiComponentStep({ ...run(), perSlot: true }, runaway)).failed).toBe(true);
   });
+  it("sizes the loop cap to the batch: six slots with one retry each still reach the final answer", async () => {
+    const questions = ["a", "b", "c", "d", "e", "f"].map((slot) => ({ slot_id: slot, expected_shape: "scalar", question: `question ${slot}` }));
+    const turns = [...questions.flatMap(({ slot_id }) => [call("answer", `${slot_id}-1`), call("answer", `${slot_id}-2`)]), text("[]")];
+    const batch = new MockLanguageModelV4({ doGenerate: turns });
+    const result = await runAiComponentStep({ ...run(), input: { questions }, perSlot: true }, batch);
+    expect(result).toMatchObject({ value: "[]", failed: false });
+    expect(batch.doGenerateCalls).toHaveLength(13);
+    // The cap is still a bound: 2 per slot plus 4 for these six slots, and a single-answer step keeps 12.
+    let count = 0;
+    const runaway = () => new MockLanguageModelV4({ doGenerate: async () => call("answer", `call-${count++}`) });
+    expect((await runAiComponentStep({ ...run(), input: { questions }, perSlot: true }, runaway())).failed).toBe(true);
+    expect(count).toBe(16);
+    count = 0;
+    expect((await runAiComponentStep({ ...run(), input: { questions } }, runaway())).failed).toBe(true);
+    expect(count).toBe(12);
+  });
 });
