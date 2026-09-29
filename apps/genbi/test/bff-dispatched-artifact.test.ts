@@ -4,6 +4,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../server/app.js";
 import { Store } from "../server/db.js";
+import { StructuredRuntime } from "../server/structured-runtime.js";
+import { runtimeReady } from "../server/runtime-host/policy.js";
+import { streamTurn } from "../server/turn.js";
 import type { TurnDeps } from "../server/turn.js";
 import type { Bundle, RouteOptions, RouteResult } from "../harness/index.js";
 import type { ArtifactDto, SavedEvent } from "../server/wire-types.js";
@@ -291,4 +294,28 @@ describe("dispatched dashboard/report turns persist an artifact from the recover
     const artifacts = (await (await app.request("/api/artifacts")).json()) as ArtifactDto[];
     expect(artifacts).toHaveLength(1);
   });
+  it.each([false, true])("direct structured dashboard fences asynchronous artifact lookup (stale: %s)", async (stale) => {
+    const envelope = { blocks: [{ type: "kpi_card", label: "Orders", value: 99 }], summary: "Orders", verified: true };
+    const deps = buildDeps(async () => { throw Error("local fallback"); });
+    const runtime = new StructuredRuntime({ selected: { codex: "codex-app-server", claude: "claude-sandbox-runtime" }, allowLocal: false,
+      localRoute: deps.route, localSetupFor: () => undefined,
+      adapters: { codex: { vendor: "codex", backend: "codex-app-server", probe: async () => runtimeReady("0.156.1", []),
+        ask: async () => ({ backend: "codex-app-server", warnings: [], finalText: JSON.stringify(envelope) }) } } });
+    const injected: TurnDeps = { ...deps, structuredRuntime: runtime,
+      baseRouteOptions: { ...deps.baseRouteOptions, authChoice: { mode: "subscription", provider: "codex" } },
+      describeBundle: async () => {
+        if (stale) deps.store.setRuntimeSettings({ ...deps.store.getRuntimeSettings(), subscriptionProvider: "codex" });
+        return BUNDLE;
+      } };
+    const session = deps.store.createSession("analysis");
+    const turn = deps.store.createTurn({ id: "dashboard", sessionId: session.id, question: "dashboard", composedInput: null, agentId: "generate_dashboard" });
+    const frames: { event: string; data: unknown }[] = [];
+    await streamTurn(injected, session.id, turn.id, async (frame) => { frames.push(frame); });
+    expect(deps.store.getTurn(turn.id)?.resultKind).toBe(stale ? "error" : "answer");
+    const artifacts = frames.filter((frame) => frame.event === "event" && (frame.data as { kind?: string }).kind === "artifact");
+    expect(artifacts).toHaveLength(stale ? 0 : 1);
+    expect(existsSync(path.join(outDir, session.id))).toBe(!stale);
+    deps.store.close(); await runtime.shutdown();
+  });
+
 });

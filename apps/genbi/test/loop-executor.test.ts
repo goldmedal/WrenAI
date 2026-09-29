@@ -484,3 +484,27 @@ describe("executeAgent — ExecuteAgentContext.maxSteps threading (wire-level, n
     expect((error as StepBudgetExhaustedError).stepId).toBe("only_step");
   });
 });
+
+
+describe("executor cancellation", () => {
+  it("does not invoke a provider when already cancelled", async () => {
+    const controller = new AbortController(); controller.abort();
+    const generate = vi.fn(async () => textResult("unexpected"));
+    const binding: TierBinding = { tiers: { cheap: { adapter: MOCK_ADAPTER_ID, config: { doGenerate: generate } } } };
+    await expect(executeAgent(loadBundle(buildSyntheticBundle()).agents[0]!, { binding, registry: createDefaultProviderRegistry(), tools: {}, userInput: "fixture", signal: controller.signal })).rejects.toThrow();
+    expect(generate).not.toHaveBeenCalled();
+  });
+  it.each([false, true])("aborts the active provider (tool loop: %s)", async (withTools) => {
+    const controller = new AbortController();
+    const generate = vi.fn((options: LanguageModelV4CallOptions) => new Promise<LanguageModelV4GenerateResult>((_resolve, reject) => {
+      expect(options.abortSignal).toBeDefined();
+      options.abortSignal!.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
+      controller.abort();
+    }));
+    const binding: TierBinding = { tiers: { cheap: { adapter: MOCK_ADAPTER_ID, config: { doGenerate: generate } } } };
+    const agent = loadBundle(buildSyntheticBundle(withTools ? { tools: [{ name: "query", source: "mcp:sample/query" }] } : {})).agents[0]!;
+    const tools: ToolSet = withTools ? { query: tool({ inputSchema: z.object({}), execute: async () => ({}) }) } : {};
+    await expect(executeAgent(agent, { binding, registry: createDefaultProviderRegistry(), tools, userInput: "fixture", signal: controller.signal })).rejects.toThrow(/cancelled/);
+    expect(generate).toHaveBeenCalledOnce();
+  });
+});

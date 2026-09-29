@@ -295,4 +295,5 @@ export interface RouteOptions {
 export type RouteResult =
   | ({ readonly backend: "agent"; readonly warnings: readonly string[] } & RunAgentResult)
   | ({ readonly backend: "agent-sdk"; readonly warnings: readonly string[] } & DispatchedResult)
-  | ({ readonly backend: "codex-local"; readonly warnings: readonly string[] } & CodexAskResult);
+  | ({ readonly backend: "codex-local"; readonly warnings: readonly string[] } & CodexAskResult)
+  | ({ readonly backend: "codex-app-server"; readonly warnings: readonly string[] } & CodexAskResult);

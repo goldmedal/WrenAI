@@ -75,7 +75,7 @@ export function toAnswerOrRefusalEvent(
   result: RouteResult,
   worklog: readonly ToolStep[] = [],
 ): AnswerEvent | RefusalEvent {
-  if (result.backend === "agent-sdk" || result.backend === "codex-local") {
+  if (result.backend === "agent-sdk" || (result.backend === "codex-local" || result.backend === "codex-app-server")) {
     const envelope = extractEnvelopeFromText(result.finalText);
     if (envelope !== undefined) {
       return { id, kind: "answer", answer: { form: "rich", envelope } };
@@ -172,7 +172,7 @@ export function clarifyDecisionStep(detail: string): ToolStep {
  *    -> `undefined`, so no gate entry is appended.
  */
 export function gateDecisionStep(result: RouteResult): ToolStep | undefined {
-  if (result.backend === "agent-sdk" || result.backend === "codex-local") return undefined;
+  if (result.backend === "agent-sdk" || (result.backend === "codex-local" || result.backend === "codex-app-server")) return undefined;
   if (result.kind === "refusal") {
     return { id: DECISION_GATE_ID, kind: "decision", label: "Verify gate", state: "error", detail: result.reason };
   }
@@ -362,7 +362,7 @@ function truncate(text: string, max: number): string {
 
 /** Short text used for `turns.answer_summary` — feeds `server/compose.ts`'s D3 context composition. Never the full envelope. */
 export function summarizeResult(result: RouteResult): string {
-  if (result.backend === "agent-sdk" || result.backend === "codex-local") {
+  if (result.backend === "agent-sdk" || (result.backend === "codex-local" || result.backend === "codex-app-server")) {
     return truncate(result.finalText, SUMMARY_MAX_LENGTH);
   }
   if (result.kind === "answer") {

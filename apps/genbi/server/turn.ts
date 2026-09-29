@@ -1,3 +1,5 @@
+import { captureStructuredScope } from "./structured-scope.js";
+import type { StructuredRuntime } from "./structured-runtime.js";
 /**
  * Orchestrates one turn end-to-end: clarify pre-flight, context
  * composition, invoking `route()`, folding its result/events into the UI's
@@ -91,6 +93,7 @@ export class ArtifactNotFoundError extends Error {
 
 export interface TurnDeps {
   readonly store: Store;
+  readonly structuredRuntime?: StructuredRuntime;
   readonly route: (options: RouteOptions) => Promise<RouteResult>;
   /** A native vendor TUI host, deliberately independent from Ask/SSE. */
   readonly startInteractiveTerminal?: (input: { readonly target: InteractiveTarget; readonly binding: EnrichmentBinding }) => Promise<InteractiveTerminalSession>;
@@ -517,7 +520,7 @@ async function executeTurn(
   signal?: AbortSignal,
 ): Promise<void> {
   if (turn.setupStepKey !== null) {
-    await executeSetupTurn(deps, session, turn, emit);
+    await executeSetupTurn(deps, session, turn, emit, signal);
     return;
   }
 
@@ -551,19 +554,9 @@ async function executeTurn(
     }
   };
 
-  let result: RouteResult;
-  try {
-    const routeOptions: RouteOptions = {
-      ...effectiveRouteOptions(deps),
-      question: turn.composedInput ?? turn.question,
-      onEvent,
-      ...(signal !== undefined ? { signal } : {}),
-      // the turn's own persisted agent id (classified once at postTurn time), so a turn
-      // always resolves to the same agent whether executed live or (via a future replay path) re-run.
-      ...(turn.agentId !== null ? { agentId: turn.agentId } : {}),
-    };
-    result = await deps.route(routeOptions);
-  } catch (err) {
+  const runtimeScope = deps.structuredRuntime ? captureStructuredScope(deps.store, turn, () => resolveUserProject(deps), signal) : undefined;
+  const assertCurrent = () => { deps.structuredRuntime?.assertActive(); runtimeScope?.assertCurrent(); };
+  const failTurn = async (err: unknown) => {
     await chain;
     const message = err instanceof Error ? err.message : String(err);
     // Persist the PARTIAL work log on failure — the Route/Clarify
@@ -577,8 +570,22 @@ async function executeTurn(
     deps.store.resolveTurn(turn.id, { backend: null, resultKind: "error", answerSummary: null, traceJson: JSON.stringify(partialWorklog), errorMessage: message });
     deps.store.updateSessionStatus(session.id, "active", null);
     await emit({ event: "error", data: { message } });
-    return; // spec: on error emit ONLY the error frame, never a trailing done
-  }
+  };
+  let result: RouteResult;
+  try {
+    const routeOptions: RouteOptions = {
+      ...effectiveRouteOptions(deps),
+      question: turn.composedInput ?? turn.question,
+      onEvent,
+      ...(signal !== undefined ? { signal } : {}),
+      // the turn's own persisted agent id (classified once at postTurn time), so a turn
+      // always resolves to the same agent whether executed live or (via a future replay path) re-run.
+      ...(turn.agentId !== null ? { agentId: turn.agentId } : {}),
+    };
+    result = deps.structuredRuntime
+      ? await deps.structuredRuntime.route(routeOptions, runtimeScope!)
+      : await deps.route(routeOptions);
+  } catch (err) { await failTurn(err); return; }
   await chain;
 
   // Prefer the live worklog snapshot (LLM step rows interleaved
@@ -606,7 +613,12 @@ async function executeTurn(
   // artifact-producing component (`generate_dashboard`/`explain_change` —
   // NOT a plain `answer_query` table), persist it as a real artifact too, so
   // it's publishable regardless of which backend ran the turn.
-  const artifactEvent = await maybeCreateDispatchedArtifact(deps, session, turn, result, terminalEvent);
+  let artifactEvent: ArtifactEvent | undefined;
+  try {
+    assertCurrent();
+    artifactEvent = await maybeCreateDispatchedArtifact(deps, session, turn, result, terminalEvent, assertCurrent);
+    assertCurrent();
+  } catch (err) { await failTurn(err); return; }
 
   // Persist the turn as fully resolved BEFORE emitting any terminal frames.
   // If a client disconnect makes an emit below throw, the turn is already
@@ -662,12 +674,14 @@ async function maybeCreateDispatchedArtifact(
   turn: TurnRow,
   result: RouteResult,
   terminalEvent: AnswerEvent | RefusalEvent,
+  assertCurrent: () => void,
 ): Promise<ArtifactEvent | undefined> {
-  if (result.backend !== "agent-sdk" && result.backend !== "codex-local") return undefined;
+  if (result.backend !== "agent-sdk" && result.backend !== "codex-local" && result.backend !== "codex-app-server") return undefined;
   if (terminalEvent.kind !== "answer" || terminalEvent.answer.form !== "rich") return undefined;
   if (turn.agentId === null) return undefined;
   if (!(await isArtifactProducerAgent(deps, turn.agentId))) return undefined;
 
+  assertCurrent();
   const envelope = terminalEvent.answer.envelope;
   const artifactKind = artifactKindForAgent(turn.agentId);
   const verified = envelope.verified === true;
@@ -803,7 +817,7 @@ function turnRecoveryAnchor(turn: TurnRow, sessionId: string | null | undefined,
  * `status` field, which the frontend inspects (see the wire contract in the
  * final report). Only a parsed `error` persists as `resultKind: "error"`.
  */
-async function executeSetupTurn(deps: TurnDeps, session: SessionRow, turn: TurnRow, emit: (frame: SseFrame) => Promise<void>): Promise<void> {
+async function executeSetupTurn(deps: TurnDeps, session: SessionRow, turn: TurnRow, emit: (frame: SseFrame) => Promise<void>, signal?: AbortSignal): Promise<void> {
   // Provider session anchors are server-only. Keep every anchor that becomes
   // known during this turn so a host-contract continuation that rotates its
   // anchor still redacts both the original and replacement from the combined
@@ -942,8 +956,12 @@ async function executeSetupTurn(deps: TurnDeps, session: SessionRow, turn: TurnR
     chain = chain.then(() => emit({ event: "worklog", data }));
   };
 
+  const runtimeScope = captureStructuredScope(deps.store, turn, () => resolveUserProject(deps), signal);
+  const runSelected = (options: Parameters<SetupStepRunner["run"]>[0]) => deps.structuredRuntime
+    ? deps.structuredRuntime.setup(options, runtimeScope) : setupRunner.run(options);
   const runAttempt = (prompt: string, authChoice: AuthChoice, resumeSessionId?: string) =>
-    setupRunner.run({
+    runSelected({
+      ...(signal ? { signal } : {}),
       prompt,
       workspaceRoot,
       // The form was validated before persistence. Thread it to dispatched so
@@ -1053,6 +1071,8 @@ async function executeSetupTurn(deps: TurnDeps, session: SessionRow, turn: TurnR
     return;
   }
   await chain.catch(() => {});
+  try { if (deps.structuredRuntime) { deps.structuredRuntime.assertActive(); runtimeScope.assertCurrent(); } }
+  catch (error) { await failWithError(error instanceof Error ? error.message : "Structured runtime stale.", liveLog.snapshot()); return; }
 
   const worklog = liveLog.snapshot();
   let terminal = parseTerminalWithRetainedLifecycle(finalText, worklog);
@@ -1137,6 +1157,9 @@ async function executeSetupTurn(deps: TurnDeps, session: SessionRow, turn: TurnR
     }
   }
 
+  try { if (deps.structuredRuntime) { deps.structuredRuntime.assertActive(); runtimeScope.assertCurrent(); } }
+  catch (error) { await failWithError(error instanceof Error ? error.message : "Structured runtime stale.", liveLog.snapshot()); return; }
+
   // A completed runner result can introduce a new server-owned anchor after
   // the live frames have begun. Re-sanitize every normal terminal boundary
   // with that now-known identity before it reaches SSE or SQLite.
@@ -1208,6 +1231,8 @@ async function executeSetupTurn(deps: TurnDeps, session: SessionRow, turn: TurnR
       if (temporarilyBoundForHealthcheck) {
         deps.bindProject!(path.join(workspaceRoot, form.projectName));
       }
+      // Refresh only after the host-owned bind, then fence the asynchronous healthcheck.
+      const healthcheckScope = captureStructuredScope(deps.store, turn, () => resolveUserProject(deps), signal);
       let compileHealthcheckFailure: string | undefined;
       if (!deps.describeBundle) {
         compileHealthcheckFailure = "the profile compile healthcheck is not configured";
@@ -1217,6 +1242,12 @@ async function executeSetupTurn(deps: TurnDeps, session: SessionRow, turn: TurnR
         } catch (err) {
           compileHealthcheckFailure = summarizeCompileHealthcheckFailure(err);
         }
+      }
+      try { if (deps.structuredRuntime) { deps.structuredRuntime.assertActive(); healthcheckScope.assertCurrent(); } }
+      catch (error) {
+        // A newer binding belongs to its new owner; never roll it back here.
+        await failWithError(error instanceof Error ? error.message : "Structured runtime stale.", finalWorklog);
+        return;
       }
       if (compileHealthcheckFailure !== undefined) {
         if (temporarilyBoundForHealthcheck) deps.unbindProject?.();

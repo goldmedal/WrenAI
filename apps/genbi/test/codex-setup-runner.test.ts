@@ -346,6 +346,23 @@ describe("CodexSetupRunner", () => {
     10_000,
   );
 
+
+  it("cancellation reaches a running dispatcher without model execution", async () => {
+    const { cli, capture, irPath } = await fakeDispatcher();
+    await writeFile(cli.prefixArgs[0]!, `import { writeFileSync } from "node:fs";
+writeFileSync(process.argv[2], "started");
+setInterval(() => {}, 1000);
+`);
+    const runner = new CodexSetupRunner({ irPath, getStrongModel: () => "fixture", codexLocalCli: cli,
+      mcpServer: { command: process.execPath, prefixArgs: ["/fixture/mcp.js"] } });
+    const controller = new AbortController();
+    const pending = runner.run({ prompt: "setup", workspaceRoot: "/workspace", authChoice: { mode: "subscription", provider: "codex" }, signal: controller.signal });
+    const rejected = expect(pending).rejects.toThrow(/cancelled/);
+    await vi.waitFor(async () => expect(await readFile(capture, "utf8")).toBe("started"));
+    controller.abort(); await rejected;
+    await expect(runner.run({ prompt: "setup", workspaceRoot: "/workspace", authChoice: { mode: "subscription", provider: "codex" }, signal: controller.signal })).rejects.toThrow();
+  });
+
   it("selects Codex, Claude, and non-subscription setup runners without fallback", () => {
     const claude = { run: vi.fn() };
     const codex = { run: vi.fn() };

@@ -52,6 +52,7 @@ export interface ToolCallOutcome {
 export type ToolCallOutcomeListener = (outcome: ToolCallOutcome) => void;
 
 export interface ExecuteAgentContext {
+  readonly signal?: AbortSignal;
   /** Tier -> adapter binding; resolves each step's model. */
   readonly binding: TierBinding;
   readonly registry: ProviderRegistry;
@@ -128,6 +129,7 @@ export async function executeAgent(
   agent: Agent,
   ctx: ExecuteAgentContext,
 ): Promise<DataflowArtifacts> {
+  ctx.signal?.throwIfAborted();
   assertV1Scope(agent);
 
   const artifacts = new Map<string, unknown>();
@@ -194,6 +196,7 @@ export async function executeAgent(
           ctx.onToolCallOutcome,
           ctx.onEvent,
           ctx.maxSteps,
+          ctx.signal,
         );
         if (result.exhausted) {
           throw new StepBudgetExhaustedError(stepId, ctx.maxSteps!, artifacts.size);
@@ -209,13 +212,14 @@ export async function executeAgent(
           ctx.onToolCallOutcome,
           ctx.onEvent,
           ctx.maxSteps,
+          ctx.signal,
         );
         if (result.exhausted) {
           throw new StepBudgetExhaustedError(stepId, ctx.maxSteps!, artifacts.size);
         }
         text = result.text;
       } else {
-        text = await runSingleGenerateStep(model, prompt);
+        text = await runSingleGenerateStep(model, prompt, ctx.signal);
       }
     } catch (error) {
       ctx.onEvent?.({ kind: "step.finish", stepId, name: step.name, status: "error", detail: describeError(error) });
@@ -317,8 +321,8 @@ function isConsumesSatisfied(step: Step, artifacts: DataflowArtifacts): boolean 
   return step.consumes.every((artifactName) => artifacts.has(artifactName));
 }
 
-async function runSingleGenerateStep(model: LanguageModel, prompt: string): Promise<string> {
-  const result = await generateText({ model, prompt });
+async function runSingleGenerateStep(model: LanguageModel, prompt: string, signal?: AbortSignal): Promise<string> {
+  const result = await generateText({ model, prompt, ...(signal ? { abortSignal: signal } : {}) });
   return result.text;
 }
 
@@ -330,13 +334,14 @@ async function runToolLoopStep(
   onToolCallOutcome?: ToolCallOutcomeListener,
   onEvent?: (event: AgentEventInput) => void,
   maxSteps?: number,
+  signal?: AbortSignal,
 ): Promise<{ readonly text: string; readonly exhausted: boolean }> {
   const agentRunner = new ToolLoopAgent({
     model,
     tools,
     ...(maxSteps !== undefined ? { stopWhen: isStepCount(maxSteps) } : {}),
   });
-  const result = await agentRunner.generate({ prompt });
+  const result = await agentRunner.generate({ prompt, ...(signal ? { abortSignal: signal } : {}) });
   reportToolCallOutcomes(result.steps, stepId, onToolCallOutcome, onEvent);
   return { text: result.text, exhausted: isBudgetExhausted(result, maxSteps) };
 }
@@ -365,6 +370,7 @@ async function runToolLoopStepWithRepair(
   onToolCallOutcome?: ToolCallOutcomeListener,
   onEvent?: (event: AgentEventInput) => void,
   maxSteps?: number,
+  signal?: AbortSignal,
 ): Promise<{ readonly text: string; readonly repaired: boolean; readonly exhausted: boolean }> {
   const maxAttempts = repairStep.realization.max_attempts ?? 1;
   const repairModel = resolveStepModel(repairStep, binding, registry);
@@ -391,7 +397,7 @@ async function runToolLoopStepWithRepair(
     },
   });
 
-  const result = await agentRunner.generate({ prompt });
+  const result = await agentRunner.generate({ prompt, ...(signal ? { abortSignal: signal } : {}) });
   reportToolCallOutcomes(result.steps, stepId, onToolCallOutcome, onEvent);
   return { text: result.text, repaired, exhausted: isBudgetExhausted(result, maxSteps) };
 }

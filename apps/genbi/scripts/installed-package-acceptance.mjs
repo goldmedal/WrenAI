@@ -102,7 +102,7 @@ try {
       { name: "tarball excludes checkout-only scripts, tests, fixtures, and examples", ok: true },
       { name: "fresh installed package keeps readiness offline, rejects altered approval bytes, then provisions exact local fixture bytes without checkout, ambient Python, or index resolution", ok: true },
       { name: "fresh install launches through npx with package-manager PATH", ok: true },
-      { name: "installed direct Codex Sessions support scoped tools, prompt, replay and stop without checkout or model access", ok: true },
+      { name: "installed direct Codex Sessions and structured Ask preserve scoped tools without checkout/model access or Setup fallback", ok: true },
       { name: "installed Codex driver handles deterministic command events while the production backend remains unavailable", ok: true },
       { name: "first-run Setup connect terminal flow works without checkout access or development escapes", ok: true },
       { name: "fresh install binds through a verified package-local context loader with no Rust toolchain or checkout access", ok: true },

@@ -83,6 +83,8 @@ export const BUILD_CONTEXT_AGENT_ID = "build_context";
 export const DEFAULT_SETUP_MAX_TURNS = 120;
 
 export interface SetupStepRunOptions {
+  /** Owned turn cancellation, forwarded to the selected runtime. */
+  readonly signal?: AbortSignal;
   /** The composed single-line prompt (see `composeSetupPrompt`). */
   readonly prompt: string;
   /** The workspace root the initial connect turn scaffolds `<name>/` into. */
@@ -242,6 +244,7 @@ export class DispatchedSetupRunner implements SetupStepRunner {
   }
 
   async run(runOptions: SetupStepRunOptions): Promise<SetupStepRunResult> {
+    runOptions.signal?.throwIfAborted();
     const { authChoice } = runOptions;
     const agentId = runOptions.agentId ?? CONNECT_SOURCE_AGENT_ID;
     // Only build_context needs the raised turn budget — generating an MDL is
@@ -279,6 +282,7 @@ export class DispatchedSetupRunner implements SetupStepRunner {
       ...(modelsConfig !== undefined ? { modelsConfig } : {}),
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(runOptions.onEvent !== undefined ? { onEvent: runOptions.onEvent } : {}),
+      ...(runOptions.signal !== undefined ? { signal: runOptions.signal } : {}),
       ...(runOptions.resumeSessionId !== undefined ? { resumeSessionId: runOptions.resumeSessionId } : {}),
     });
 
@@ -367,6 +371,7 @@ export class CodexSetupRunner implements SetupStepRunner {
   constructor(private readonly options: CodexSetupRunnerOptions) {}
 
   async run(runOptions: SetupStepRunOptions): Promise<SetupStepRunResult> {
+    runOptions.signal?.throwIfAborted();
     if (runOptions.authChoice.mode !== "subscription" || runOptions.authChoice.provider !== "codex") {
       throw new Error("Codex setup runner requires a Codex subscription auth choice");
     }
@@ -417,7 +422,7 @@ export class CodexSetupRunner implements SetupStepRunner {
     emitter.emit({ kind: "run.start", mode: "B", agentId });
     const mapper = new CodexSetupEventMapper(tracePath);
     try {
-      const rawFinalText = await spawnCodexSetup(cli.command, args, mapper, emitter.emit, timeoutMs + 5_000);
+      const rawFinalText = await spawnCodexSetup(cli.command, args, mapper, emitter.emit, timeoutMs + 5_000, runOptions.signal);
       const finalText = unwrapCodexSetupEnvelope(rawFinalText, expectedProducedField);
       emitter.emit({ kind: "run.finish", status: "answer" });
       return { finalText };
@@ -453,8 +458,10 @@ function spawnCodexSetup(
   mapper: CodexSetupEventMapper,
   emit: (event: AgentEventInput) => void,
   timeoutMs: number,
+  abortSignal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (abortSignal?.aborted) { reject(new Error("Codex setup cancelled")); return; }
     const child = spawn(command, [...args], {
       env: sanitizedCodexSetupEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -463,6 +470,7 @@ function spawnCodexSetup(
     let stderr = "";
     let settled = false;
     let timedOut = false;
+    let cancelled = false;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     const terminate = (signal: NodeJS.Signals) => {
       if (child.pid !== undefined && process.platform !== "win32") {
@@ -475,7 +483,14 @@ function spawnCodexSetup(
       }
       child.kill(signal);
     };
+    const cancel = () => {
+      if (settled || cancelled || timedOut) return;
+      cancelled = true; terminate("SIGTERM");
+      killTimer = setTimeout(() => terminate("SIGKILL"), 1_000);
+    };
+    abortSignal?.addEventListener("abort", cancel, { once: true });
     const timer = setTimeout(() => {
+      if (cancelled) return;
       timedOut = true;
       terminate("SIGTERM");
       killTimer = setTimeout(() => terminate("SIGKILL"), 1_000);
@@ -489,6 +504,7 @@ function spawnCodexSetup(
       } catch (error) {
         settled = true;
         clearTimeout(timer);
+        abortSignal?.removeEventListener("abort", cancel);
         terminate("SIGTERM");
         killTimer = setTimeout(() => terminate("SIGKILL"), 1_000);
         reject(error);
@@ -501,18 +517,22 @@ function spawnCodexSetup(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", cancel);
       if (killTimer) clearTimeout(killTimer);
       reject(new Error(`warble-codex-local failed to start: ${error.message}`));
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", cancel);
       lines.close();
       // Do not cancel an already-scheduled process-group SIGKILL here. The
       // direct dispatcher can exit on SIGTERM while one of its descendants
       // ignores the signal; the escalation still has to reap that descendant.
       if (settled) return;
       settled = true;
-      if (timedOut) {
+      if (cancelled) {
+        reject(new Error("Codex setup cancelled"));
+      } else if (timedOut) {
         reject(new Error(`warble-codex-local timed out after ${timeoutMs}ms`));
       } else if (code !== 0) {
         reject(new Error(`warble-codex-local exited with ${code ?? signal ?? "unknown"}: ${stderr.trim()}`));
@@ -631,6 +651,7 @@ export class InProcessSetupRunner implements SetupStepRunner {
   }
 
   async run(runOptions: SetupStepRunOptions): Promise<SetupStepRunResult> {
+    runOptions.signal?.throwIfAborted();
     const { authChoice } = runOptions;
     const agentId = runOptions.agentId ?? CONNECT_SOURCE_AGENT_ID;
 
@@ -715,6 +736,7 @@ export class InProcessSetupRunner implements SetupStepRunner {
             registry,
             tools,
             userInput: runOptions.prompt,
+            ...(runOptions.signal ? { signal: runOptions.signal } : {}),
             onEvent: emitter.emit,
             ...(maxSteps !== undefined ? { maxSteps } : {}),
           }),
