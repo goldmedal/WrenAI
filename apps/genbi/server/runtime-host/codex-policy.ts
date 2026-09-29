@@ -10,6 +10,7 @@ import { codexComponentConfiguration } from "./codex-component-step.js";
 
 export const CODEX_PERMISSION_PROFILE = "genbi-scoped";
 export interface CodexSessionPolicy {
+  readonly model?: string;
   readonly cwd: string;
   readonly codexHome: string;
   readonly profile: typeof CODEX_PERMISSION_PROFILE;
@@ -39,7 +40,7 @@ function toml(value: unknown): string {
 }
 
 /** Pure, resolve-only policy construction from host-owned scope, never request JSON. */
-export function buildCodexSessionPolicy(spec: NativeRuntimeSpec, runtime: ManagedWrenRuntimeRecord, home: CodexWrenHome, directTools = false): CodexSessionPolicy {
+export function buildCodexSessionPolicy(spec: NativeRuntimeSpec, runtime: ManagedWrenRuntimeRecord, home: CodexWrenHome, directTools = false, model?: string): CodexSessionPolicy {
   assertNativeRuntimeSpec(spec);
   if (spec.backend !== "codex-app-server" || spec.vendor !== "codex" || !spec.childEnvironment.CODEX_HOME || spec.mcp) deny();
   if (spec.executables.wren?.executable !== runtime.launcher || spec.executables.python?.executable !== runtime.venv_python) deny();
@@ -125,9 +126,10 @@ export function buildCodexSessionPolicy(spec: NativeRuntimeSpec, runtime: Manage
       "shell_snapshot", "standalone_web_search",
     ].map((name) => [name, false])),
   };
+  if (model !== undefined) { if (!model.trim() || model.length > 256) deny(); config.model = model; }
   if (directTools) { delete environment.WREN_HOME; delete environment.WREN_PROJECT_HOME; }
   const args = Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${toml(value)}`]);
   args.push("app-server", "--stdio", "--strict-config");
-  return Object.freeze({ cwd, codexHome, profile: CODEX_PERMISSION_PROFILE, args: Object.freeze(args),
+  return Object.freeze({ ...(model ? { model } : {}), cwd, codexHome, profile: CODEX_PERMISSION_PROFILE, args: Object.freeze(args),
     environment: Object.freeze(environment), commandEnvironment: Object.freeze(directTools ? {} : { ...shellEnvironment, CODEX_HOME: null }), configuration: Object.freeze(config) });
 }

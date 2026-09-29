@@ -14,6 +14,8 @@ import type { NativeComponentPreparation } from "./native-components.js";
 export interface NativeComponentContextOptions extends Omit<NativeComponentRuntimeOptions, "contexts" | "wren"> {
   /** All executables and the provider are resolved by the certified server provisioner. */
   readonly contextLoaderBinary: string;
+  /** Explicit host-only credential environment supplied by the provisioner. */
+  readonly wrenEnvironment?: Readonly<NodeJS.ProcessEnv>;
   readonly wrenBinary: string;
   readonly project: string;
   readonly signal: AbortSignal;
@@ -57,7 +59,7 @@ async function captureBindings(irDocument: string, options: NativeComponentConte
   }).passthrough()) }).passthrough().parse(JSON.parse(irDocument));
   if (new Set(ir.components.map((component) => component.id)).size !== ir.components.length) throw new Error("Duplicate component identity");
   const fingerprint = await hashDirectory(project);
-  const accessIdentity = await captureWrenAccessIdentity(project);
+  const accessIdentity = await captureWrenAccessIdentity(project, options.wrenEnvironment);
   check();
   const scratch = await mkdtemp(path.join(os.tmpdir(), "genbi-native-context-"));
   try {

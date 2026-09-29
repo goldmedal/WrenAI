@@ -94,4 +94,31 @@ describe("Codex backend grants", () => {
     const value = backend(); const opening = value.open(value.prepareLaunch(), input());
     await value.shutdown(); await expect(opening).rejects.toThrow(); expect(peer.close).toHaveBeenCalledOnce(); expect(value.retainedManifestDigests()).toEqual([]);
   });
+  it("component transports require single-use permits and pin runtime until confirmed close", async () => {
+    const value = backend(); const permit = value.prepareLaunch();
+    const scope = { ...input(), model: "step-model", accountEmail: "fixture@example.invalid", signal: new AbortController().signal };
+    expect(() => value.openStep({ ...permit }, scope)).toThrow();
+    const resource = value.openStep(permit, scope);
+    expect(resource.policy.model).toBe("step-model");
+    expect(mocks.policy).toHaveBeenCalledWith(scope.spec, runtime, scope.wrenHome, true, "step-model");
+    expect(() => value.openStep(permit, scope)).toThrow();
+    permit.release(); expect(value.retainedManifestDigests()).toEqual([runtime.manifest_digest]);
+    mocks.resolve.mockReturnValue({ ...runtime, closure_digest: "changed" });
+    expect(() => resource.policy.assertCurrent()).toThrow();
+    await resource.transport.close(); expect(value.retainedManifestDigests()).toEqual([]);
+  });
+  it("shutdown owns component transports and reports failed cleanup", async () => {
+    const peer = new Peer(); peer.close.mockRejectedValue(Error("failed cleanup")); mocks.spawn.mockReturnValue(peer);
+    const value = backend();
+    value.openStep(value.prepareLaunch(), { ...input(), model: "step", accountEmail: "fixture@example.invalid", signal: new AbortController().signal });
+    await expect(value.shutdown()).rejects.toMatchObject({ code: "codex_app_server_cleanup_failed" });
+    expect(value.retainedManifestDigests()).toEqual([runtime.manifest_digest]);
+  });
+  it("cancellation closes only the owned component transport", async () => {
+    const value = backend(); const controller = new AbortController(); const peer = new Peer(); mocks.spawn.mockReturnValue(peer);
+    const resource = value.openStep(value.prepareLaunch(), { ...input(), model: "step", accountEmail: "fixture@example.invalid", signal: controller.signal });
+    controller.abort(); await resource.transport.close(); expect(peer.close).toHaveBeenCalledOnce();
+    expect(value.retainedManifestDigests()).toEqual([]);
+  });
+
 });

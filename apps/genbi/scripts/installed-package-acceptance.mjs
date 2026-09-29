@@ -95,10 +95,27 @@ try {
   await stopProcessTree(serverProcess);
   serverProcess = undefined;
 
+  markPhase("explicit-codex-composition");
+  const codexEnvironment = controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint });
+  codexEnvironment.GENBI_CODEX_RUNTIME = "app-server";
+  codexEnvironment.GENBI_ALLOW_LOCAL_RUNTIME = "0";
+  serverProcess = spawnProcessGroup("npx", ["--no-install", "genbi"], { cwd: installRoot, env: codexEnvironment, stdio: ["ignore", "pipe", "pipe"] });
+  await waitForServer(port, collectOutput(serverProcess));
+  const structured = await (await fetch(`http://127.0.0.1:${port}/api/structured-runtime/readiness`)).json();
+  const native = await (await fetch(`http://127.0.0.1:${port}/api/native-sessions/readiness`)).json();
+  if (structured.codex?.backend !== "codex-app-server" || structured.codex?.ask !== false || structured.codex?.setup !== false
+    || native.runtimeHost?.selected !== "codex-app-server" || native.runtimeHost?.selectedReadiness?.state === "ready") {
+    throw new Error("installed explicit Codex composition bypassed certification or fell back");
+  }
+  const rejected = await fetch(`http://127.0.0.1:${port}/api/native-sessions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ purpose: "analysis", vendor: "codex" }) });
+  if (rejected.ok) throw new Error("uncertified installed composition started a native session");
+  await stopProcessTree(serverProcess); serverProcess = undefined;
+
   markPhase("complete");
   process.stdout.write(`${JSON.stringify({
     ok: true,
     checks: [
+      { name: "installed explicit Codex composition reports gated readiness and rejects launch without local fallback", ok: true },
       { name: "tarball excludes checkout-only scripts, tests, fixtures, and examples", ok: true },
       { name: "fresh installed package keeps readiness offline, rejects altered approval bytes, then provisions exact local fixture bytes without checkout, ambient Python, or index resolution", ok: true },
       { name: "fresh install launches through npx with package-manager PATH", ok: true },
@@ -123,6 +140,7 @@ function controlledEnvironment({ installRoot, workspaceRoot, port: selectedPort,
   const environment = { ...process.env };
   const developmentEscapes = [
     "NODE_PATH",
+    "GENBI_CODEX_RUNTIME", "GENBI_ALLOW_LOCAL_RUNTIME", "GENBI_CODEX_EXECUTABLE", "GENBI_CODEX_SOURCE", "GENBI_CODEX_ACCOUNT_EMAIL",
     "WREN_HOME",
     "WREN_PROJECT_HOME",
     "WREN_HARNESS_PROJECT",

@@ -127,6 +127,7 @@ export class CodexSession {
     try {
       const result = parse(z.object({ thread: codexThreadSchema }), await this.rpc.request("thread/start", {
         cwd: this.policy.cwd, permissions: this.policy.profile, approvalPolicy: "never", ephemeral: true,
+        ...(this.policy.model ? { model: this.policy.model } : {}),
         runtimeWorkspaceRoots: this.tools ? [] : [this.policy.cwd], environments: [], dynamicTools: this.tools?.definitions ?? [],
         ...(this.tools ? { baseInstructions: "Use the provided tool for the selected analytical request. Component steps, data access and persistence are owned by the host.", developerInstructions: "" } : {}),
         allowProviderModelFallback: false,

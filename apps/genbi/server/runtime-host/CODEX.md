@@ -283,3 +283,37 @@ Codex backend recorded separately. Runtime/binding changes revoke active runs;
 caller cancellation and host shutdown share the owned lifetime. Host state and
 credentials stay out of readiness/errors and are not accepted from browser
 runtime-selection fields. Harness types expose no server imports.
+
+## Explicit application composition
+
+The application composes the same certified Codex backend into Native Analysis
+and Structured Ask. `GENBI_CODEX_RUNTIME=app-server` selects it explicitly;
+`local` remains the default. `GENBI_ALLOW_LOCAL_RUNTIME=0` disables the legacy
+local paths. Unknown values reject startup. Native Sessions currently use one
+selected backend, so selecting app-server limits that surface to Codex Analysis;
+Setup and Claude do not fall back. Structured Ask retains independent vendor
+selection.
+
+The direct provisioner requires server-owned configuration:
+
+- `GENBI_CODEX_EXECUTABLE`: absolute path to the exact native executable.
+- `GENBI_CODEX_SOURCE`: HTTPS release source matching its packaged certification.
+- `WREN_HARNESS_CODEX_HOME`: separate, private, externally authenticated login
+  directory; credentials are never copied from the user's usual home.
+- `GENBI_CODEX_ACCOUNT_EMAIL`: expected ChatGPT account, checked by the protocol.
+- Saved Codex Runtime settings: explicit driver and cheap/strong tier models.
+
+These values do not grant certification. The registry remains empty and the
+real backend rejects launches until separately reviewed exact-version evidence
+is packaged, including account verification, dynamic tools, and component-step
+isolation contracts. Readiness is resolve-only; it neither provisions nor logs in.
+
+After a launch permit, each operation gets a fresh private workspace and HOME.
+The vendor receives only the pinned component tool, with host filesystem,
+shell, network tools and ambient MCP disabled. Host-owned Wren access uses an
+explicit environment and captured project/profile identity; each component step
+opens its own certified transport with the same account and captured tier model.
+Native verified root results use the existing answer/artifact validator. Cleanup
+must finish before workspace disposal; unconfirmed cleanup retains materialization.
+The installed-package test checks explicit selection and refusal without checkout
+access or model calls. Authenticated end-to-end acceptance remains a later gate.
