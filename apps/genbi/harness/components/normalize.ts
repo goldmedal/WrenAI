@@ -23,7 +23,8 @@ function groundedQueries(observations: readonly { readonly input: unknown; reado
   }
   return grounded;
 }
-// Each failed bracket rescans to the end, so the scan gives up (the text stays prose) after this many.
+// An unclosed bracket rescans to the end, and a bracket that closes but does not parse (a Markdown
+// link) also counts: after this many failures the scan gives up and the text stays prose.
 const MAX_FAILED_STARTS = 64;
 /** The end index of the bracketed span opening at `start`, tracking JSON strings; -1 when it never closes. */
 function spanEnd(text: string, start: number): number {
@@ -46,7 +47,8 @@ function parsedJson(text: string): { value: unknown } | undefined {
 /**
  * The one top-level JSON array or object in a prose terminal, after dropping reasoning tags
  * and Markdown fences. Zero or several candidates return undefined, so the text stays prose.
- * Only the parse is tolerant: the value then takes the same path as a whole-string parse.
+ * Only the parse is tolerant: the value feeds the refusal check and the value branches; the render
+ * path still parses the raw text.
  */
 function soleJsonValue(raw: string): unknown {
   const untagged = raw.replace(/<think>[\s\S]*?<\/think>/gi, "");
@@ -103,7 +105,12 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // Tool evidence cannot turn an explicit terminal refusal or error into success.
   let terminalValue: unknown = lastProduct;
   if (typeof lastProduct === "string") {
-    try { terminalValue = JSON.parse(lastProduct); } catch { terminalValue = soleJsonValue(lastProduct) ?? lastProduct; /* Ordinary prose is normalized below. */ }
+    try { terminalValue = JSON.parse(lastProduct); } catch {
+      // Ordinary prose is normalized below. A loose array counts only when it holds batch entries,
+      // so an incidental array in a single-answer terminal stays prose.
+      const loose = soleJsonValue(lastProduct);
+      terminalValue = loose !== undefined && (!Array.isArray(loose) || loose.some((entry) => batchEntry.safeParse(entry).success)) ? loose : lastProduct;
+    }
   }
   if (terminalValue && typeof terminalValue === "object" && "status" in terminalValue
     && ["refused", "error"].includes(String(terminalValue.status))) return refused();

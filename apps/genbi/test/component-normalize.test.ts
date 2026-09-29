@@ -101,7 +101,7 @@ describe("batch-shaped callee normalization (answer_batch)", () => {
     });
     it.each([
       ["zero JSON values", "The totals are listed above (see [notes])."],
-      ["two JSON values", `First try: ${json}\nFinal: ${json}`],
+      ["two JSON values", `First try: ${JSON.stringify([{ ...entries[0], definition: { sql: sqlStray } }])}\nFinal: ${json}`],
     ])("keeps %s as prose, exactly as an unparseable terminal is handled today", (_, text) => {
       const result = terminal(text);
       expect(result).toEqual(prose);
@@ -144,5 +144,10 @@ describe("the answering query is the one the terminal value names, not the last 
   });
   it("keeps the last observation only for a value that names no query at all", () => {
     expect(answer("done", twoQueries)).toMatchObject({ status: "ok", output: { value: { rows: [{ n: 67 }], definition: { sql: STRAY } } } });
+  });
+  it("an incidental array in a single-answer prose terminal stays prose and answers with the last observation", () => {
+    expect(answer("Orders by year [2024, 2025] were 1 and 0.", [observed(CORRECT, 99)]))
+      .toEqual({ status: "ok", output: { kind: "value", value: { columns: ["n"], rows: [{ n: 99 }], verified: true, summary: "Query completed.", definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } } },
+        provenance: { verified: true, definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } } });
   });
 });
