@@ -178,9 +178,26 @@ text. After close, a capability can read the retained tail only if the enclosing
 Sessions authorization still permits it; revocation and durable lifecycle state
 belong to that owner.
 
-This bridge is not registered in the current application composition. Durable Sessions/API/UI wiring and structured
-Ask/Setup injection still need their own acceptance before activation. In
-particular, it does not enable MCP or bypass the project `.codex` rejection.
+NativeSessionService can own this bridge through a server-only `directCodex`
+provisioner when the explicitly selected backend is `codex-app-server`. The
+provisioner must acquire a backend permit before the durable row or preparation,
+provide captured scoped tools, and dispose allocations only after connection and
+tool cleanup succeeds. It must clean partial preparation on error and honor the
+lifetime signal. Missing preparation or an unsupported purpose fails closed;
+there is no terminal fallback. Direct sessions currently accept bound analysis
+entries only. The default application composition supplies no direct provisioner,
+and certification remains a separate activation gate.
+
+Durable rows mark `transport: "conversation"`; existing terminal rows retain
+their original shape. `/api/native-sessions/:id/conversation` accepts the browser
+capability and a replay cursor, then strict prompt/interrupt commands only after
+WebSocket open. Each socket owns its attachment; detach preserves the bounded
+in-memory tail for explicit reconnect. The UI renders plain text/tool status,
+not PTY bytes. Initial and detached leases, runtime/project revocation, and
+awaited stop/shutdown own cleanup. A backend failure updates the durable row even
+without a browser. Process restart retains metadata but ends the conversation;
+there is no provider resume for ephemeral threads. Structured Ask/Setup injection
+is not part of this composition, and no MCP or project `.codex` policy is relaxed.
 
 `startThread()` creates one ephemeral thread. `runTurn(text, { timeoutMs, signal })`
 resolves on `turn/completed`, **not** the start acknowledgement. Turn statuses are

@@ -1,3 +1,5 @@
+import type { DirectCodexProvisioner } from "./codex-native-session.js";
+import { CodexConversation, type CodexConversationAttachment, type ConversationFrame, type ConversationReplay } from "./runtime-host/codex-conversation.js";
 import { runNativeDispatchProcess } from "./native-dispatch-process.js";
 import { NativeComponentAdmission, nativeComponentHostContract, readNativeComponentPlans, type NativeComponentPreparation, type NativeComponentReceipt } from "./native-components.js";
 /**
@@ -309,6 +311,8 @@ const welcomePromptFor = (purpose: NativePurpose): string => {
 };
 
 export interface NativeSessionServiceOptions {
+  /** Certified server composition only; absence keeps direct execution closed. */
+  readonly directCodex?: DirectCodexProvisioner;
   readonly store: Store;
   readonly terminalManager: () => Promise<InteractiveTerminalManager>;
   readonly getBinding: () => EnrichmentBinding | undefined;
@@ -997,6 +1001,7 @@ export class NativeSessionService {
   private readonly producerExecutable: NativeExecutableIdentity | undefined;
   private readonly vendorExecutables: Readonly<Partial<Record<NativeVendor, NativeExecutableIdentity>>>;
   private readonly childToolDirectories: readonly string[];
+  private readonly conversations = new Map<string, { conversation: CodexConversation; assertActive(): void; close(): Promise<void> }>();
   private readonly sessions = new Map<string, InteractiveTerminalSession>();
   private readonly componentAdmissions = new Map<string, NativeComponentAdmission>();
   private readonly componentCleanups = new Set<Promise<void>>();
@@ -1138,7 +1143,7 @@ export class NativeSessionService {
     // yield while the durable row is still being initialized. It has never
     // owned an attachable capability, so treating it as a missing terminal
     // would race creation and could terminalize a PTY that is about to start.
-    if ((row.status !== "running" && row.status !== "detached") || this.sessions.has(row.id)) return row;
+    if ((row.status !== "running" && row.status !== "detached") || this.liveCapability(row.id)) return row;
     // Commit the durable fence first.  The cleanup below is best effort and
     // cannot leave a browser-facing row claiming that it can reattach.
     this.captureCodexResumeHandle(row);
@@ -1182,7 +1187,7 @@ export class NativeSessionService {
     const reusable = this.list().find((row) => this.matchesOpenScope(row, input.purpose, dispatch.target, runtime.generation, binding) && selectedNativeEntry(row.purpose, row.vendor, row.entryVerb) === entryVerb);
     if (reusable) {
       const recoveryCapability = this.recoveryCapabilities.get(reusable.id);
-      return { row: reusable, capability: this.sessions.get(reusable.id)!.capability, ...(recoveryCapability ? { recoveryCapability } : {}) };
+      return { row: reusable, capability: this.liveCapability(reusable.id)!, ...(recoveryCapability ? { recoveryCapability } : {}) };
     }
     const selectedEntry = selectedNativeEntry(input.purpose, dispatch.provider, input.entryVerb);
     const scopeKey = input.purpose === "setup"
@@ -1204,7 +1209,7 @@ export class NativeSessionService {
     const row = this.get(input.id);
     if (!row || !this.matchesOpenScope(row, input.purpose, dispatch.target, runtime.generation, binding)) throw new InteractiveLaunchError("native session is unavailable");
     const recoveryCapability = this.recoveryCapabilities.get(row.id);
-    return { row, capability: this.sessions.get(row.id)!.capability, ...(recoveryCapability ? { recoveryCapability } : {}) };
+    return { row, capability: this.liveCapability(row.id)!, ...(recoveryCapability ? { recoveryCapability } : {}) };
   }
 
   /**
@@ -1262,6 +1267,7 @@ export class NativeSessionService {
 
   /** Browser-visible resume state uses the same current-scope fence as launch, plus *why* when it fails. */
   resumeAvailability(row: NativeSessionRow): NativeSessionResumeAvailability {
+    if (row.transport === "conversation") return { available: false, cause: "no_resume_handle" };
     if (row.status !== "exited" && row.status !== "stopped" && row.status !== "interrupted" && row.status !== "failed" && row.status !== "stale") {
       return { available: false, cause: "not_terminal" };
     }
@@ -1393,7 +1399,7 @@ export class NativeSessionService {
   }
 
   private matchesOpenScope(row: NativeSessionRow, purpose: NativePurpose, target: InteractiveTarget, generation: number, binding: EnrichmentBinding | undefined): boolean {
-    if (row.purpose !== purpose || row.dispatchTarget !== target || row.runtimeGeneration !== generation || !this.sessions.has(row.id)) return false;
+    if (row.purpose !== purpose || row.dispatchTarget !== target || row.runtimeGeneration !== generation || !this.liveCapability(row.id)) return false;
     if (row.status !== "creating" && row.status !== "running" && row.status !== "detached") return false;
     return purpose === "setup"
       ? row.scopeKind === "bootstrap" && row.projectIdentity === null && row.bindingGeneration === null && row.projectRevision === null
@@ -1431,7 +1437,7 @@ export class NativeSessionService {
     // A successful response may contain an attach capability. Never replay it
     // after the owning PTY/capability has gone away; failures carry no terminal
     // capability and remain safely replayable within the same fenced scope.
-    return !replay.result?.capability || this.sessions.get(replay.result.row.id)?.capability === replay.result.capability;
+    return !replay.result?.capability || this.liveCapability(replay.result.row.id) === replay.result.capability;
   }
 
   private trimStartSeparateReplays(): void {
@@ -1477,8 +1483,24 @@ export class NativeSessionService {
     const executableAvailable = (vendor: NativeVendor) => this.options.executableAvailable
       ? this.options.executableAvailable(vendor) && this.vendorExecutables[vendor] !== undefined
       : this.vendorExecutables[vendor] !== undefined;
-    const hostAvailable = await terminalHostAvailable();
     const runtimeHostReadiness = await this.runtimeHost.probe();
+    if (runtimeHostReadiness.selected === "codex-app-server") {
+      const runtime = this.options.store.getNativeRuntimeBinding();
+      const binding = this.options.getBinding();
+      const reason = runtimeHostReadiness.selectedReadiness.state !== "ready" ? runtimeHostReadiness.selectedReadiness.message
+        : this.options.store.hasExplicitRuntimeSettings() && runtimeSettingsCorrection(this.options.store.getRuntimeSettings()) ? runtimeSettingsCorrection(this.options.store.getRuntimeSettings())
+        : !this.options.directCodex ? "Direct Codex preparation is unavailable."
+        : !runtime.configured || runtime.provider !== "codex" ? "Select a Codex Runtime binding."
+        : !binding ? "Bind a project before starting a conversation." : undefined;
+      const purposes = Object.fromEntries(NATIVE_PURPOSES.map((purpose) => {
+        const unavailable = reason ?? (purpose !== "analysis" ? "This purpose is not supported by direct Codex sessions." : undefined);
+        return [purpose, { scopeKind: NATIVE_DISPATCH_REGISTRY[purpose].scopeKind, profile: NATIVE_DISPATCH_REGISTRY[purpose].profile,
+          target: "codex:interactive", targetLabel: "Codex CLI", available: !unavailable, ...(unavailable ? { reason: unavailable } : {}),
+          vendors: { codex: { available: !unavailable }, claude: { available: false } } }];
+      })) as Record<NativePurpose, NativePurposeReadiness>;
+      return { runtime, runtimeHost: runtimeHostReadiness, purposes, ...purposes, mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason: "Direct conversations use host-owned tools." } };
+    }
+    const hostAvailable = await terminalHostAvailable();
     const selectedRuntimeUnavailable = runtimeHostReadiness.selectedReadiness.state === "ready"
       ? undefined
       : runtimeHostReadiness.selectedReadiness.message;
@@ -1621,6 +1643,13 @@ export class NativeSessionService {
     if (!dispatchDefinition) throw new InteractiveLaunchError("native sessions require a saved Runtime & authentication binding");
     const entryVerb = selectedNativeEntry(purpose, dispatchDefinition.provider, input.entryVerb);
     if (resumed && selectedNativeEntry(purpose, dispatchDefinition.provider, resumed.row.entryVerb) !== entryVerb) throw new InteractiveLaunchError("native session entry changed during resume");
+    if (runtimeReadiness.selected === "codex-app-server") {
+      if (dispatchDefinition.provider !== "codex" || purpose !== "analysis" || !binding || resumed || !this.options.directCodex) {
+        throw new InteractiveLaunchError("direct Codex session preparation is unavailable");
+      }
+      return this.createDirectCodex(binding, legacyRuntime, entryVerb!);
+    }
+    if (runtimeReadiness.selected !== "local") throw new InteractiveLaunchError("native session backend is unavailable");
     let managedCodexWrenRuntime: NativeWrenRuntime | undefined;
     if (dispatchDefinition.provider === "codex" && !this.legacyFixtureMode()) {
       const codexReadiness = runtimeReadiness.backends["codex-app-server"];
@@ -1882,6 +1911,101 @@ export class NativeSessionService {
     }
   }
 
+  private liveCapability(id: string): string | undefined {
+    return this.sessions.get(id)?.capability ?? this.conversations.get(id)?.conversation.capability;
+  }
+
+  private async createDirectCodex(binding: EnrichmentBinding, runtime: NativeRuntimeBinding, entryVerb: string): Promise<NativeSessionLaunch> {
+    const provisioner = this.options.directCodex!;
+    const permit = provisioner.backend.prepareLaunch(); // before rows, credentials or workspace writes
+    const capturedBinding = structuredClone(binding);
+    const capturedRuntime = structuredClone(runtime);
+    const id = newId("native-session");
+    const controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, this.shutdownController.signal]);
+    let prepared: Awaited<ReturnType<DirectCodexProvisioner["prepare"]>> | undefined;
+    let conversation: CodexConversation | undefined;
+    let closing: Promise<void> | undefined;
+    const assertActive = () => {
+      signal.throwIfAborted(); this.assertRuntimeDispatchable();
+      const row = this.options.store.getNativeSession(id);
+      if (!sameBinding(capturedBinding, this.options.getBinding()) || !sameNativeRuntimeBinding(capturedRuntime, this.options.store.getNativeRuntimeBinding())
+        || (row && !["creating", "running", "detached"].includes(row.status))) throw new InteractiveLaunchError("native session scope is stale");
+    };
+    const close = () => closing ??= (async () => {
+      controller.abort();
+      const results = await Promise.allSettled([conversation?.close(), prepared?.input.tools.close()]);
+      // Keep materialized resources if process/tool cleanup could not be confirmed.
+      if (results.some((result) => result.status === "rejected")) throw new InteractiveLaunchError("native conversation cleanup failed");
+      await prepared?.dispose();
+    })();
+    try {
+      assertActive(); permit.assertActive();
+      const row = this.options.store.createNativeSession({ id, transport: "conversation", purpose: "analysis", vendor: "codex", agent: agentFor("analysis", "codex"),
+        entryVerb, scopeKind: "bound_project", scopeId: newId("native-scope"), dispatchProfile: NATIVE_DISPATCH_REGISTRY.analysis.profile,
+        dispatchTarget: "codex:interactive", runtimeGeneration: capturedRuntime.generation,
+        projectIdentity: capturedBinding.identity, bindingGeneration: capturedBinding.generation, projectRevision: capturedBinding.revision });
+      prepared = await provisioner.prepare({ session: row, binding: capturedBinding, permit, signal, assertActive });
+      assertActive(); permit.assertActive(); prepared.input.tools.assertCurrent();
+      const hostGuard = prepared.input.assertScopeActive;
+      conversation = new CodexConversation(provisioner.backend, permit, { ...prepared.input,
+        assertScopeActive: () => { assertActive(); hostGuard(); },
+      }, (state, failure) => {
+        if (state !== "closed" && state !== "failed") return;
+        const current = this.options.store.getNativeSession(id);
+        if (current && ["creating", "running", "detached"].includes(current.status)) {
+          this.options.store.transitionNativeSession(id, state === "failed" ? "failed" : "exited", { ended: true,
+            ...(failure ? { failure: `Codex conversation ${failure}` } : {}) });
+        }
+        // Schedule after transition delivers its terminal frame to the attachment.
+        queueMicrotask(() => this.revokeCapabilities([id]));
+      });
+      this.conversations.set(id, { conversation, assertActive, close });
+      await conversation.ready;
+      assertActive();
+      this.options.store.transitionNativeSession(id, "running", { started: true });
+      this.armLease(id, "native session attachment timed out", NATIVE_SESSION_INITIAL_ATTACHMENT_GRACE_MS);
+      return { row: this.options.store.getNativeSession(id)!, capability: conversation.capability };
+    } catch (error) {
+      const row = this.options.store.getNativeSession(id);
+      if (row && ["creating", "running", "detached"].includes(row.status)) this.options.store.transitionNativeSession(id, "failed", { ended: true, failure: "Direct Codex launch failed" });
+      this.conversations.delete(id); permit.release();
+      try { await close(); } catch { this.componentCleanupFailed = true; throw new InteractiveLaunchError("native conversation cleanup failed"); }
+      throw error;
+    }
+  }
+
+  attachConversation(id: string, capability: string, listener: (frame: ConversationFrame | ConversationReplay) => void, afterSequence = 0): CodexConversationAttachment | undefined {
+    const direct = this.conversations.get(id);
+    if (!direct) return undefined;
+    let attachment: CodexConversationAttachment;
+    try { direct.assertActive(); attachment = direct.conversation.attach(capability, listener, afterSequence); }
+    catch { return undefined; }
+    if (!["ready", "running"].includes(direct.conversation.snapshot().state)) { attachment.detach(); return undefined; }
+    this.clearLease(id);
+    this.options.store.transitionNativeSession(id, "running");
+    let detached = false;
+    const check = () => { if (detached) throw new InteractiveLaunchError("native attachment is unavailable"); direct.assertActive(); };
+    return { submit: (text) => { check(); return attachment.submit(text); }, interrupt: () => { check(); return attachment.interrupt(); },
+      detach: () => {
+        if (detached) return; detached = true; attachment.detach();
+        if (this.conversations.get(id) === direct && ["ready", "running"].includes(direct.conversation.snapshot().state)) {
+          this.options.store.transitionNativeSession(id, "detached");
+          this.armLease(id, "native session idle TTL expired", this.idleTtlMs);
+        }
+      } };
+  }
+
+  async stopAndWait(id: string, capability: string): Promise<boolean> {
+    const direct = this.conversations.get(id);
+    if (!direct) return this.stop(id, capability);
+    if (direct.conversation.capability !== capability) return false;
+    this.options.store.stopNativeSessionAndRevokeRecoveryAction(id);
+    this.revokeCapabilities([id]);
+    await direct.close();
+    return true;
+  }
+
   attach(id: string, capability: string): InteractiveTerminalSession | undefined {
     const row = this.get(id);
     const runtime = this.options.store.getNativeRuntimeBinding();
@@ -1923,6 +2047,13 @@ export class NativeSessionService {
       this.options.artifactService?.revoke(this.artifactCredentials.get(id));
       this.artifactCredentials.delete(id);
       this.sessions.delete(id);
+      const direct = this.conversations.get(id);
+      this.conversations.delete(id);
+      if (direct) {
+        const cleanup = direct.close();
+        this.componentCleanups.add(cleanup);
+        void cleanup.catch(() => { this.componentCleanupFailed = true; }).finally(() => this.componentCleanups.delete(cleanup));
+      }
       this.cleanupRuntime(id);
       try {
         terminal?.close();
@@ -1960,7 +2091,7 @@ export class NativeSessionService {
     this.shuttingDown = true;
     this.shutdownController.abort();
     return this.shutdownPromise ??= (async () => {
-      const ids = [...new Set([...this.sessions.keys(), ...this.componentAdmissions.keys()])];
+      const ids = [...new Set([...this.sessions.keys(), ...this.conversations.keys(), ...this.componentAdmissions.keys()])];
       for (const id of ids) this.options.store.stopNativeSessionAndRevokeRecoveryAction(id);
       this.revokeCapabilities(ids);
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2067,8 +2198,7 @@ export class NativeSessionService {
         this.leaseTimers.delete(id);
         return;
       }
-      const terminal = this.sessions.get(id);
-      if (!terminal) {
+      if (!this.liveCapability(id)) {
         this.leaseTimers.delete(id);
         return;
       }

@@ -157,6 +157,7 @@ export type NativeSessionVendor = 'claude' | 'codex';
 export type NativeSessionStatus = 'creating' | 'running' | 'detached' | 'exited' | 'stopped' | 'interrupted' | 'failed' | 'stale';
 
 export interface NativeSession {
+  transport?: "conversation";
   id: string;
   purpose: NativeSessionPurpose;
   vendor: NativeSessionVendor;

@@ -10,6 +10,7 @@ import path from "node:path";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { upgradeWebSocket } from "@hono/node-server";
+import { conversationSocket } from "./conversation-socket.js";
 import { BUILD_CONTEXT_AGENT_ID, ComplianceError, CONNECT_SOURCE_AGENT_ID, contextLifecycleIdentityFingerprint, enforceCompliance, findLockedGatedCheck, resolveArtifactContent, resolveArtifactsDir } from "../harness/index.js";
 import type { Bundle, ContextLifecyclePrefix } from "../harness/index.js";
 import { adoptWithChosenProfile, verifyAdoptProject } from "./adopt.js";
@@ -1114,8 +1115,12 @@ export function createApp(deps: TurnDeps) {
   app.post("/api/native-sessions/:id/stop", async (c) => {
     const body = await c.req.json().catch(() => ({})) as { capability?: unknown };
     if (!deps.nativeSessions || typeof body.capability !== "string") return c.json({ error: "native session unavailable" }, 404);
-    return deps.nativeSessions.stop(c.req.param("id") ?? "", body.capability) ? c.body(null, 204) : c.json({ error: "native session unavailable" }, 404);
+    try {
+      return await deps.nativeSessions.stopAndWait(c.req.param("id") ?? "", body.capability) ? c.body(null, 204) : c.json({ error: "native session unavailable" }, 404);
+    } catch { return c.json({ error: "Native session cleanup could not be confirmed." }, 409); }
   });
+  app.get("/api/native-sessions/:id/conversation", upgradeWebSocket((c) =>
+    conversationSocket(deps.nativeSessions, c.req.param("id") ?? "", c.req.query("cap") ?? "", c.req.query("after") ?? "0")));
   app.get("/api/native-sessions/:id/attach", upgradeWebSocket((c) => {
     const id = c.req.param("id") ?? "";
     const capability = c.req.query("cap") ?? "";

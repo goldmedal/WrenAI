@@ -6,6 +6,7 @@ import { getNativeSetupRecovery, stopNativeSession, type NativeSession, type Nat
 import { isBffEnabled } from '@/bff/env';
 import { clearNativeSessionCapability, clearNativeSessionReturnSource, clearNativeSetupRecoveryCapability, nativeSessionCapability, nativeSessionReturnSource, nativeSetupRecoveryCapability } from './capability';
 import { NativeTerminal } from './NativeTerminal';
+import { NativeConversation } from './NativeConversation';
 import { deadNativeSessionActions } from './lifecycle';
 import { purposeLabels, statusLabels, targetLabels } from './sessionLabels';
 import { useNativeSessions } from './useNativeSessions';
@@ -80,6 +81,10 @@ export function SessionsPage() {
     if (!session) return;
     replace({ ...session, status: 'exited', exitCode, endedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
   }, [replace, session]);
+  const onConversationExit = useCallback(() => {
+    setReconnecting(false); setTerminalDisconnected(true);
+    if (id) void refresh(id);
+  }, [id, refresh]);
   const onConnected = useCallback(() => { setTerminalDisconnected(false); setReconnecting(false); }, []);
   const onConnectionLost = useCallback(() => {
     setTerminalDisconnected(true);
@@ -189,11 +194,11 @@ export function SessionsPage() {
         {recoveryError ? <span className="sessions-toolbar-error" role="alert">Recovery action failed. {recoveryError}</span> : null}
       </section> : null}
     </header>
-    {showTerminal ? <NativeTerminal sessionId={session.id} reconnectNonce={reconnectNonce} onExit={onExit} onConnected={onConnected} onConnectionLost={onConnectionLost} /> : <section className="sessions-terminal-state" aria-live="polite">
+    {showTerminal && session.transport === "conversation" ? <NativeConversation sessionId={session.id} reconnectNonce={reconnectNonce} onExit={onConversationExit} onConnected={onConnected} onConnectionLost={onConnectionLost} /> : showTerminal ? <NativeTerminal sessionId={session.id} reconnectNonce={reconnectNonce} onExit={onExit} onConnected={onConnected} onConnectionLost={onConnectionLost} /> : <section className="sessions-terminal-state" aria-live="polite">
       <Alert
         type={session.status === 'failed' || session.status === 'stale' || session.status === 'interrupted' ? 'error' : 'info'}
-        title={terminalEligible(session) && !capability ? 'Terminal capability unavailable in this browser session' : `Session ${status.toLowerCase()}`}
-        description={restartAction ? `${session.failure ? `${session.failure} ` : ''}${resumeAction ? `${resumeAction.reason} ${restartAction.reason}` : restartAction.reason}` : session.failure ?? (terminalEligible(session) && !capability ? 'Open or create this session in the browser session that owns it, then reconnect. Capabilities are never stored by the server.' : 'This native terminal is not available for attachment.')}
+        title={terminalEligible(session) && !capability ? `${session.transport === 'conversation' ? 'Conversation' : 'Terminal'} capability unavailable in this browser session` : `Session ${status.toLowerCase()}`}
+        description={restartAction ? `${session.failure ? `${session.failure} ` : ''}${resumeAction ? `${resumeAction.reason} ${restartAction.reason}` : restartAction.reason}` : session.failure ?? (terminalEligible(session) && !capability ? 'Open or create this session in the browser session that owns it, then reconnect. Capabilities are never stored by the server.' : `This native ${session.transport === 'conversation' ? 'conversation' : 'terminal'} is not available for attachment.`)}
       />
     </section>}
   </main>;
