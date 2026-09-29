@@ -77,6 +77,42 @@ describe("batch-shaped callee normalization (answer_batch)", () => {
     ]);
     expect(result.provenance).toBeUndefined();
   });
+  describe("a terminal that wraps exactly one JSON value in prose", () => {
+    const entries = [
+      { slot_id: "total", columns: ["total_revenue"], rows: [[999]], summary: "total revenue", verified: true, definition: { sql: sqlTotal } },
+      { slot_id: "refunds", status: "unanswerable", reason: "no refund measure" },
+    ];
+    const json = JSON.stringify(entries);
+    const perSlot = [
+      { slot_id: "total", columns: ["total_revenue"], rows: [{ total_revenue: 1284500 }], verified: true, summary: "total revenue", definition: { sql: sqlTotal, source_tables: [], filters: [] } },
+      { slot_id: "refunds", status: "unanswerable", reason: "no refund measure" },
+    ];
+    const terminal = (text: string) => normalizeComponentEvidence(component, { steps: { batch_result: text }, tools, children: [] });
+    const prose = terminal("I could not find the answer.");
+    it.each([
+      ["a prose prefix", `Here are the answers for all slots:\n${json}`],
+      ["a Markdown fence", `\`\`\`json\n${json}\n\`\`\``],
+      ["a reasoning tag holding a draft", `<think>Draft: [{"slot_id":"total","definition":{"sql":"${sqlStray}"}}]</think>\n${json}`],
+      ["a lone closing reasoning tag", `Let me check [{"slot_id":"draft"}] first.\n</think>\n\n${json}`],
+      ["prose on both sides", `Answers below.\n\`\`\`\n${json}\n\`\`\`\nLet me know if you need more [detail].`],
+    ])("normalises per slot through %s", (_, text) => {
+      const result = terminal(text);
+      expect(result).toEqual({ status: "ok", output: { kind: "value", value: perSlot }, provenance: { verified: true } });
+    });
+    it.each([
+      ["zero JSON values", "The totals are listed above (see [notes])."],
+      ["two JSON values", `First try: ${json}\nFinal: ${json}`],
+    ])("keeps %s as prose, exactly as an unparseable terminal is handled today", (_, text) => {
+      const result = terminal(text);
+      expect(result).toEqual(prose);
+      if (result.status === "ok" && result.output.kind === "value") expect(Array.isArray(result.output.value)).toBe(false);
+    });
+    it("does not widen grounding: a tolerantly parsed entry no executed query backs is unanswerable", () => {
+      const unbacked = [{ slot_id: "total", columns: ["total_revenue"], rows: [[1284500]], verified: true, definition: { sql: "SELECT 1284500 AS total_revenue" } }];
+      const result = terminal(`Sure! Here you go:\n\`\`\`json\n${JSON.stringify(unbacked)}\n\`\`\``);
+      expect(result).toEqual({ status: "ok", output: { kind: "value", value: [{ slot_id: "total", status: "unanswerable", reason: "no executed query backs this answer" }] } });
+    });
+  });
   it("still refuses a batch that executed no query at all", () => {
     expect(normalizeComponentEvidence(component, { steps: { batch_result: JSON.stringify([{ slot_id: "total", status: "unanswerable", reason: "x" }]) }, tools: [], children: [] }).status).toBe("refused");
   });

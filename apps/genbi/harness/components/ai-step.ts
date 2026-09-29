@@ -1,5 +1,17 @@
 import { ToolLoopAgent, isStepCount, jsonSchema, tool, type LanguageModel, type ToolSet } from "ai";
+import { readSlots } from "./egress.js";
 import type { StepResponse, StepRun } from "./runner.js";
+
+const SINGLE_ANSWER_STEPS = 12;
+/**
+ * Model turns one step may take. A per-slot step gets two turns per slot (a query and one
+ * retry, for a model that issues one tool call per turn) plus four for lookups and the answer.
+ */
+function stepCap(run: StepRun): number {
+  const read = run.perSlot ? readSlots(run) : undefined;
+  const slots = read && !("error" in read) ? read.slots.length : 0;
+  return Math.max(SINGLE_ANSWER_STEPS, 2 * slots + 4);
+}
 
 /** A fresh AI SDK loop for each host-owned step. No caller history or ambient tools. */
 export async function runAiComponentStep(run: StepRun, model: LanguageModel): Promise<StepResponse> {
@@ -13,7 +25,7 @@ export async function runAiComponentStep(run: StepRun, model: LanguageModel): Pr
     });
   }
   const prompt = JSON.stringify({ request: run.request, input: run.input, consumes: run.consumes });
-  const agent = new ToolLoopAgent({ model, tools, stopWhen: isStepCount(12),
+  const agent = new ToolLoopAgent({ model, tools, stopWhen: isStepCount(stepCap(run)),
     instructions: [run.brief, run.prompt].filter(Boolean).join("\n\n"),
   });
   const result = await agent.generate({ prompt, abortSignal: run.signal });

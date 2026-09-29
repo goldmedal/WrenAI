@@ -23,6 +23,50 @@ function groundedQueries(observations: readonly { readonly input: unknown; reado
   }
   return grounded;
 }
+// Each failed bracket rescans to the end, so the scan gives up (the text stays prose) after this many.
+const MAX_FAILED_STARTS = 64;
+/** The end index of the bracketed span opening at `start`, tracking JSON strings; -1 when it never closes. */
+function spanEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let index = start; index < text.length; index++) {
+    const char = text[index];
+    if (inString) {
+      if (char === "\\") index++;
+      else if (char === '"') inString = false;
+    } else if (char === '"') inString = true;
+    else if (char === "{" || char === "[") depth++;
+    else if (char === "}" || char === "]") { depth--; if (depth === 0) return index; }
+  }
+  return -1;
+}
+function parsedJson(text: string): { value: unknown } | undefined {
+  try { return { value: JSON.parse(text) }; } catch { return undefined; }
+}
+/**
+ * The one top-level JSON array or object in a prose terminal, after dropping reasoning tags
+ * and Markdown fences. Zero or several candidates return undefined, so the text stays prose.
+ * Only the parse is tolerant: the value then takes the same path as a whole-string parse.
+ */
+function soleJsonValue(raw: string): unknown {
+  const untagged = raw.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  // A lone closing tag: everything before it is treated as reasoning.
+  const closing = untagged.toLowerCase().lastIndexOf("</think>");
+  const text = (closing >= 0 ? untagged.slice(closing + "</think>".length) : untagged).replace(/```[\w-]*/g, "");
+  const found: unknown[] = [];
+  let failures = 0;
+  for (let index = 0; index < text.length; index++) {
+    if (text[index] !== "{" && text[index] !== "[") continue;
+    const end = spanEnd(text, index);
+    const candidate = end >= 0 ? parsedJson(text.slice(index, end + 1)) : undefined;
+    if (candidate) {
+      found.push(candidate.value);
+      if (found.length > 1) return undefined;
+      index = end;
+    } else if (++failures > MAX_FAILED_STARTS) return undefined;
+  }
+  return found.length === 1 ? found[0] : undefined;
+}
 function refused(): ComponentInvocationResult {
   return { status: "refused", code: "callee_refused", message: "The component did not produce a grounded result." };
 }
@@ -59,7 +103,7 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // Tool evidence cannot turn an explicit terminal refusal or error into success.
   let terminalValue: unknown = lastProduct;
   if (typeof lastProduct === "string") {
-    try { terminalValue = JSON.parse(lastProduct); } catch { /* Ordinary prose is normalized below. */ }
+    try { terminalValue = JSON.parse(lastProduct); } catch { terminalValue = soleJsonValue(lastProduct) ?? lastProduct; /* Ordinary prose is normalized below. */ }
   }
   if (terminalValue && typeof terminalValue === "object" && "status" in terminalValue
     && ["refused", "error"].includes(String(terminalValue.status))) return refused();
