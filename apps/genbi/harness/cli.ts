@@ -30,7 +30,7 @@ Options:
   --profile <dir>         Warble profile source directory (default: this package's profiles/genbi-default)
   --mode <mode>           subscription | api-key | local | gateway (default: see policy below)
   --provider <name>       subscription mode: claude | codex (default: claude)
-  --adapter <name>        api-key mode: provider registry adapter id (e.g. anthropic)
+  --adapter <name>        api-key mode: provider registry adapter id (e.g. openai, anthropic)
   --api-key <key>         api-key mode: API key (omit to rely on the adapter's own env var lookup)
   --model <name>          api-key/local mode: model name
   --endpoint <url>        local/gateway mode: endpoint URL

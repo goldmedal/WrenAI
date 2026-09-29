@@ -128,15 +128,15 @@ component, a bare `"<tier>"` key is the shared default, and a flat map with no
 
 ```bash
 wren-harness "annual revenue report" --project /path/to/project \
-  --mode api-key --adapter anthropic \
+  --mode api-key --adapter openai \
   --tier-binding ./tier-binding.json
 ```
 
 ```json
 {
   "tiers": {
-    "plan_report/strong":  { "adapter": "anthropic", "config": { "model": "claude-sonnet" }, "zone": "public" },
-    "plan_report/cheap":   { "adapter": "anthropic", "config": { "model": "claude-sonnet" }, "zone": "public" },
+    "plan_report/strong":  { "adapter": "openai", "config": { "model": "<openai-model-id>" }, "zone": "public" },
+    "plan_report/cheap":   { "adapter": "openai", "config": { "model": "<openai-model-id>" }, "zone": "public" },
     "answer_batch/strong": { "adapter": "openai-compatible", "zone": "private",
                              "config": { "baseURL": "https://nim.internal/v1", "model": "nvidia/nemotron-3-super-120b-a12b",
                                          "extraBody": { "chat_template_kwargs": { "enable_thinking": false } } } },
@@ -162,6 +162,21 @@ callee, the judge and the render role. A hosted, shared endpoint is by definitio
 a **public** zone; if you point a private tier at one for a rehearsal on fixture
 data, say so in the binding file (a comment field is fine) and never report that
 run as a private-zone result.
+
+The public tiers above use the native `openai` adapter, which reads
+`OPENAI_API_KEY` from the environment when the binding has no `apiKey`; keep it
+that way, so the key never lands in the binding file or on the command line:
+
+```bash
+export OPENAI_API_KEY=...   # from your secret store, in the shell that runs the harness
+```
+
+An in-process run with a tier binding never uses the Claude subscription, so
+every API-key tier needs its provider's key in the environment: `OPENAI_API_KEY`
+for tiers bound to `openai`, `ANTHROPIC_API_KEY` for tiers bound to `anthropic`.
+The `openai-compatible` adapter has no environment fallback and stays the one
+for NIM, vLLM or Ollama endpoints; point it at your own serving runtime, not at
+`api.openai.com`.
 
 `extraBody` is merged into every request the `openai-compatible` adapter sends,
 for serving runtimes whose switches live in the body (Nemotron's reasoning
@@ -218,7 +233,7 @@ the card went only to public steps and the snapshot only to private ones.
 Audit a binding without running anything:
 
 ```bash
-wren-harness "unused" --project /path/to/project --mode api-key --adapter anthropic \
+wren-harness "unused" --project /path/to/project --mode api-key --adapter openai \
   --tier-binding ./tier-binding.json --zone-dry-run
 ```
 
@@ -256,7 +271,7 @@ Run it with the zone-aware binding above; the render role must be bound:
 
 ```bash
 wren-harness "Build the fiscal 2025 annual revenue report" --project /path/to/project \
-  --profile ./profiles/genbi-report --mode api-key --adapter anthropic \
+  --profile ./profiles/genbi-report --mode api-key --adapter openai \
   --tier-binding ./tier-binding.json
 ```
 

@@ -419,6 +419,22 @@ describe("M1: the annual revenue report end to end, offline", () => {
     } finally { await rm(project, { recursive: true, force: true }); }
   });
 
+  it("public tiers bound to the native openai adapter take the key from the environment, and it appears nowhere in the result or trace", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "genbi-report-openai-"));
+    const key = "fake-openai-key-for-tests";
+    vi.stubEnv("OPENAI_API_KEY", key);
+    try {
+      const openai = (model: string): AdapterSpec => ({ adapter: "openai", config: { model }, zone: "public" });
+      const tierBinding = { ...binding, "plan_report/strong": openai("gpt-planner"), "plan_report/cheap": openai("gpt-narrator") };
+      const { result, calls } = await runReport(project, { tierBinding });
+      expect(result.kind).toBe("answer");
+      expect(calls.filter((call) => call.tier === "strong" || call.tier === "cheap").map((call) => [call.step, call.modelId]))
+        .toEqual([["resolve_intent", "local-super-cheap"], ["generate_sql", "local-super"], ["plan_layout", "gpt-planner"], ["narrate", "gpt-narrator"]]);
+      expect(JSON.stringify(result)).not.toContain(key);
+      expect(JSON.stringify(tierBinding)).not.toContain(key);
+    } finally { vi.unstubAllEnvs(); await rm(project, { recursive: true, force: true }); }
+  });
+
   it("AC 6: the render stage must be bound to a private tier explicitly; leaving it on the narrator's public tier or binding it public is rejected before any model runs", async () => {
     const project = await mkdtemp(path.join(os.tmpdir(), "genbi-report-render-gate-"));
     try {

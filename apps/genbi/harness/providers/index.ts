@@ -41,8 +41,12 @@ export type { OpenAICompatibleAdapterConfig } from "./adapters/openai-compatible
 export { ANTHROPIC_ADAPTER_ID, createAnthropicAdapter } from "./adapters/anthropic.js";
 export type { AnthropicAdapterConfig } from "./adapters/anthropic.js";
 
+export { createOpenAIAdapter, OPENAI_ADAPTER_ID } from "./adapters/openai.js";
+export type { OpenAIAdapterConfig } from "./adapters/openai.js";
+
 import { createAnthropicAdapter, ANTHROPIC_ADAPTER_ID } from "./adapters/anthropic.js";
 import { createMockAdapter, MOCK_ADAPTER_ID } from "./adapters/mock.js";
+import { createOpenAIAdapter, OPENAI_ADAPTER_ID } from "./adapters/openai.js";
 import {
   createOpenAICompatibleAdapter,
   OPENAI_COMPATIBLE_ADAPTER_ID,
@@ -51,7 +55,7 @@ import { createProviderRegistry, type ProviderRegistry } from "./registry.js";
 
 /**
  * A provider registry pre-populated with the built-in adapters
- * (`mock`, `openai-compatible`, `anthropic`). Callers can still
+ * (`mock`, `openai-compatible`, `anthropic`, `openai`). Callers can still
  * `register()` additional adapter ids onto the returned registry.
  */
 export function createDefaultProviderRegistry(): ProviderRegistry {
@@ -59,5 +63,6 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
   registry.register(MOCK_ADAPTER_ID, createMockAdapter);
   registry.register(OPENAI_COMPATIBLE_ADAPTER_ID, createOpenAICompatibleAdapter);
   registry.register(ANTHROPIC_ADAPTER_ID, createAnthropicAdapter);
+  registry.register(OPENAI_ADAPTER_ID, createOpenAIAdapter);
   return registry;
 }
