@@ -1119,6 +1119,8 @@ export function createApp(deps: TurnDeps) {
       return await deps.nativeSessions.stopAndWait(c.req.param("id") ?? "", body.capability) ? c.body(null, 204) : c.json({ error: "native session unavailable" }, 404);
     } catch { return c.json({ error: "Native session cleanup could not be confirmed." }, 409); }
   });
+  app.get("/api/structured-runtime/readiness", async (c) => deps.structuredRuntime
+    ? c.json(await deps.structuredRuntime.readiness()) : c.json({ error: "Structured runtime is not configured." }, 503));
   app.get("/api/native-sessions/:id/conversation", upgradeWebSocket((c) =>
     conversationSocket(deps.nativeSessions, c.req.param("id") ?? "", c.req.query("cap") ?? "", c.req.query("after") ?? "0")));
   app.get("/api/native-sessions/:id/attach", upgradeWebSocket((c) => {
@@ -1656,6 +1658,7 @@ export function createApp(deps: TurnDeps) {
 
     const revokedNativeSessionIds = deps.store.setRuntimeSettingsAndRevokeIncompatibleNativeSessions(updated);
     deps.nativeSessions?.revokeRuntimeCapabilities(revokedNativeSessionIds);
+    deps.structuredRuntime?.revoke();
     deps.revokeInteractiveTerminals?.();
     deps.setAuthChoice?.(candidateAuthChoice);
     // describeBundle branches its target on authChoice.mode, so a cached
@@ -1842,6 +1845,7 @@ export function createApp(deps: TurnDeps) {
     }
     const revokedNativeSessionIds = deps.store.resetSetup();
     deps.nativeSessions?.revokeRuntimeCapabilities(revokedNativeSessionIds);
+    deps.structuredRuntime?.revoke();
     deps.revokeInteractiveTerminals?.();
     deps.unbindProject?.();
     // Reset also revokes the explicit runtime override. Restore the boot auth

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { StructuredRuntime } from "./structured-runtime.js";
 import { shutdownNativeResources } from "./native-shutdown.js";
 /**
  * The BFF's process entrypoint. This is the ONLY file
@@ -331,9 +332,11 @@ async function main(): Promise<void> {
     boundProject = identity.path;
     const { revokedNativeSessionIds } = store.activateEnrichmentBindingAndRevokeBoundNativeSessions(identity);
     nativeSessions.revokeBindingCapabilities(revokedNativeSessionIds);
+    deps?.structuredRuntime?.revoke();
     invalidateBundleAgentIdsCache(deps);
   }
   function unbindProject(): void {
+    deps?.structuredRuntime?.revoke();
     boundProject = undefined;
     invalidateBundleAgentIdsCache(deps);
   }
@@ -644,8 +647,15 @@ async function main(): Promise<void> {
     artifactService: nativeArtifacts,
   });
 
+  // Explicit legacy composition. Isolated vendors require their own provisioner
+  // and certification before this selection can change.
+  const structuredRuntime = new StructuredRuntime({
+    selected: { codex: "local", claude: "local" }, allowLocal: true, deployment,
+    localRoute: route, localSetupFor: (choice) => setupRunnerFor?.(choice) ?? setupRunner,
+  });
   deps = {
     store,
+    structuredRuntime,
     nativeSessions,
     nativeArtifacts,
     route,
@@ -738,7 +748,10 @@ async function main(): Promise<void> {
   const shutdown = () => {
     const deadline = setTimeout(() => process.exit(1), 12_000);
     void shutdownNativeResources({
-      shutdownSessions: () => nativeSessions.shutdown(),
+      shutdownSessions: async () => {
+        const results = await Promise.allSettled([nativeSessions.shutdown(), structuredRuntime.shutdown()]);
+        if (results.some((result) => result.status === "rejected")) throw new Error("Session cleanup failed");
+      },
       closeTerminals: () => interactiveTerminal?.closeAll(),
       closeServer: () => { server.close(); },
     }).then((code) => {

@@ -257,3 +257,29 @@ and later application wiring must all precede activation.
 
 Protocol reference: [Codex App Server](https://developers.openai.com/codex/app-server).
 The installed baseline's generated schema remains the version-specific reference.
+
+## Structured Ask and Setup composition
+
+`StructuredRuntime` is the server-owned injection boundary for Ask and Setup.
+Its per-vendor selection is explicit: local, Codex app-server, or Claude sandbox.
+A missing, mismatched or unready adapter is rejected before execution; neither
+local execution nor another vendor is a fallback. The default BFF explicitly
+retains its existing local runners. The new readiness endpoint reports each
+vendor and its Ask/Setup support independently; local readiness is not evidence
+of sandbox certification.
+
+`createCodexStructuredAdapter` accepts the existing backend permit and a
+server-owned provisioner of scoped tools. It currently supports answer_query
+and generate_dashboard only. Preparation must honor the captured session/turn,
+Runtime/project generation guard and abort signal, and clean partial allocations
+on error. Process/tool cleanup must complete before disposal or delivery of a
+successful result. Direct Setup has no accepted producer contract and remains
+unsupported. Claude sandbox likewise requires its separate backend. Injected
+Setup contracts are tested synthetically; they cannot create legacy resume
+anchors. No production provisioner or certification row is installed here.
+
+Structured results retain the existing answer/artifact folding, with the direct
+Codex backend recorded separately. Runtime/binding changes revoke active runs;
+caller cancellation and host shutdown share the owned lifetime. Host state and
+credentials stay out of readiness/errors and are not accepted from browser
+runtime-selection fields. Harness types expose no server imports.

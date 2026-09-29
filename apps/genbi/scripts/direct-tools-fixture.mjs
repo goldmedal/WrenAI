@@ -31,7 +31,10 @@ export async function installedDirectToolsFixture(packageRoot) {
     if (m.id === "tool-request") {
       assert.equal(m.result.success, true);
       send({ method: "item/completed", params: { threadId: "thread", turnId: "turn", item: completed } });
-      send({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "completed", items: [completed] } } }); return;
+      const answer = { type: "agentMessage", id: "answer", text: "99 orders" };
+      send({ method: "item/started", params: { threadId: "thread", turnId: "turn", item: answer } });
+      send({ method: "item/completed", params: { threadId: "thread", turnId: "turn", item: answer } });
+      send({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "completed", items: [completed, answer] } } }); return;
     }
     if (!m.id) return;
     let result;
@@ -105,5 +108,31 @@ export async function installedDirectToolsFixture(packageRoot) {
     assert.equal(stopped.status, 204); assert.equal(service.get(launch.session.id).status, "stopped");
     assert.equal(service.attachConversation(launch.session.id, launch.capability, () => {}), undefined);
   } finally { await service.shutdown(); store.close(); }
+
+  const { StructuredRuntime } = await import(moduleAt("dist-server/server/structured-runtime.js"));
+  const { createCodexStructuredAdapter } = await import(moduleAt("dist-server/server/codex-structured-ask.js"));
+  const adapter = createCodexStructuredAdapter({
+    backend: {
+      async probe() { return { readiness: runtimeReady("0.156.1", []), diagnostic: { phase: "capability" } }; },
+      prepareLaunch() { return { runtime: {}, assertActive() {}, release() {} }; },
+      async open(_permit, input) { return CodexSession.connect(transport, { cwd: "/scope", codexHome: "/login", profile: "genbi-scoped", args: [], environment: {}, commandEnvironment: {}, configuration: {} }, input.assertScopeActive, input.onEvent, undefined, input.tools); },
+    },
+    async prepare({ scope }) {
+      identity.session_id = scope.sessionId; identity.runtime_generation = "structured-fixture";
+      tools = await createTools(); item = { ...item, tool: tools.definitions[0].name }; completed = { ...item, status: "completed", success: true };
+      return { input: { spec: {}, wrenHome: {}, tools, assertScopeActive: scope.assertCurrent }, async dispose() {} };
+    },
+  });
+  const structured = new StructuredRuntime({ selected: { codex: "codex-app-server", claude: "claude-sandbox-runtime" }, allowLocal: false,
+    localRoute: async () => { throw Error("Local fallback"); }, localSetupFor: () => { throw Error("Setup fallback"); }, adapters: { codex: adapter } });
+  try {
+    const before = queries;
+    const authChoice = { mode: "subscription", provider: "codex" };
+    const captured = { sessionId: "installed-structured", turnId: "turn", assertCurrent() {} };
+    const result = await structured.route({ authChoice, profileSource: "fixture", userProject: "/scope", question: "count orders" }, captured);
+    assert.equal(result.backend, "codex-app-server"); assert.equal(result.finalText, "99 orders"); assert.ok(queries > before);
+    await assert.rejects(structured.setup({ authChoice, prompt: "connect", workspaceRoot: "/scope" }, captured), { code: "unsupported" });
+    assert.equal((await structured.readiness()).claude.ask, false);
+  } finally { await structured.shutdown(); }
 
 }
