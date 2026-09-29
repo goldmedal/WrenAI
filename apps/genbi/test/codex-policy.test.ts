@@ -62,3 +62,17 @@ describe("server-owned named permission policy", () => {
     expect(() => buildCodexSessionPolicy(f.spec, f.runtime, { ...f.wrenHome, dataRoots: ["/"] })).toThrow();
   });
 });
+
+it("direct tools remove all Wren paths and command authority without enabling MCP", () => {
+  const f = fixture();
+  const policy = buildCodexSessionPolicy(f.spec, f.runtime, f.wrenHome, true);
+  expect(policy.configuration).toMatchObject({ mcp_servers: {}, project_root_markers: [],
+    permissions: { "genbi-scoped": { filesystem: { "/": "deny" }, network: { enabled: false } } },
+    features: { shell_tool: false, unified_exec: false, multi_agent: false },
+    shell_environment_policy: { inherit: "none", set: {} } });
+  expect(policy.environment).not.toHaveProperty("WREN_HOME");
+  expect(policy.environment).not.toHaveProperty("WREN_PROJECT_HOME");
+  expect(policy.commandEnvironment).toEqual({});
+  mkdirSync(path.join(f.workspace, ".codex"));
+  expect(() => buildCodexSessionPolicy(f.spec, f.runtime, f.wrenHome, true)).toThrow();
+});

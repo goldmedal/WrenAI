@@ -12,6 +12,8 @@ import type { CodexEvent } from "./codex-events.js";
 import { runtimeNotReady } from "./policy.js";
 import type { RuntimeBackendProbeResult, RuntimeBackendReasonCode } from "./types.js";
 
+import type { CodexSessionTools } from "./codex-direct-tools.js";
+
 type Reason = RuntimeBackendReasonCode<"codex-app-server">;
 export class CodexBackendError extends Error {
   constructor(readonly code: Reason) { super(runtimeNotReady("codex-app-server", "unavailable", code).message); }
@@ -106,6 +108,7 @@ export class CodexAppServerBackend {
   }
 
   async open(permit: CodexLaunchPermit, input: {
+    readonly tools?: CodexSessionTools;
     readonly spec: NativeRuntimeSpec;
     readonly wrenHome: CodexWrenHome;
     /** Existing host-owned binding/generation guard, never a browser callback. */
@@ -120,7 +123,7 @@ export class CodexAppServerBackend {
       if (input.spec.executables.vendor?.digest !== state.vendor.digest || input.spec.executables.vendor?.executable !== state.vendor.executable) throw new CodexBackendError("codex_identity_uncertified");
       try { input.assertScopeActive(); }
       catch { throw new CodexBackendError("runtime_policy_unavailable"); }
-      try { return buildCodexSessionPolicy(input.spec, current, input.wrenHome); }
+      try { return buildCodexSessionPolicy(input.spec, current, input.wrenHome, input.tools !== undefined); }
       catch { throw new CodexBackendError("codex_wren_child_env_invalid"); }
     };
     let spawned = false;
@@ -136,7 +139,7 @@ export class CodexAppServerBackend {
         this.sessions.add(opening);
         const originalClose = opening.close.bind(opening);
         opening.close = async () => { await originalClose(); this.sessions.delete(opening); this.leases.delete(state); };
-      });
+      }, input.tools);
       if (this.stopped) { await session.close(); this.leases.delete(state); throw new CodexBackendError("codex_app_server_unreachable"); }
       return session;
     } catch (error) {

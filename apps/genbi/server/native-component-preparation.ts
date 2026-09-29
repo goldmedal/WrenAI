@@ -39,6 +39,18 @@ export interface NativeComponentBindings {
 
 /** Select only composed eligible roots; direct non-composed vendor entries retain their path. */
 export function prepareNativeComponentHost(irDocument: string, scope: Readonly<Record<string, unknown>>, bindings: NativeComponentBindings): NativeComponentPreparation | undefined {
+  return prepareHost(irDocument, scope, bindings, false);
+}
+
+/** Direct Codex sessions pin one root even when it has no child components. */
+export function prepareDirectCodexComponentHost(irDocument: string, scope: Readonly<Record<string, unknown>>, bindings: NativeComponentBindings): NativeComponentPreparation {
+  if (bindings.identity.vendor !== "codex") throw new Error("Direct session requires Codex");
+  const prepared = prepareHost(irDocument, scope, bindings, true);
+  if (!prepared || Object.keys(prepared.hostRoots).length !== 1) throw new Error("Direct session requires one entry");
+  return prepared;
+}
+
+function prepareHost(irDocument: string, scope: Readonly<Record<string, unknown>>, bindings: NativeComponentBindings, direct: boolean): NativeComponentPreparation | undefined {
   bindings.assertCurrent();
   const identity = freeze(structuredClone(bindings.identity));
   const contexts = freeze(structuredClone(bindings.contexts));
@@ -62,7 +74,7 @@ export function prepareNativeComponentHost(irDocument: string, scope: Readonly<R
   if (!isDeepStrictEqual(scope.binding, identity.binding)) throw new Error("Native component scope binding mismatch");
   const eligible = [...nodes.values()].filter((node) => node.entrypoint !== false && (entry.kind === "scope" || node.verb === entry.verb));
   if (entry.kind === "agent" && eligible.length !== 1) throw new Error("Unknown or ambiguous pinned entry");
-  const roots = eligible.filter((node) => z.array(z.object({ component_calls: z.array(z.unknown()).optional() }).passthrough()).parse(node.llm_calls)
+  const roots = eligible.filter((node) => direct || z.array(z.object({ component_calls: z.array(z.unknown()).optional() }).passthrough()).parse(node.llm_calls)
     .some((step) => (step.component_calls?.length ?? 0) > 0));
   if (!roots.length) return undefined;
   const needed = new Set<string>();

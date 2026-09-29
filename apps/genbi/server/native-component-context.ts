@@ -6,7 +6,8 @@ import { z } from "zod";
 import { generatePreparedContext } from "../harness/compile/context-loader.js";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
 import { captureWrenAccessIdentity } from "../harness/components/wren-access.js";
-import { prepareNativeComponentHost } from "./native-component-preparation.js";
+import { prepareCodexDirectTools, type CodexSessionTools } from "./runtime-host/codex-direct-tools.js";
+import { prepareNativeComponentHost, type NativeComponentBindings } from "./native-component-preparation.js";
 import { createNativeComponentRuntimeBindings, type NativeComponentRuntimeOptions } from "./native-component-runtime.js";
 import type { NativeComponentPreparation } from "./native-components.js";
 
@@ -22,8 +23,25 @@ export interface NativeComponentContextOptions extends Omit<NativeComponentRunti
 export async function prepareCapturedNativeComponentHost(
   irDocument: string, scope: Readonly<Record<string, unknown>>, options: NativeComponentContextOptions,
 ): Promise<NativeComponentPreparation | undefined> {
-  const identity = structuredClone(options.identity);
   const capturedScope = structuredClone(scope);
+  const bindings = await captureBindings(irDocument, options);
+  return prepareNativeComponentHost(irDocument, capturedScope, bindings);
+}
+
+/** Direct-session variant shares the same captured project/credential provenance. */
+export async function prepareCapturedCodexDirectTools(irDocument: string, scope: Readonly<Record<string, unknown>>,
+  options: NativeComponentContextOptions & { readonly producerBinary: string; readonly expiresAt: number },
+): Promise<CodexSessionTools> {
+  if (options.vendor.vendor !== "codex" || options.identity.vendor !== "codex") throw new Error("Direct session requires Codex");
+  const capturedScope = structuredClone(scope);
+  const accountEmail = options.vendor.accountEmail;
+  const bindings = await captureBindings(irDocument, options);
+  return prepareCodexDirectTools({ irDocument, scope: capturedScope, bindings, producerBinary: options.producerBinary,
+    accountEmail, expiresAt: options.expiresAt, signal: options.signal });
+}
+
+async function captureBindings(irDocument: string, options: NativeComponentContextOptions): Promise<NativeComponentBindings> {
+  const identity = structuredClone(options.identity);
   const project = path.resolve(options.project);
   const signal = options.signal;
   const currentIdentity = options.currentIdentity.bind(options);
@@ -59,6 +77,6 @@ export async function prepareCapturedNativeComponentHost(
     }));
     const bindings = createNativeComponentRuntimeBindings({ ...options, identity, contexts, currentIdentity, assertCurrent: check,
       wren: { executable: options.wrenBinary, project, fingerprint, identity: accessIdentity } });
-    return prepareNativeComponentHost(irDocument, capturedScope, bindings);
+    return bindings;
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }
