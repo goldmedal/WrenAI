@@ -21,7 +21,7 @@ export type CodexManifestPurpose = "analysis" | "setup" | "context_enrichment";
 
 export function codexAnalysisToolArgs(component: CodexAskComponent): string[] {
   const bindings = component === "answer_query"
-    ? ["resolve_intent=get_context", "generate_sql=run_sql", "repair_sql=run_sql"]
+    ? ["generate_sql=run_sql", "repair_sql=run_sql"]
     : ["plan_dashboard=get_context", "compose_layout=run_sql"];
   const required = component === "answer_query"
     ? ["generate_sql", "repair_sql"]
@@ -160,7 +160,7 @@ async function describeComposedCodexManifest(cli: ResolvedCli, irPath: string, i
       // by the answer component; the dashboard only receives its call alias.
       return [id, { transport: "orchestrate", models, context: JSON.stringify(prepared.snapshot), mcp: {
         name: "wren", command: process.execPath,
-        toolsByStep: id === "answer_query" ? { resolve_intent: ["get_context"], generate_sql: ["run_sql"], repair_sql: ["run_sql"] }
+        toolsByStep: id === "answer_query" ? { resolve_intent: [], generate_sql: ["run_sql"], repair_sql: ["run_sql"] }
           : { plan_dashboard: [], compose_layout: [] },
         requireTool: id === "answer_query" ? ["generate_sql", "repair_sql"] : [],
       } }];

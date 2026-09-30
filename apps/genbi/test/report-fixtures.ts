@@ -26,14 +26,19 @@ interface IrDocument {
  * directory, the way `composeUserProfile` rebinds a user's project.
  */
 export async function loadReportPlan(project?: string): Promise<{ plan: ExecutionPlan; ir: IrDocument; warbleBin: string }> {
+  return loadCompiledPlan(REPORT_IR_GOLDEN, project);
+}
+
+/** `loadReportPlan` for any committed IR golden, e.g. `genbi-default`'s. */
+export async function loadCompiledPlan(irGolden: string, project?: string): Promise<{ plan: ExecutionPlan; ir: IrDocument; warbleBin: string }> {
   const warbleBin = await resolveWarbleBinary();
   const work = await mkdtemp(path.join(os.tmpdir(), "genbi-report-plan-"));
   try {
     const hostPath = path.join(work, "component-host.json");
     await writeFile(hostPath, JSON.stringify(VERCEL_HOST_CONTRACT));
-    await runWarble(warbleBin, ["dispatch", "--target", "vercel", "--provider", DEFAULT_WREN_PROVIDER_PATH, "--host-contract", hostPath, REPORT_IR_GOLDEN, "--out", path.join(work, "bundle")]);
+    await runWarble(warbleBin, ["dispatch", "--target", "vercel", "--provider", DEFAULT_WREN_PROVIDER_PATH, "--host-contract", hostPath, irGolden, "--out", path.join(work, "bundle")]);
     const bundle = JSON.parse(await readFile(path.join(work, "bundle", "bundle.json"), "utf8")) as { bundle_sha256: string };
-    const ir = JSON.parse(await readFile(REPORT_IR_GOLDEN, "utf8")) as IrDocument;
+    const ir = JSON.parse(await readFile(irGolden, "utf8")) as IrDocument;
     const plan = readExecutionPlan(JSON.stringify(bundle), { digest: bundle.bundle_sha256, inputIrDigest: planDigest(ir),
       declarations: Object.fromEntries(ir.components.map((node) => [node.id, node])), contextBinding: ir.context_binding });
     if (project === undefined) return { plan, ir, warbleBin };

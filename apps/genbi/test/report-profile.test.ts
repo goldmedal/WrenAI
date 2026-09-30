@@ -4,7 +4,11 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { runWarble } from "../harness/compile/pipeline.js";
 import { ComponentRunner, type ComponentBinding, type RunnerHost, type StepRun } from "../harness/components/runner.js";
-import { loadReportPlan, REPORT_IR_GOLDEN, REPORT_PROFILE } from "./report-fixtures.js";
+import { VERCEL_HOST_CONTRACT } from "../harness/components/plan.js";
+import { loadCompiledPlan, loadReportPlan, REPORT_IR_GOLDEN, REPORT_PROFILE } from "./report-fixtures.js";
+
+const DEFAULT_IR_GOLDEN = path.join(REPORT_PROFILE, "..", "genbi-default", "ir.golden.json");
+const DATA_TOOLS = Object.keys(VERCEL_HOST_CONTRACT.tool_authority);
 
 /**
  * The committed report profile against the released Hub. The pinned
@@ -42,7 +46,8 @@ describe("genbi-report profile: released Hub, committed golden, caller SQL denia
     const callee = plan.components["answer_batch"]!;
     expect(caller.steps.map((step) => [step.name, step.tools.map((tool) => tool.name), step.calls.map((edge) => edge.alias)])).toEqual([
       ["plan_layout", [], ["ask"]], ["narrate", [], []]]);
-    for (const step of callee.steps) expect(step.tools.map((tool) => tool.name)).toEqual(["query"]);
+    expect(callee.steps.map((step) => [step.name, step.tools.map((tool) => tool.name)])).toEqual([
+      ["resolve_intent", []], ["generate_sql", ["query"]], ["repair_sql", ["query"]]]);
     expect(callee.steps.map((step) => step.name)).toEqual(["resolve_intent", "generate_sql", "repair_sql"]);
     // At run time the caller's steps are handed no query function at all, and the callee's are.
     const executed: string[] = [];
@@ -70,7 +75,21 @@ describe("genbi-report profile: released Hub, committed golden, caller SQL denia
     };
     const result = await new ComponentRunner(plan, host).run("plan_report", { request: "report" });
     expect(result.status).toBe("ok");
-    expect(surfaces).toEqual({ plan_layout: ["ask"], narrate: [], resolve_intent: ["query"], generate_sql: ["query"] });
+    expect(surfaces).toEqual({ plan_layout: ["ask"], narrate: [], resolve_intent: [], generate_sql: ["query"] });
     expect(executed).toEqual(["SELECT 1 AS n"]);
+  });
+
+  it.each([
+    { profile: "genbi-report", irGolden: REPORT_IR_GOLDEN, componentId: "answer_batch" },
+    { profile: "genbi-default", irGolden: DEFAULT_IR_GOLDEN, componentId: "answer_query" },
+  ])("$profile $componentId: the intent step is granted no data tool while both SQL steps keep query", async ({ irGolden, componentId }) => {
+    const { plan } = await loadCompiledPlan(irGolden);
+    expect(DATA_TOOLS).toEqual(["query", "semantic_introspect"]);
+    const steps = Object.fromEntries(plan.components[componentId]!.steps.map((step) => [step.name, step.tools.map((tool) => tool.name)]));
+    expect(Object.keys(steps)).toEqual(["resolve_intent", "generate_sql", "repair_sql"]);
+    expect(steps["resolve_intent"]!.filter((name) => DATA_TOOLS.includes(name))).toEqual([]);
+    expect(steps["resolve_intent"]).toEqual([]);
+    expect(steps["generate_sql"]).toContain("query");
+    expect(steps["repair_sql"]).toContain("query");
   });
 });

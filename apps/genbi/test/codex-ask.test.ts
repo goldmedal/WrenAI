@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentEvent } from "../harness/events/index.js";
 import { buildCodexAskArgs, runCodexAskDefault } from "../harness/route/codex-ask.js";
+import { CodexAskEventMapper } from "../harness/route/codex-ask-events.js";
 import type { CodexAskOptions } from "../harness/route/types.js";
 
 const FIXTURE = path.join(import.meta.dirname, "fixtures", "fake-codex-ask-dispatcher.mjs");
@@ -78,7 +79,7 @@ describe("Codex Ask CLI contract", () => {
       "--server", "wren", "--server-command", "/opt/wren",
       "--server-arg", "serve", "--server-arg", "mcp", "--server-arg=--project",
       "--server-arg", "/tmp/project", "--server-arg=--quiet",
-      "--transport", "orchestrate", "--step-tool", "resolve_intent=get_context",
+      "--transport", "orchestrate",
       "--step-tool", "generate_sql=run_sql", "--step-tool", "repair_sql=run_sql",
       "--require-tool", "generate_sql", "--require-tool", "repair_sql",
       "--timeout", "123", "--stream-json",
@@ -277,5 +278,21 @@ describe("Codex Ask CLI contract", () => {
     const cancelled = runCodexAskDefault({ ...options("hang"), signal: controller.signal });
     controller.abort();
     await expect(cancelled).rejects.toThrow(/cancelled/);
+  });
+});
+
+describe("Codex Ask intent step has no Wren MCP surface", () => {
+  it.each([["get_context"], [null]])("rejects a resolve_intent artifact carrying tool %s and emits no tool call", (tool) => {
+    const mapper = new CodexAskEventMapper({ orchestrator: "driver", cheap: "cheap-model", strong: "strong-model" }, "answer_query");
+    const emitted = [
+      { t: "session_started", session: { target: "codex:local", threadId: "parent" } },
+      { t: "turn_started", turn: { threadId: "parent", turnId: "turn", status: "in_progress" } },
+      { t: "agent_started", parentThreadId: "parent", parentTurnId: "turn", step: "resolve_intent", agentRole: "warble_resolve_intent", agentThreadId: "resolve", model: "cheap-model" },
+    ].flatMap((event) => mapper.nextLine(JSON.stringify(event)));
+    expect(emitted.map((event) => event.kind)).toEqual(["step.start"]);
+    const artifact = { t: "artifact", reference: { parentThreadId: "parent", parentTurnId: "turn", step: "resolve_intent", agentRole: "warble_resolve_intent", agentThreadId: "resolve", itemId: "intent-1", server: "wren", tool, ok: true } };
+    let mapped: unknown;
+    expect(() => { mapped = mapper.nextLine(JSON.stringify(artifact)); }).toThrow("warble-codex-local Ask artifact attribution did not match the allowed Wren MCP surface");
+    expect(mapped).toBeUndefined();
   });
 });

@@ -358,7 +358,7 @@ async function runCodexLocalContractProbe({ bin, analysisIr, setupIr, enrichIr, 
       const args = ["manifest", ir, "--server-command", process.execPath, ...(component ? ["--component", component] : []), ...extra];
       if (label === "analysis") {
         const bindings = component === "answer_query"
-          ? ["resolve_intent=get_context", "generate_sql=run_sql", "repair_sql=run_sql"]
+          ? ["generate_sql=run_sql", "repair_sql=run_sql"]
           : ["plan_dashboard=get_context", "compose_layout=run_sql"];
         const required = component === "answer_query" ? ["generate_sql", "repair_sql"] : ["plan_dashboard", "compose_layout"];
         args.push(...bindings.flatMap((binding) => ["--step-tool", binding]), ...required.flatMap((step) => ["--require-tool", step]));
