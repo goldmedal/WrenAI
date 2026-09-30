@@ -2,7 +2,7 @@
   "kind": "installed_remote_terminal_candidate_acceptance",
   "date": "2026-09-30",
   "transport": "remote-tui-v1",
-  "candidateTarballSha256": "9f3e3b45966cf48ca4dc6a104c48f96b198cfe21b492a7904357c836acdbb859",
+  "candidateTarballSha256": "1b3d1cf4535fcc185e1346cbc8bbfbca0727b0b2d8f31531e25442ea4d40352b",
   "admission": "Unmodified installed package using packaged terminal certification; no admission or loader injection.",
   "queryAndLifecycle": {
     "ok": true,
@@ -15,15 +15,16 @@
     "followup": {
       "average": 16.89
     },
+    "inFlightSteering": true,
     "resize": true,
     "reconnect": true,
     "stop": true
   },
-  "queryEvidenceSha256": "a95a1541639211f8b984704e9920768eb62d726ad53b4593e9f2e7df246b76f9",
+  "queryEvidenceSha256": "4b449e61fe47b2d97b7d5b1d7130cd62ded7caff8b612f73acb61d533d0ec99a",
   "cancelDuringToolExecution": true,
   "cancelRetainsSession": true,
   "cancelEvidenceSha256": "e860e323cb74b680b281d005c4b5006dbb4fc16a6337be12f2d19c3448123fe7",
-  "browser": "Official CLI banner, query, follow-up and reconnect verified in browser. Final cancellation and lifecycle checks repeated through the installed terminal WebSocket.",
+  "browser": "User manually accepted prior 0.15.1 candidate. Current 0.15.2 installed official TUI exercised through terminal WebSocket.",
   "databaseUnchanged": true,
   "databaseSha256": "bc04d3057e3875663046c917295186ebaebdea498dc046bbe311ad9dcdba2d30",
   "packedOfflineAcceptanceSha256": "cdbffeb8dd006b40a4b596422e6ad273c44d547053f04f6ccbe4165231ab24a4",
@@ -35,6 +36,11 @@
     "Claude",
     "provider resume"
   ],
-  "querySessionEvidenceSha256": "2a37bdeb32b421847d72930bc97cce1799d83ff293358b9c48910143a83f2d46",
-  "cancelEvidenceScope": "Tool-active cancellation tested on installed candidate with diagnostic admission harness; exact account/model/scope checks retained. Final terminal lifecycle also verified without injection."
+  "querySessionEvidenceSha256": "a4233e6c6726b185ca2f9f0355619b2bc848e8a4ae87160ed99c37306f4de74e",
+  "cancelEvidenceScope": "Tool-active cancellation on prior 0.15.1 candidate; cancellation implementation unchanged. Current 0.15.2 official-CLI offline probe renews cancellation and cleanup coverage.",
+  "dependencies": {
+    "warble": "0.15.2",
+    "ir": "0.8.0",
+    "context-loader": "0.1.1"
+  }
 }

@@ -1,6 +1,6 @@
 {
   "kind": "unmodified_installed_acceptance",
-  "completedAt": "2026-09-30T03:15:36.576705+00:00",
+  "completedAt": "2026-09-30T08:34:27.764627+00:00",
   "platform": "darwin-arm64",
   "vendorVersion": "0.156.1",
   "packageVersion": "0.0.4",
@@ -9,8 +9,8 @@
   "candidateAdmissionInjection": false,
   "freshNpmInstall": true,
   "freshBffDatabase": true,
-  "installedPackageFilesMatched": 401,
-  "tarballSha256": "9b12634fc5953560172ef48185b3345e94146c7a913e6c8db54efb6668e80d8d",
+  "installedPackageFilesMatched": 407,
+  "tarballSha256": "1b3d1cf4535fcc185e1346cbc8bbfbca0727b0b2d8f31531e25442ea4d40352b",
   "ask": {
     "passed": true,
     "expected": {
@@ -18,49 +18,77 @@
       "revenue": 1672
     },
     "stdoutSha256": "c16eda3b19dbe0fea799380f88600e58af278dac4c3ac8e732b70c56aa65ac7c",
-    "privateSessionEvidenceSha256": "1395f047234a5687f224caf5a1bfc51d4b39f1d27e4ab5ec0dad95f045dbb552"
+    "privateSessionEvidenceSha256": "bdd5bae25672c2c54ccc7c808d93cc96444ffa000ccb27671a074ff529370c94"
   },
   "native": {
     "ok": true,
+    "officialCli": "0.156.1",
     "model": "gpt-5.5",
-    "query": true,
+    "query": {
+      "order_count": 99,
+      "revenue": 1672
+    },
+    "followup": {
+      "average": 16.89
+    },
+    "inFlightSteering": true,
+    "resize": true,
     "reconnect": true,
-    "stop": true,
-    "events": 30,
-    "replayed": 31,
-    "stdoutSha256": "5995071510e60595337e3eefbcde441adfbb2f2a6a3421e90d5b6014ead112e2",
-    "privateEventEvidenceSha256": "e7fd88e0d8f26e4039f015380648cd0a16af6d53c41cf48abdb0289a43bcf07d"
+    "stop": true
   },
   "denials": {
-    "modelCalls": 0,
-    "unknownModelDenied": true,
-    "nativeDashboardDenied": true,
-    "status": 409,
-    "reason": "native session launch failed"
+    "scope": "Prior exact identity/scope denials remain covered by current deterministic suite"
   },
   "databaseUnchanged": true,
   "ownedRuntimeChildrenAfterStop": 0,
   "taskBffStopped": true,
   "sourceVerification": {
     "fullSuite": {
-      "passed": 2455,
+      "passed": 2511,
       "expectedFail": 1,
-      "skipped": 6,
-      "phase": "before final table persistence and scope guards"
-    },
-    "finalAffectedSuite": {
-      "passed": 314,
-      "files": 17,
-      "stdoutSha256": "c33228acb81e81a253443f32ecfbb3ecb551d92ea46ee16ff0a1f3854c37ca07"
+      "skipped": 18
     },
     "typecheck": "passed",
     "build": "passed",
-    "independentReview": "approved; read-only review, owner ran tests",
-    "finalPackedOfflineAcceptance": {
-      "passed": true,
-      "runner": "scripts/installed-package-acceptance.mjs",
-      "stdoutSha256": "cdbffeb8dd006b40a4b596422e6ad273c44d547053f04f6ccbe4165231ab24a4"
+    "vendorContracts": "passed",
+    "packedOfflineAcceptance": "passed",
+    "finalFullSuite": {
+      "passed": 2512,
+      "expectedFail": 1,
+      "skipped": 18,
+      "outputSha256": "d382569bf9fec9a8a7b409d8984cde07cd6cb5983019bcf7603f2821be5a799d"
     }
   },
-  "authorization": "Local approval and commit only; no push, release, merge or default activation."
+  "authorization": "Local approval and commit only; no push, release, merge or default activation.",
+  "dependencies": {
+    "warble": "0.15.2",
+    "ir": "0.8.0",
+    "context-loader": "0.1.1"
+  },
+  "artifactScope": "Unmodified installed 0.15.2 acceptance candidate before evidence-only registry hash refresh. Execution code unchanged by refresh.",
+  "refreshedRegistryPackage": {
+    "tarballSha256": "5d18f6a7cc56f62fc2bfc25048f51422cc5431700f37214e3302bd34b7f35e89",
+    "filesMatched": 407,
+    "startupAndStop": {
+      "ok": true,
+      "officialCli": "0.156.1",
+      "modelCalls": 0,
+      "start": true,
+      "stop": true
+    },
+    "offlineTerminal": {
+      "officialCli": true,
+      "modelCalls": 0,
+      "fixtureTurns": 5,
+      "steer": true,
+      "resize": true,
+      "reconnect": true,
+      "cancel": true,
+      "protectedReadDenied": true,
+      "outsideWriteDenied": true,
+      "networkDenied": true,
+      "cleanup": true
+    },
+    "independentReview": "No actionable findings; evidence hashes and dependency alignment verified."
+  }
 }

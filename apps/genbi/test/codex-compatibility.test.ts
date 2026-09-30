@@ -16,6 +16,15 @@ const observed: CodexObservedIdentity = {
   protocolSha256: row.protocolSha256, contracts: row.contracts,
 };
 describe("Codex exact certification", () => {
+  it("keeps driver and terminal acceptance aligned with the packaged component dependencies", () => {
+    const dependencies = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies;
+    for (const name of ["candidate-acceptance.json", "terminal-candidate-acceptance.json"]) {
+      const accepted = JSON.parse(readFileSync(new URL(`../certification/codex-0.156.1-darwin-arm64/${name}`, import.meta.url), "utf8")).dependencies;
+      for (const pkg of ["@warble/cli", "@warble/codex-local", "@warble/claude-agent-sdk"]) expect(accepted.warble).toBe(dependencies[pkg]);
+      expect(accepted.ir).toBe(dependencies["@warble/ir-spec"]);
+      expect(accepted["context-loader"]).toBe(dependencies["@wrenai/context-loader"]);
+    }
+  });
   it("requires separate terminal evidence in addition to driver certification", () => {
     const check = (value: unknown, model = "gpt-5.5", entry = "answer_query") => isCodexTerminalCertified(row.source, row.executableSha256, [model], entry, [value]);
     expect(check(row)).toBe(false);

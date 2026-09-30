@@ -47,12 +47,8 @@ export const CODEX_CERTIFIED_ROWS: readonly CodexCertification[] = Object.freeze
   "protocolSha256": "655adafa0ccea3d84f30bcbdc74e201fa14511c51e08d0cd024a0280daa8bc60",
   "executionScope": { "models": ["gpt-5.5"], "entries": ["answer_query"] },
   "contracts": [...CODEX_REQUIRED_CONTRACTS],
-  "terminal": {"transport": "remote-tui-v1", "deterministicProbesSha256": "c9d87247cc5c747d95cf1f6f6c75078d0ec465d946bdcca0c514d332418abbdd", "packedAcceptanceSha256": "f925e75e134a9fbe84d89873a28c02590d93d0219ea70b3a74524c44aa14b476", "releaseApprovalSha256": "d79c37c2e6c645c91dd6372d118ab811c1c2981a72486acd28b9d09a432521eb"},
-  "evidence": {
-    "deterministicProbesSha256": "b9e76d5f6f3ddc68dcaf3c78a080d246d3f838f88158a06311876340f412378c",
-    "packedAcceptanceSha256": "06969b1568c79b27751c992798a36a115bc905619cb1be5c21d0ea07d324a95d",
-    "releaseApprovalSha256": "0a791a18e6a4a10218180a36c7096b029a8696ba5df492b8d6410f3076344b9d"
-  }
+  "terminal": {"transport": "remote-tui-v1", "deterministicProbesSha256": "9abc4615a9a6020d8d0a2efbeaf36306a48cf3675020e3d43039c6b3505be60f", "packedAcceptanceSha256": "e3a8080db623e4695fba916c1ba4b0da53559ada529de13ba594da7ab5350f71", "releaseApprovalSha256": "322145f63432c3c2751877f30bfc059e7af14af93818c176d50f99182546b0aa"},
+  "evidence": {"deterministicProbesSha256": "5ad42e18f831e1688bc76665224c627b3cb25919383717ade7d7107548e1ce90", "packedAcceptanceSha256": "d15692acec5557e41e5b4eed5ced697d5fed5c2aaf8f0c231ac7afca503f7ca0", "releaseApprovalSha256": "c9eb86e98e18fd5ebe6f3f21865facda6bf8b7beb4f2c6f200db9611dbecf88f"}
 }
 ]);
 export interface CodexObservedIdentity {

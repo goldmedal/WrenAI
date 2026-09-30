@@ -13,8 +13,13 @@
   "entries": [
     "answer_query"
   ],
-  "deterministicProbesSha256": "c9d87247cc5c747d95cf1f6f6c75078d0ec465d946bdcca0c514d332418abbdd",
-  "packedAcceptanceSha256": "f925e75e134a9fbe84d89873a28c02590d93d0219ea70b3a74524c44aa14b476",
+  "deterministicProbesSha256": "9abc4615a9a6020d8d0a2efbeaf36306a48cf3675020e3d43039c6b3505be60f",
+  "packedAcceptanceSha256": "e3a8080db623e4695fba916c1ba4b0da53559ada529de13ba594da7ab5350f71",
   "scope": "Local terminal registry and installed validation. No publication, merge, release or deployment.",
-  "nextGate": "Final package startup, pinned steering and offline regression validation. Query/follow-up/reconnect/stop passed on unmodified candidate."
+  "nextGate": "Verify refreshed packaged registry startup; query, steering, follow-up, reconnect and stop passed on the same 0.15.2 execution code.",
+  "dependencies": {
+    "warble": "0.15.2",
+    "ir": "0.8.0",
+    "context-loader": "0.1.1"
+  }
 }

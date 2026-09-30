@@ -27,10 +27,10 @@
     "no-tool terminal tamper rejection"
   ],
   "unitSuite": {
-    "passed": 2455,
+    "passed": 2511,
     "expectedFail": 1,
-    "skipped": 6,
-    "outputSha256": "c981fe026354851fd35cd6f6d99921e86f83f2fc0d54967ec6b2833b4281db65"
+    "skipped": 18,
+    "outputSha256": "7a1910eccb094ead143b13e0a039f886344ff94fdbc01b1d31d85c79e78a59e4"
   },
   "tablePersistenceRegression": {
     "passed": 52,
@@ -43,6 +43,7 @@
     "fullIntegrityChecksDuringStream": 0,
     "totalFullIntegrityChecks": 4,
     "liveChecks": 1007,
-    "totalMs": 2952
+    "totalMs": 2952,
+    "scope": "Unchanged integrity implementation; recorded before component dependency refresh."
   }
 }

@@ -7,6 +7,7 @@ change default runtime selection, or authorize deployment.
 - Platform: macOS arm64.
 - Codex CLI/app-server: 0.156.1; exact source and binary SHA256 in `local-approval.json`.
 - Managed Wren: 0.13.0+genbi.1, approved manifest recorded in `candidate-acceptance.json`.
+- Component dependencies: Warble 0.15.2, IR 0.8.0 and context-loader 0.1.1.
 - Authenticated acceptance: gpt-5.5, independent login, Jaffle sample,
   Structured Ask and Native Analysis `answer_query`; expected 99 orders and
   revenue 1672. Native reconnect/replay, explicit stop and owned cleanup passed.
@@ -19,10 +20,11 @@ change default runtime selection, or authorize deployment.
   such ancestry and a separate private login; no credentials are copied.
 
 `deterministic.json`, `candidate-acceptance.json` and `local-approval.json` are
-hashed verbatim by the registry. The candidate run used a private admission
-harness while retaining exact vendor and managed runtime checks. That harness
-is not shipped. Approval is followed by unmodified installed acceptance with
-the packaged row. [The final installed report](installed-acceptance.json) records
+hashed verbatim by the registry. The refreshed candidate used the unmodified
+installed package with its existing exact vendor and managed runtime checks.
+The evidence-only registry refresh does not change execution code; its packaged
+startup is checked separately to avoid circular tarball/evidence hashes.
+[The installed report](installed-acceptance.json) records
 successful Ask, Native query, reconnect, stop, unchanged data and negative scope
 checks, without creating self-referential evidence hashes.
 

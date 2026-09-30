@@ -20,12 +20,11 @@
   "probeOutputSha256": "cf8dbcf5a606e06d2a29f62f8c064bfec726e57b92c0865953f7e4737831e5b1",
   "vendorContractsSha256": "bbdf1119374e3b8f3f3de61641f75b076d2d6bec0f2969b10a29a4c7d41dcd65",
   "fullSuite": {
-    "passed": 2504,
+    "passed": 2511,
     "expectedFail": 1,
-    "skipped": 18,
-    "stage": "Before final stale steering acknowledgement guard"
+    "skipped": 18
   },
-  "fullSuiteOutputSha256": "858c8dd01bfa7333402d0c19799d451585182e33479544c0254768655637cb10",
+  "fullSuiteOutputSha256": "7a1910eccb094ead143b13e0a039f886344ff94fdbc01b1d31d85c79e78a59e4",
   "security": [
     "credential-free renderer home",
     "vendor sandbox denies protected files and network",

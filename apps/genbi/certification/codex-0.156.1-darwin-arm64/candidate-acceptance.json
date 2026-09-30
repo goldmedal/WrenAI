@@ -2,15 +2,15 @@
   "kind": "installed_candidate_acceptance",
   "date": "2026-09-30",
   "packageVersion": "0.0.4",
-  "candidateTarballSha256": "825fe2b9ce95c414e4f817c00b7bb46089fa7ea46e532e6331603055e6f8af3b",
+  "candidateTarballSha256": "1b3d1cf4535fcc185e1346cbc8bbfbca0727b0b2d8f31531e25442ea4d40352b",
   "offlineRunner": "scripts/installed-package-acceptance.mjs",
   "offlineOutputSha256": "cdbffeb8dd006b40a4b596422e6ad273c44d547053f04f6ccbe4165231ab24a4",
-  "admission": "private test harness only; exact vendor source/version/digest and managed runtime checks retained; no production registry override ships",
+  "admission": "Unmodified installed package; packaged identity checks retained and no admission injection.",
   "vendorVersion": "0.156.1",
   "model": "gpt-5.5",
   "managedRuntimeManifestSha256": "d1ad640f3569d9cec3102110c18627180e22793ad644418ed9a93b475f06e33a",
   "dependencies": {
-    "warble": "0.15.1",
+    "warble": "0.15.2",
     "ir": "0.8.0",
     "context-loader": "0.1.1"
   },
@@ -24,18 +24,25 @@
   "ask": {
     "passed": true,
     "outputSha256": "c16eda3b19dbe0fea799380f88600e58af278dac4c3ac8e732b70c56aa65ac7c",
-    "note": "Passed before the subsequent native-only table-row persistence repair."
+    "sessionEvidenceSha256": "bdd5bae25672c2c54ccc7c808d93cc96444ffa000ccb27671a074ff529370c94"
   },
   "native": {
     "ok": true,
+    "officialCli": "0.156.1",
     "model": "gpt-5.5",
-    "query": true,
+    "query": {
+      "order_count": 99,
+      "revenue": 1672
+    },
+    "followup": {
+      "average": 16.89
+    },
+    "inFlightSteering": true,
+    "resize": true,
     "reconnect": true,
-    "stop": true,
-    "events": 30,
-    "replayed": 31
+    "stop": true
   },
-  "nativeOutputSha256": "5995071510e60595337e3eefbcde441adfbb2f2a6a3421e90d5b6014ead112e2",
+  "nativeOutputSha256": "fc924d423f09045f2e7a83403feb1a0622459cbf81c2cb7a9b76fff34666605a",
   "scope": [
     "Structured Ask answer_query",
     "Native Analysis answer_query",

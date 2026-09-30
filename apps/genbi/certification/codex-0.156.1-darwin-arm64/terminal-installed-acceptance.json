@@ -1,6 +1,6 @@
 {
   "kind": "unmodified_installed_remote_terminal_acceptance",
-  "completedAt": "2026-09-30T08:12:30.930593+00:00",
+  "completedAt": "2026-09-30T08:34:27.764627+00:00",
   "transport": "remote-tui-v1",
   "platform": "darwin-arm64",
   "vendorVersion": "0.156.1",
@@ -11,7 +11,7 @@
   "freshNpmInstall": true,
   "isolatedBffDatabase": true,
   "filesMatched": 407,
-  "tarballSha256": "a02f035df87e7e298594b610f77a9ca95bbb5b7f7921205d4de55c0e65734511",
+  "tarballSha256": "1b3d1cf4535fcc185e1346cbc8bbfbca0727b0b2d8f31531e25442ea4d40352b",
   "queryAndLifecycle": {
     "ok": true,
     "officialCli": "0.156.1",
@@ -28,7 +28,7 @@
     "reconnect": true,
     "stop": true
   },
-  "queryEvidenceSha256": "a9374e344e2e011acf7d2e34b0cac76c70566f54ac62fb0800c927b121bbd1c0",
+  "queryEvidenceSha256": "4b449e61fe47b2d97b7d5b1d7130cd62ded7caff8b612f73acb61d533d0ec99a",
   "queryOutputSha256": "fc924d423f09045f2e7a83403feb1a0622459cbf81c2cb7a9b76fff34666605a",
   "deterministicTerminalProbe": {
     "officialCli": true,
@@ -50,22 +50,20 @@
   "independentReview": "No outstanding findings after race, separate transport certification, cancellation and stale-steer acknowledgement fixes.",
   "sourceVerification": {
     "fullSuite": {
-      "passed": 2504,
+      "passed": 2511,
       "expectedFail": 1,
       "skipped": 18
-    },
-    "finalSteerAndCancellationSuite": {
-      "passed": 110,
-      "files": 3
-    },
-    "finalCertificationSuite": {
-      "passed": 20,
-      "files": 1
     },
     "typecheck": "passed",
     "build": "passed",
     "vendorContracts": "passed",
-    "packedOfflineAcceptance": "passed"
+    "packedOfflineAcceptance": "passed",
+    "finalFullSuite": {
+      "passed": 2512,
+      "expectedFail": 1,
+      "skipped": 18,
+      "outputSha256": "d382569bf9fec9a8a7b409d8984cde07cd6cb5983019bcf7603f2821be5a799d"
+    }
   },
   "scope": "Local installed acceptance and local approval only; no package publication, merge or deployment.",
   "limitations": [
@@ -73,5 +71,37 @@
     "gpt-5.5 and answer_query only",
     "No shell/config/auth mutations or cross-session commands",
     "Provider resume, dashboard, Setup and Claude are not certified by this record"
-  ]
+  ],
+  "dependencies": {
+    "warble": "0.15.2",
+    "ir": "0.8.0",
+    "context-loader": "0.1.1"
+  },
+  "installedPackageFilesMatched": 407,
+  "artifactScope": "Unmodified installed 0.15.2 acceptance candidate before evidence-only registry hash refresh. Execution code unchanged by refresh.",
+  "refreshedRegistryPackage": {
+    "tarballSha256": "5d18f6a7cc56f62fc2bfc25048f51422cc5431700f37214e3302bd34b7f35e89",
+    "filesMatched": 407,
+    "startupAndStop": {
+      "ok": true,
+      "officialCli": "0.156.1",
+      "modelCalls": 0,
+      "start": true,
+      "stop": true
+    },
+    "offlineTerminal": {
+      "officialCli": true,
+      "modelCalls": 0,
+      "fixtureTurns": 5,
+      "steer": true,
+      "resize": true,
+      "reconnect": true,
+      "cancel": true,
+      "protectedReadDenied": true,
+      "outsideWriteDenied": true,
+      "networkDenied": true,
+      "cleanup": true
+    },
+    "independentReview": "No actionable findings; evidence hashes and dependency alignment verified."
+  }
 }

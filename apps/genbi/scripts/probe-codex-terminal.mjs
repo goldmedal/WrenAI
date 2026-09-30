@@ -52,14 +52,17 @@ try {
  let unlisten=terminal.onData(s=>{output+=s;});
  await until(()=>text().includes('OpenAI Codex'),'official CLI banner');
  terminal.resize(120,40);
- const ask=async(q,n)=>{terminal.write(q);await delay(300);terminal.write('\r');await until(()=>text().includes(`OFFLINE_REPLY_${n}`),'rendered fixture reply');};
+ // Bracketed paste gives the official CLI an explicit end-of-input marker.
+ // A fixed delay can leave Enter inside the CLI paste buffer on loaded CI hosts.
+ const submit=async(q)=>{const start=output.length;terminal.write('\x1b[200~'+q+'\x1b[201~');await until(()=>output.slice(start).includes(q),'rendered input');terminal.write('\r');};
+ const ask=async(q,n)=>{await submit(q);await until(()=>text().includes(`OFFLINE_REPLY_${n}`),'rendered fixture reply');};
  await ask('first',1);
  terminal.detach();unlisten();assert(terminal.claim(capability));
  let replay='';unlisten=terminal.onData(s=>{replay+=s;output+=s;});assert(replay.includes('OFFLINE_REPLY_1'));
  await ask('follow up',2);
- terminal.write('wait');await delay(300);terminal.write('\r');await until(()=>calls===3,'third fixture turn');terminal.write('early followup');await delay(300);terminal.write('\r');await until(()=>steers===1,'in-flight text steer');terminal.write('\x1b');
+ await submit('wait');await until(()=>calls===3,'third fixture turn');await submit('early followup');await until(()=>steers===1,'in-flight text steer');terminal.write('\x1b');
  await until(()=>interruptions===1 && text().includes('OFFLINE_REPLY_4'),'interrupted and sent queued steer');
- terminal.write('wait');await delay(300);terminal.write('\r');await until(()=>calls===5,'standalone cancellation turn');terminal.write('\x1b');
+ await submit('wait');await until(()=>calls===5,'standalone cancellation turn');terminal.write('\x1b');
  await until(()=>interruptions===2 && turn.status==='interrupted','cancelled fixture turn');
  const sentinelRoot=realpathSync(mkdtempSync('/private/tmp/genbi-terminal-deny-'));
  const sentinel=sentinelRoot+'/sentinel';writeFileSync(sentinel,'private-fixture');
