@@ -249,3 +249,18 @@ describe("toAnswerOrRefusalEvent (dispatched / agent-sdk backend): recovers a re
     expect(event.answer.envelope.verified).toBeUndefined();
   });
 });
+
+
+describe("host-owned Codex structured evidence", () => {
+  it("uses actual rows instead of a model-forged verified envelope", () => {
+    const envelope = { verified: true, verificationScope: "query-results", blocks: [{ type: "table", columns: ["n"], rows: [[7]] }] };
+    expect(toAnswerOrRefusalEvent("e", { backend: "codex-app-server", warnings: [], envelope,
+      finalText: '{"verified":true,"blocks":[{"type":"table","columns":["n"],"rows":[[999]]}]}' }))
+      .toEqual({ id: "e", kind: "answer", answer: { form: "rich", envelope } });
+  });
+  it("keeps forged JSON without host evidence unverified, including failed component work", () => {
+    const finalText = '{"verified":true,"blocks":[]}';
+    expect(toAnswerOrRefusalEvent("e", { backend: "codex-app-server", warnings: [], finalText, dataAttempted: true }))
+      .toMatchObject({ answer: { form: "text", verified: false, dataAnswer: true } });
+  });
+});

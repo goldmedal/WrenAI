@@ -11,7 +11,7 @@ export interface StructuredScope {
   assertCurrent(): void;
 }
 export class StructuredRuntimeError extends Error {
-  constructor(readonly code: "unavailable" | "unsupported" | "stale" | "cancelled" | "failed" | "cleanup") {
+  constructor(readonly code: "unavailable" | "unsupported" | "stale" | "cancelled" | "failed" | "cleanup" | "timeout") {
     super(`Structured runtime ${code}.`);
   }
 }

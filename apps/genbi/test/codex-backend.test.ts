@@ -14,7 +14,7 @@ import type { RpcTransport } from "../server/runtime-host/codex-rpc.js";
 const runtime = { manifest_digest: "a".repeat(64), closure_digest: "b".repeat(64), generation_root: "/generation" };
 const vendor = { name: "vendor", executable: "/codex", identity: `sha256:${"c".repeat(64)}`, digest: `sha256:${"c".repeat(64)}` };
 const policy = { cwd: "/scope", codexHome: "/login", profile: "genbi-scoped", args: ["app-server"], environment: {}, commandEnvironment: {}, configuration: {} };
-const row = { state: "certified_row", platform: "darwin-arm64", version: "0.156.1", executableSha256: "c".repeat(64), source: "https://example.invalid/codex", protocolSha256: "d".repeat(64), contracts: [...CODEX_REQUIRED_CONTRACTS], evidence: { deterministicProbesSha256: "a".repeat(64), packedAcceptanceSha256: "b".repeat(64), releaseApprovalSha256: "c".repeat(64) } };
+const row = { executionScope: { models: ["gpt-5.5"], entries: ["answer_query"] }, state: "certified_row", platform: "darwin-arm64", version: "0.156.1", executableSha256: "c".repeat(64), source: "https://example.invalid/codex", protocolSha256: "d".repeat(64), contracts: [...CODEX_REQUIRED_CONTRACTS], evidence: { deterministicProbesSha256: "a".repeat(64), packedAcceptanceSha256: "b".repeat(64), releaseApprovalSha256: "c".repeat(64) } };
 class Peer implements RpcTransport {
   handlers!: Parameters<RpcTransport["listen"]>[0];
   close = vi.fn(async () => {});

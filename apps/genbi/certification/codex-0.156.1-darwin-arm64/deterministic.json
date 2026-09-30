@@ -1,0 +1,49 @@
+{
+  "kind": "deterministic_vendor_evidence",
+  "date": "2026-09-30",
+  "platform": "darwin-arm64",
+  "version": "0.156.1",
+  "protocolSha256": "655adafa0ccea3d84f30bcbdc74e201fa14511c51e08d0cd024a0280daa8bc60",
+  "protocolFile": "codex_app_server_protocol.schemas.json",
+  "protocolGeneration": [
+    "app-server",
+    "generate-json-schema",
+    "--experimental",
+    "--out",
+    "<schema-directory>"
+  ],
+  "modelCalls": 0,
+  "runner": "scripts/run-vendor-contract-probes.mjs",
+  "runnerOutputSha256": "bbdf1119374e3b8f3f3de61641f75b076d2d6bec0f2969b10a29a4c7d41dcd65",
+  "checks": [
+    "named permission profile and config",
+    "protected read and shared temporary directory denial",
+    "network denial with positive control",
+    "PTY write resize terminate",
+    "timeout and connection process-tree cleanup",
+    "component isolated thread and scoped tool configuration",
+    "account notification ordering",
+    "passive event revocation and full protected-operation integrity",
+    "no-tool terminal tamper rejection"
+  ],
+  "unitSuite": {
+    "passed": 2511,
+    "expectedFail": 1,
+    "skipped": 18,
+    "outputSha256": "7a1910eccb094ead143b13e0a039f886344ff94fdbc01b1d31d85c79e78a59e4"
+  },
+  "tablePersistenceRegression": {
+    "passed": 52,
+    "outputSha256": "4840a03ac282c49424e809261451d7d2c89d4fbc5ed243271b9085132f4b2268"
+  },
+  "performanceReplay": {
+    "modelCalls": 0,
+    "deltas": 1000,
+    "streamMs": 3,
+    "fullIntegrityChecksDuringStream": 0,
+    "totalFullIntegrityChecks": 4,
+    "liveChecks": 1007,
+    "totalMs": 2952,
+    "scope": "Unchanged integrity implementation; recorded before component dependency refresh."
+  }
+}

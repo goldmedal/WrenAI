@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { CODEX_BASELINE_VERSION } from "./codex-compatibility.js";
-import { codexThreadSchema, codexTurnSchema, parseCodexEvent, type CodexEvent } from "./codex-events.js";
+import { codexAccountUpdatedSchema, codexRateLimitsUpdatedSchema, codexThreadSchema, codexTurnSchema, parseCodexEvent, type CodexEvent } from "./codex-events.js";
 import type { CodexSessionPolicy } from "./codex-policy.js";
 import { CodexRpcClient, CodexRpcError, object, type RpcTransport } from "./codex-rpc.js";
 import { isDeepStrictEqual } from "node:util";
@@ -45,10 +45,12 @@ interface ActiveTurn {
   reject(error: unknown): void;
   timer: ReturnType<typeof setTimeout>;
   detach(): void;
-  items: Map<string, { type: string; completed: boolean }>;
+  items: Map<string, { type: string; completed: boolean; item?: Turn["items"][number] }>;
   readonly toolsAbort: AbortController;
   readonly calls: Set<string>;
   pendingTools: number;
+  toolFinished?: Promise<void>;
+  interruptRequested?: boolean;
   ready: Promise<void>;
   releaseTools(): void;
 }
@@ -68,6 +70,7 @@ export class CodexSession {
   private turn: ActiveTurn | undefined;
   private commands = new Map<string, { tty: boolean; stdinClosed: boolean; bytes: number }>();
   private ready = false;
+  private accountResponseReceived = false;
   private closed = false;
   private closePromise?: Promise<void>;
   private constructor(
@@ -76,7 +79,14 @@ export class CodexSession {
   ) {
     this.tools = tools ? Object.freeze({ accountEmail: tools.accountEmail, definitions: structuredClone(tools.definitions),
       assertCurrent: tools.assertCurrent.bind(tools), call: tools.call.bind(tools), close: tools.close.bind(tools) }) : undefined;
-    this.rpc = new CodexRpcClient(transport, ({ method, params }) => this.receive(parseCodexEvent(method, params)), 1_048_576,
+    this.rpc = new CodexRpcClient(transport, ({ method, params }) => {
+      if (method === "account/rateLimits/updated") { parse(codexRateLimitsUpdatedSchema, params); return; } // host-only telemetry
+      if (method === "account/updated") {
+        if (this.accountResponseReceived || !this.tools) this.protocolFailure();
+        parse(codexAccountUpdatedSchema, params); return; // account/read still pins identity before ready; never project auth to UI
+      }
+      this.receive(parseCodexEvent(method, params));
+    }, 1_048_576,
       this.tools ? (request) => this.callTool(request.method, request.params) : undefined);
     this.rpc.onFailure((error) => {
       this.closed = true;
@@ -108,7 +118,8 @@ export class CodexSession {
       if (session.closed) throw new CodexRpcError("closed");
       if (session.tools) {
         parse(z.object({ requiresOpenaiAuth: z.literal(true), account: z.object({ type: z.literal("chatgpt"), email: z.literal(session.tools.accountEmail) }) }),
-          await session.rpc.request("account/read", { refreshToken: false }));
+          await session.rpc.request("account/read", { refreshToken: false }, 10_000, undefined, () => { session.accountResponseReceived = true; }));
+        if (session.closed) throw new CodexRpcError("protocol");
         session.tools.assertCurrent();
       }
       session.ready = true;
@@ -181,15 +192,26 @@ export class CodexSession {
       throw error instanceof CodexRpcError ? error : new CodexRpcError("protocol");
     }
   }
+  async steerTurn(text: string, expectedTurnId: string): Promise<{ turnId: string }> {
+    this.check();
+    const active = this.turn;
+    if (!active?.id || active.id !== expectedTurnId || active.interruptRequested || !text.trim() || Buffer.byteLength(text) > 262_144) throw new CodexRpcError("protocol");
+    const result = parse(z.object({ turnId: z.literal(active.id) }).strict(), await this.rpc.request("turn/steer", {
+      threadId: this.threadId, expectedTurnId, input: [{ type: "text", text }],
+    }));
+    if (this.turn !== active || active.interruptRequested) throw new CodexRpcError("protocol");
+    return result;
+  }
   async interruptTurn(): Promise<void> {
     this.check();
     const active = this.turn;
     if (!active?.id) throw new CodexRpcError("protocol");
     try {
+      active.interruptRequested = true;
       active.toolsAbort.abort();
-      parse(z.object({}).strict(), await this.rpc.request("turn/interrupt", { threadId: this.threadId, turnId: active.id }, 2_000));
+      parse(z.object({}).strict(), await this.rpc.request("turn/interrupt", { threadId: this.threadId, turnId: active.id }, 10_000));
       // An ack is not completion. Bound how long a silent peer may keep working.
-      if (this.turn === active) { clearTimeout(active.timer); active.timer = setTimeout(() => this.rpc.fail("timeout"), 2_000); }
+      if (this.turn === active) { clearTimeout(active.timer); active.timer = setTimeout(() => this.rpc.fail("timeout"), 10_000); }
     } catch { await this.close(); throw new CodexRpcError("protocol"); }
   }
   startCommand(input: CodexCommandInput, signal?: AbortSignal): CodexCommand {
@@ -240,6 +262,11 @@ export class CodexSession {
   private settleTurn(value?: Turn, error?: unknown): void {
     const active = this.turn;
     if (!active) return;
+    if (value?.status === "interrupted" && active.pendingTools) {
+      active.toolsAbort.abort();
+      void active.toolFinished!.then(() => { if (this.turn === active) this.settleTurn(value); });
+      return;
+    }
     this.turn = undefined; clearTimeout(active.timer); active.detach(); active.toolsAbort.abort(); active.releaseTools();
     if (value) active.resolve(value); else active.reject(error);
   }
@@ -259,6 +286,11 @@ export class CodexSession {
       this.threadEventId = event.params.thread.id; return;
     }
     if (!this.threadId || event.params.threadId !== this.threadId) this.protocolFailure();
+    if (event.method === "warning") {
+      const features = this.policy.configuration.features;
+      if (!this.tools || !object(features) || features.code_mode_host !== false || features.code_mode !== false) this.protocolFailure();
+      return; // validated disabled capability; never forward raw vendor warnings
+    }
     if (event.method === "thread/status/changed") { this.emit(event); return; }
     const active = this.turn;
     if (!active) this.protocolFailure();
@@ -274,15 +306,22 @@ export class CodexSession {
       if (active!.started || event.params.turn.status !== "inProgress") this.protocolFailure();
       active!.started = true;
     } else if (event.method === "turn/completed") {
+      // Full integrity validation before terminal output is emitted or settled.
+      this.check();
       if (event.params.turn.status === "inProgress" || (active!.pendingTools && event.params.turn.status === "completed")) this.protocolFailure();
       if (this.tools && event.params.turn.status === "completed") {
         const returned = new Set<string>();
         for (const item of event.params.turn.items) {
           const observed = active!.items.get(item.id);
-          if (!observed?.completed || observed.type !== item.type || returned.has(item.id)) this.protocolFailure();
+          if (!observed?.completed || observed.type !== item.type || !isDeepStrictEqual(observed.item, item) || returned.has(item.id)) this.protocolFailure();
           returned.add(item.id);
         }
-        if (returned.size !== active!.items.size) this.protocolFailure();
+        if (!active!.started || [...active!.items.values()].some((item) => !item.completed)
+          || ((event.params.turn.itemsView ?? "full") === "full" && returned.size !== active!.items.size)) this.protocolFailure();
+        if (event.params.turn.itemsView === "summary" || event.params.turn.itemsView === "notLoaded") {
+          const complete: Turn = { ...event.params.turn, itemsView: "full", items: [...active!.items.values()].map((item) => item.item!) };
+          this.emit({ ...event, params: { ...event.params, turn: complete } }); this.settleTurn(complete); return;
+        }
       }
       this.emit(event); this.settleTurn(event.params.turn); return;
     } else if (event.method === "item/started") {
@@ -295,6 +334,7 @@ export class CodexSession {
       if (!item || item.completed || item.type !== event.params.item.type) this.protocolFailure();
       if (event.params.item.type === "dynamicToolCall" && (!active!.calls.has(event.params.item.id) || active!.pendingTools)) this.protocolFailure();
       item!.completed = true;
+      item!.item = structuredClone(event.params.item);
     } else if ("itemId" in event.params) {
       const item = active!.items.get(event.params.itemId);
       if (!item || item.completed) this.protocolFailure();
@@ -310,6 +350,8 @@ export class CodexSession {
       || !this.tools.definitions.some((tool) => tool.name === call.tool) || active.calls.has(call.callId)
       || active.calls.size >= 32 || active.pendingTools || Buffer.byteLength(JSON.stringify(call.arguments) ?? "") > 65_536) this.protocolFailure();
     active.calls.add(call.callId); active.pendingTools++;
+    let finished!: () => void;
+    active.toolFinished = new Promise<void>((resolve) => { finished = resolve; });
     try {
       await active.ready;
       this.check(); active.toolsAbort.signal.throwIfAborted();
@@ -321,7 +363,13 @@ export class CodexSession {
       const text = JSON.stringify(result);
       if (text === undefined || Buffer.byteLength(text) > 1_048_000) this.protocolFailure();
       return { contentItems: [{ type: "inputText", text }], success: true };
-    } finally { active.pendingTools--; }
+    } catch (error) {
+      // A requested cancellation is a failed tool result, not malformed RPC.
+      // Recheck the session scope and integrity before keeping it reusable.
+      if (!active.interruptRequested || !active.toolsAbort.signal.aborted || error !== active.toolsAbort.signal.reason) throw error;
+      this.check();
+      return { contentItems: [{ type: "inputText", text: "Operation cancelled." }], success: false };
+    } finally { active.pendingTools--; finished(); }
   }
   private closeTools(): Promise<void> {
     return this.toolsClosing ??= Promise.resolve().then(() => this.tools?.close()).catch(() => { throw new CodexRpcError("cleanup"); });

@@ -15,7 +15,7 @@ export function object(value: unknown): value is Record<string, unknown> {
 export interface RpcNotification { readonly method: string; readonly params: unknown }
 type Pending = {
   resolve(value: unknown): void; reject(error: CodexRpcError): void;
-  timer: ReturnType<typeof setTimeout>; removeAbort(): void;
+  timer: ReturnType<typeof setTimeout>; removeAbort(): void; responseReceived?(): void;
 };
 
 export class CodexRpcClient {
@@ -45,7 +45,7 @@ export class CodexRpcClient {
     else this.failureListeners.add(listener);
     return () => this.failureListeners.delete(listener);
   }
-  request(method: string, params: unknown, timeoutMs = 10_000, signal?: AbortSignal): Promise<unknown> {
+  request(method: string, params: unknown, timeoutMs = 10_000, signal?: AbortSignal, responseReceived?: () => void): Promise<unknown> {
     if (this.failure) return Promise.reject(this.failure);
     if (this.pending.size >= 128) { this.fail("protocol"); return Promise.reject(this.failure); }
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 3_600_000) return Promise.reject(new CodexRpcError("protocol"));
@@ -55,7 +55,7 @@ export class CodexRpcClient {
       const abort = () => this.fail("cancelled");
       const timer = setTimeout(() => this.fail("timeout"), timeoutMs);
       // Registration must precede write, including an in-process synchronous peer.
-      this.pending.set(id, { resolve, reject, timer, removeAbort: () => signal?.removeEventListener("abort", abort) });
+      this.pending.set(id, { resolve, reject, timer, ...(responseReceived ? { responseReceived } : {}), removeAbort: () => signal?.removeEventListener("abort", abort) });
       signal?.addEventListener("abort", abort, { once: true });
       this.send({ id, method, params });
     });
@@ -112,6 +112,8 @@ export class CodexRpcClient {
           if (!object(message.error) || !Number.isInteger(message.error.code) || typeof message.error.message !== "string") return this.fail("protocol");
           return this.fail("remote");
         }
+        // Mark authority boundaries synchronously, before later frames in this buffer.
+        pending.responseReceived?.();
         this.pending.delete(message.id as number);
         clearTimeout(pending.timer); pending.removeAbort(); pending.resolve(message.result);
       } else {

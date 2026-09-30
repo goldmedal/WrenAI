@@ -127,3 +127,17 @@ describe('EnvelopeView', () => {
     expect(screen.getByText('No table data')).toBeInTheDocument();
   });
 });
+
+
+it('renders query evidence separately from time and metric interpretation with unknown lineage', () => {
+  renderEnvelope({ verified: true, verificationScope: 'query-results', explanation: 'Data anchor: 2018-04-13.\nCustomers: distinct customers with orders.',
+    blocks: [{ type: 'table', columns: ['week', 'customers'], rows: [{ week: '2018-04-09', customers: 1 }] },
+      { type: 'definition', sql: 'SELECT week, customers FROM weekly' }] });
+  expect(screen.getByRole('table')).toBeInTheDocument();
+  expect(screen.getByText('2018-04-09')).toBeInTheDocument();
+  expect(screen.getByText('Time range and metric interpretation')).toBeInTheDocument();
+  expect(screen.getByText(/Metric and time-range interpretation is not independently verified/)).toBeInTheDocument();
+  expect(screen.getAllByText('Not supplied by the query tool')).toHaveLength(2);
+  expect(screen.getByText('SELECT week, customers FROM weekly')).toBeInTheDocument();
+  expect(screen.getByText(/Data anchor:/)).toHaveStyle({ whiteSpace: 'pre-wrap' });
+});

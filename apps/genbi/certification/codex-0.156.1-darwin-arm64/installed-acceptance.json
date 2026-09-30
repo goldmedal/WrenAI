@@ -1,0 +1,94 @@
+{
+  "kind": "unmodified_installed_acceptance",
+  "completedAt": "2026-09-30T08:34:27.764627+00:00",
+  "platform": "darwin-arm64",
+  "vendorVersion": "0.156.1",
+  "packageVersion": "0.0.4",
+  "model": "gpt-5.5",
+  "entry": "answer_query",
+  "candidateAdmissionInjection": false,
+  "freshNpmInstall": true,
+  "freshBffDatabase": true,
+  "installedPackageFilesMatched": 407,
+  "tarballSha256": "1b3d1cf4535fcc185e1346cbc8bbfbca0727b0b2d8f31531e25442ea4d40352b",
+  "ask": {
+    "passed": true,
+    "expected": {
+      "order_count": 99,
+      "revenue": 1672
+    },
+    "stdoutSha256": "c16eda3b19dbe0fea799380f88600e58af278dac4c3ac8e732b70c56aa65ac7c",
+    "privateSessionEvidenceSha256": "bdd5bae25672c2c54ccc7c808d93cc96444ffa000ccb27671a074ff529370c94"
+  },
+  "native": {
+    "ok": true,
+    "officialCli": "0.156.1",
+    "model": "gpt-5.5",
+    "query": {
+      "order_count": 99,
+      "revenue": 1672
+    },
+    "followup": {
+      "average": 16.89
+    },
+    "inFlightSteering": true,
+    "resize": true,
+    "reconnect": true,
+    "stop": true
+  },
+  "denials": {
+    "scope": "Prior exact identity/scope denials remain covered by current deterministic suite"
+  },
+  "databaseUnchanged": true,
+  "ownedRuntimeChildrenAfterStop": 0,
+  "taskBffStopped": true,
+  "sourceVerification": {
+    "fullSuite": {
+      "passed": 2511,
+      "expectedFail": 1,
+      "skipped": 18
+    },
+    "typecheck": "passed",
+    "build": "passed",
+    "vendorContracts": "passed",
+    "packedOfflineAcceptance": "passed",
+    "finalFullSuite": {
+      "passed": 2512,
+      "expectedFail": 1,
+      "skipped": 18,
+      "outputSha256": "d382569bf9fec9a8a7b409d8984cde07cd6cb5983019bcf7603f2821be5a799d"
+    }
+  },
+  "authorization": "Local approval and commit only; no push, release, merge or default activation.",
+  "dependencies": {
+    "warble": "0.15.2",
+    "ir": "0.8.0",
+    "context-loader": "0.1.1"
+  },
+  "artifactScope": "Unmodified installed 0.15.2 acceptance candidate before evidence-only registry hash refresh. Execution code unchanged by refresh.",
+  "refreshedRegistryPackage": {
+    "tarballSha256": "5d18f6a7cc56f62fc2bfc25048f51422cc5431700f37214e3302bd34b7f35e89",
+    "filesMatched": 407,
+    "startupAndStop": {
+      "ok": true,
+      "officialCli": "0.156.1",
+      "modelCalls": 0,
+      "start": true,
+      "stop": true
+    },
+    "offlineTerminal": {
+      "officialCli": true,
+      "modelCalls": 0,
+      "fixtureTurns": 5,
+      "steer": true,
+      "resize": true,
+      "reconnect": true,
+      "cancel": true,
+      "protectedReadDenied": true,
+      "outsideWriteDenied": true,
+      "networkDenied": true,
+      "cleanup": true
+    },
+    "independentReview": "No actionable findings; evidence hashes and dependency alignment verified."
+  }
+}

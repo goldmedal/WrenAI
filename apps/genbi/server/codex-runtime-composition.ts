@@ -18,6 +18,7 @@ import { CodexAppServerBackend, CodexBackendError, type CodexLaunchPermit } from
 import type { CodexSessionTools } from "./runtime-host/codex-direct-tools.js";
 import type { RpcTransport } from "./runtime-host/codex-rpc.js";
 import { buildCodexSessionPolicy } from "./runtime-host/codex-policy.js";
+import { isCodexExecutionCertified, isCodexTerminalCertified } from "./runtime-host/codex-compatibility.js";
 import { runtimeNotReady } from "./runtime-host/policy.js";
 import type { RuntimeBackendProbeResult } from "./runtime-host/types.js";
 import type { DirectCodexProvisioner } from "./codex-native-session.js";
@@ -69,10 +70,15 @@ export function createCodexRuntimeComposition(options: Options) {
       || login === path.join(os.homedir(), ".codex") || !auth.isFile() || auth.isSymbolicLink() || (auth.mode & 0o077) !== 0) throw unavailable();
     return login;
   };
+  const checkExecutionScope = (entry: string) => {
+    const models = codexModelsForRuntime(options.store.getRuntimeSettings());
+    const vendor = attestNativeExecutable("vendor", config.executable!);
+    if (!isCodexExecutionCertified(config.source!, vendor.digest.slice(7), Object.values(models), entry)) throw unavailable();
+  };
   const probe = async (): Promise<RuntimeBackendProbeResult<"codex-app-server">> => {
     const result = await backend.probe();
     if (result.readiness.state !== "ready") return result;
-    try { checkConfiguration(); attestNativeExecutable("producer", options.producerBinary); resolveContextLoaderBinary(); return result; }
+    try { checkConfiguration(); checkExecutionScope("answer_query"); attestNativeExecutable("producer", options.producerBinary); resolveContextLoaderBinary(); return result; }
     catch { return { readiness: runtimeNotReady("codex-app-server", "unprovisioned", "runtime_policy_unavailable"), diagnostic: { phase: "policy" } }; }
   };
   async function prepare(input: { id: string; binding: EnrichmentBinding; entry: string; permit: CodexLaunchPermit;
@@ -80,6 +86,7 @@ export function createCodexRuntimeComposition(options: Options) {
     input.permit.assertActive(); input.assertActive(); input.signal.throwIfAborted();
     if (!["answer_query", "generate_dashboard"].includes(input.entry)) throw unavailable();
     const loginHome = checkConfiguration();
+    checkExecutionScope(input.entry);
     const binding = structuredClone(input.binding);
     const settings = structuredClone(options.store.getRuntimeSettings());
     const generation = options.store.getNativeRuntimeBinding().generation;
@@ -97,10 +104,13 @@ export function createCodexRuntimeComposition(options: Options) {
     const identity = { session_id: input.id, vendor: "codex" as const, auth_identity: config.accountEmail!, runtime_generation: String(generation),
       binding: { project_identity: binding.identity, generation: String(binding.generation), revision: binding.revision } };
     let retired = false;
-    const check = () => {
+    const checkLive = () => {
       input.signal.throwIfAborted(); input.assertActive();
       if (retired || !isDeepStrictEqual(options.getBinding(), binding) || !isDeepStrictEqual(options.store.getRuntimeSettings(), settings)
         || options.store.getNativeRuntimeBinding().generation !== generation || sourceHome !== options.sourceWrenHome() || checkConfiguration() !== loginHome) throw unavailable();
+    };
+    const check = () => {
+      checkLive();
       for (const executable of [vendor, producer, loader, node, wren, python]) assertNativeExecutableIdentity(executable);
     };
     check(); input.permit.assertActive();
@@ -124,20 +134,20 @@ export function createCodexRuntimeComposition(options: Options) {
       check(); input.permit.assertActive();
       const irDocument = await readFile(compiled.irPath, "utf8");
       tools = await prepareCapturedCodexDirectTools(irDocument, { binding: identity.binding, entry: { kind: "agent", verb: input.entry, prompt: "Use the selected analysis tool." } }, {
-        identity, currentIdentity: () => { check(); return identity; }, assertCurrent: check,
+        identity, currentIdentity: () => { checkLive(); return identity; }, assertCurrent: check, assertLive: checkLive,
         verifierBinary: producer.executable, producerBinary: producer.executable, contextLoaderBinary: loader.executable,
         wrenBinary: wren.executable, project: binding.path, signal: input.signal, expiresAt: Date.now() + 60 * 60_000,
         wrenEnvironment: { PATH: [path.dirname(runtime.launcher), path.dirname(runtime.venv_python), "/usr/bin", "/bin"].join(path.delimiter), HOME: home,
           WREN_HOME: sourceHome, WREN_PROJECT_HOME: binding.path, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" },
         ...(input.persistRoot ? { persistRoot: input.persistRoot } : {}),
         vendor: { vendor: "codex", authIdentity: config.accountEmail!, accountEmail: config.accountEmail!, generation: String(generation),
-          models: { cheap: models.cheap, strong: models.strong }, assertCurrent: check,
+          models: { cheap: models.cheap, strong: models.strong }, assertCurrent: check, assertLive: checkLive,
           async open(model, signal) {
             check(); signal.throwIfAborted();
             const permit = backend.prepareLaunch();
             try {
               if (!isDeepStrictEqual(permit.runtime, runtime)) throw unavailable();
-              const resource = backend.openStep(permit, { spec, wrenHome, model, accountEmail: config.accountEmail!, signal, assertScopeActive: check });
+              const resource = backend.openStep(permit, { spec, wrenHome, model, accountEmail: config.accountEmail!, signal, assertScopeActive: checkLive });
               const raw = resource.transport;
               let closing: Promise<void> | undefined;
               const transport: RpcTransport = { listen: raw.listen.bind(raw), write: raw.write.bind(raw), close: () => closing ??= (async () => {
@@ -153,14 +163,22 @@ export function createCodexRuntimeComposition(options: Options) {
         const results = await Promise.allSettled([preparedTools.close(), ...[...steps].map((step) => step.close())]);
         if (cleanupFailed || results.some((item) => item.status === "rejected")) { cleanupFailed = true; throw new CodexBackendError("codex_app_server_cleanup_failed"); }
       } };
-      return { input: { spec, wrenHome, model: models.orchestrator, tools: scopedTools, assertScopeActive: check }, dispose };
+      return { input: { spec, wrenHome, model: models.orchestrator, tools: scopedTools, assertScopeActive: checkLive }, dispose };
     } catch (error) {
       try { await tools?.close(); await dispose(); } catch { throw new CodexBackendError("codex_app_server_cleanup_failed"); }
       throw error;
     }
   }
-  const native: DirectCodexProvisioner = { backend, async prepare(input) {
+  const terminalCertified = (entry: string) => {
+    try {
+      const vendor = attestNativeExecutable("vendor", config.executable!);
+      return isCodexTerminalCertified(config.source!, vendor.digest.slice(7), Object.values(codexModelsForRuntime(options.store.getRuntimeSettings())), entry);
+    } catch { return false; }
+  };
+  const native: DirectCodexProvisioner = { backend, terminal: true, terminalCertified, async prepare(input) {
     input.permit.assertActive(); input.assertActive(); input.signal.throwIfAborted();
+    checkConfiguration(); checkExecutionScope(input.session.entryVerb ?? "answer_query");
+    if (!terminalCertified(input.session.entryVerb ?? "answer_query")) throw unavailable();
     const credential = options.artifacts.issue(input.session, input.binding).credential;
     try {
       const prepared = await prepare({ id: input.session.id, binding: input.binding, entry: input.session.entryVerb ?? "answer_query",
@@ -172,7 +190,7 @@ export function createCodexRuntimeComposition(options: Options) {
             options.artifacts.save(credential, { version: "1", idempotency_key: randomUUID(), name: "Generated dashboard",
               envelope: { blocks: result.output.blocks, ...(result.output.summary ? { summary: result.output.summary } : {}), verified: true } });
           } else {
-            const table = z.object({ columns: z.array(z.string()), rows: z.array(z.array(z.unknown())) }).parse(result.output.value);
+            const table = z.object({ columns: z.array(z.string()), rows: z.array(z.union([z.array(z.unknown()), z.record(z.string(), z.unknown())])) }).parse(result.output.value);
             const blocks: unknown[] = [{ type: "table", columns: table.columns, rows: table.rows }];
             if (result.provenance.definition) blocks.push({ type: "definition", ...z.record(z.string(), z.unknown()).parse(result.provenance.definition) });
             options.artifacts.persistAnswer(credential, { version: "1", idempotency_key: randomUUID(), envelope: { blocks, verified: true } });

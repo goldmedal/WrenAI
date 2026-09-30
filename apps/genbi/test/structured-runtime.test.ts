@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { CodexRpcError } from "../server/runtime-host/codex-rpc.js";
 import { CodexBackendError } from "../server/runtime-host/codex-app-server.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { StructuredRuntime, type StructuredAdapter, type StructuredScope } from "../server/structured-runtime.js";
@@ -26,10 +27,10 @@ function host(adapter?: StructuredAdapter) {
 }
 function provisioner() {
   const permit = { runtime: {}, assertActive: vi.fn(), release: vi.fn() };
-  const tools = { accountEmail: "fixture@example.invalid", definitions: [], assertCurrent: vi.fn(), call: vi.fn(), close: vi.fn(async () => {}) };
-  const driver = { startThread: vi.fn(async () => "thread"), runTurn: vi.fn(async () => ({ id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: "99 orders" }] })), close: vi.fn(async () => {}) };
+  const tools = { accountEmail: "fixture@example.invalid", definitions: [], assertCurrent: vi.fn(), call: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined), close: vi.fn(async () => {}) };
+  const driver = { startThread: vi.fn(async () => "thread"), runTurn: vi.fn(async (_question?: string, _options?: { timeoutMs?: number }) => ({ id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: "99 orders" }] })), close: vi.fn(async () => {}) };
   const dispose = vi.fn(async () => {});
-  const backend = { prepareLaunch: vi.fn(() => permit), probe: vi.fn(async () => ({ readiness: runtimeReady("0.156.1", []), diagnostic: { phase: "capability" } })), open: vi.fn(async () => driver) };
+  const backend = { prepareLaunch: vi.fn(() => permit), probe: vi.fn(async () => ({ readiness: runtimeReady("0.156.1", []), diagnostic: { phase: "capability" } })), open: vi.fn(async (_permit: unknown, _input: { tools: typeof tools }) => driver) };
   const prepare = vi.fn(async () => ({ input: { tools, spec: {}, wrenHome: {}, assertScopeActive() {} }, dispose }));
   const adapter = createCodexStructuredAdapter({ backend, prepare } as unknown as CodexStructuredProvisioner);
   return { permit, tools, driver, dispose, backend, prepare, adapter, ...host(adapter) };
@@ -67,6 +68,60 @@ describe("explicit structured runtime boundary", () => {
     release(); const result = await pending;
     expect(result).toMatchObject({ backend: "codex-app-server", finalText: "99 orders" }); expect(result.warnings.length).toBeGreaterThan(0);
     expect(f.dispose).toHaveBeenCalledOnce(); expect(f.tools.close).toHaveBeenCalledOnce(); expect(f.localRoute).not.toHaveBeenCalled();
+  });
+  it("carries only host results through the adapter after cleanup, never model-authored rows", async () => {
+    const f = provisioner();
+    const evidence = { status: "ok", output: { kind: "value", value: { columns: ["customers"], rows: [{ customers: 7 }] } },
+      provenance: { verified: true, definition: { sql: "SELECT count(*) AS customers FROM customers" } } };
+    f.tools.call.mockResolvedValue(evidence);
+    f.driver.runTurn.mockImplementation(async () => {
+      const input = f.backend.open.mock.calls[0]![1];
+      await input.tools.call("component", {}, "call", new AbortController().signal);
+      return { id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: 'Interpretation only; not 999 customers.' }] };
+    });
+    const value = await f.runtime.route(request, scope());
+    expect(value).toMatchObject({ backend: "codex-app-server", dataAttempted: true,
+      envelope: { verified: true, verificationScope: "query-results", blocks: [{ type: "table", rows: [{ customers: 7 }] }, { type: "definition" }] } });
+    expect(f.dispose).toHaveBeenCalledOnce();
+    expect(f.driver.runTurn.mock.calls[0]?.[0]).toContain("User question:\ncount");
+  });
+
+  it("does not promote an earlier success after a later root call throws", async () => {
+    const f = provisioner();
+    f.tools.call.mockResolvedValueOnce({ status: "ok", output: { kind: "value", value: { columns: ["n"], rows: [[7]] } }, provenance: { verified: true, definition: { sql: "SELECT 7 AS n" } } })
+      .mockRejectedValueOnce(Error("refused"));
+    f.driver.runTurn.mockImplementation(async () => {
+      const tools = f.backend.open.mock.calls[0]![1].tools;
+      await tools.call("component", {}, "1", new AbortController().signal);
+      await tools.call("component", {}, "2", new AbortController().signal).catch(() => {});
+      return { id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: 'Failed second query' }] };
+    });
+    const value = await f.runtime.route(request, scope());
+    expect(value).not.toHaveProperty("envelope"); expect(value).toHaveProperty("dataAttempted", true);
+  });
+
+  it("gives the outer turn room for a bounded component and preserves explicit caller timeout", async () => {
+    const f = provisioner(); await f.runtime.route(request, scope());
+    expect(f.driver.runTurn.mock.calls[0]![1]).toMatchObject({ timeoutMs: 300_000 });
+    await f.runtime.route({ ...request, chatTimeoutMs: 7_000 }, scope());
+    expect(f.driver.runTurn.mock.calls[1]![1]).toMatchObject({ timeoutMs: 7_000 });
+  });
+  it("reports a safe timeout reason after cleanup without exposing vendor details", async () => {
+    const f = provisioner(); f.driver.runTurn.mockRejectedValue(new CodexRpcError("timeout"));
+    await expect(f.runtime.route(request, scope())).rejects.toMatchObject({ code: "timeout" });
+    expect(f.dispose).toHaveBeenCalledOnce();
+  });
+  it("rejects a returned no-tool answer when final integrity validation fails", async () => {
+    const f = provisioner(); const onEvent = vi.fn();
+    const original = f.driver.runTurn.getMockImplementation()!;
+    f.driver.runTurn.mockImplementation(async () => {
+      const result = await original();
+      f.tools.assertCurrent.mockImplementation(() => { throw Error("integrity changed"); });
+      return result;
+    });
+    await expect(f.runtime.route({ ...request, onEvent }, scope())).rejects.toMatchObject({ code: "failed" });
+    expect(onEvent.mock.calls.some(([event]) => event.kind === "run.finish")).toBe(false);
+    expect(f.driver.close).toHaveBeenCalledOnce(); expect(f.tools.close).toHaveBeenCalledOnce();
   });
   it("retains materialization and reports cleanup failure, including at shutdown", async () => {
     const f = provisioner(); f.driver.close.mockRejectedValue(Error("private path"));

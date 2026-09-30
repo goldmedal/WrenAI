@@ -31,9 +31,10 @@ export interface ConversationReplay {
 export interface CodexConversationAttachment {
   submit(text: string): Promise<{ readonly turnId: string; readonly status: "completed" | "interrupted" | "failed" }>;
   interrupt(): Promise<void>;
+  steer?(text: string, expectedTurnId: string): Promise<{ turnId: string }>;
   detach(): void;
 }
-type Driver = Pick<CodexSession, "startThread" | "runTurn" | "interruptTurn" | "close" | "onFailure">;
+type Driver = Pick<CodexSession, "startThread" | "runTurn" | "interruptTurn" | "close" | "onFailure"> & Partial<Pick<CodexSession, "steerTurn">>;
 type OpenInput = Omit<Parameters<CodexAppServerBackend["open"]>[1], "onEvent">;
 interface Backend { open(permit: CodexLaunchPermit, input: OpenInput & { onEvent(event: CodexEvent): void }): Promise<Driver> }
 interface Attachment {
@@ -70,6 +71,7 @@ export class CodexConversation {
   private frames: { sequence: number; json: string; bytes: number }[] = [];
   private owner: Attachment | undefined;
   private driver?: Driver;
+  private threadId?: string;
   private readonly connection: Promise<Driver>;
   private closing?: Promise<void>;
   private detachFailure?: () => void;
@@ -110,7 +112,7 @@ export class CodexConversation {
     try {
       const driver = await this.connection;
       if (this.state !== "opening") throw new CodexConversationError("closed");
-      await driver.startThread();
+      this.threadId = await driver.startThread();
       if (this.state !== "opening") throw new CodexConversationError("closed");
       this.transition("ready");
       if (this.snapshot().state !== "ready") throw new CodexConversationError("closed");
@@ -118,6 +120,11 @@ export class CodexConversation {
       await this.finish(failure(error));
       throw new CodexConversationError(this.failed ?? (this.closing ? "closed" : failure(error)), this.backendReason);
     }
+  }
+  /** Host-only identity for the official terminal adapter; never a resume grant. */
+  terminalThreadId(): string {
+    if (!this.threadId || !["ready", "running"].includes(this.state)) throw new CodexConversationError("closed");
+    return this.threadId;
   }
   private receive(value: CodexEvent): void {
     if (this.state === "closing" || this.state === "closed" || this.state === "failed") return;
@@ -189,6 +196,11 @@ export class CodexConversation {
     const handle = Object.freeze({
       submit: (text: string) => { assertOwner(); return this.submit(text); },
       interrupt: () => { assertOwner(); return this.interrupt(); },
+      steer: (text: string, expectedTurnId: string) => {
+        assertOwner();
+        if (this.state !== "running" || !this.active || !this.turnStarted || !this.driver?.steerTurn) throw new CodexConversationError("closed");
+        return this.driver.steerTurn(text, expectedTurnId);
+      },
       detach: () => { if (this.owner === owner) this.owner = undefined; },
     });
     this.drain(owner);
@@ -202,7 +214,7 @@ export class CodexConversation {
     this.turnStarted = false;
     const active = Promise.resolve().then(async () => {
       if (this.state !== "running") throw new CodexConversationError("closed");
-      const result = await Promise.race([driver.runTurn(text), this.stopped]);
+      const result = await Promise.race([driver.runTurn(text, { timeoutMs: 300_000 }), this.stopped]);
       if (result.status === "inProgress") throw new CodexConversationError("protocol");
       return { turnId: result.id, status: result.status };
     }).catch(async (error: unknown) => {

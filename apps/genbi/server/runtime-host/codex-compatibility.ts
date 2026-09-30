@@ -18,8 +18,15 @@ export const codexCertificationSchema = z.object({
   executableSha256: digest,
   source: z.string().url().refine((value) => value.startsWith("https://")),
   protocolSha256: digest,
+  executionScope: z.object({ models: z.array(z.string().min(1)).min(1), entries: z.array(z.enum(["answer_query", "generate_dashboard"])).min(1) }).strict(),
   contracts: z.array(z.enum(CODEX_REQUIRED_CONTRACTS)).refine((values) =>
     values.length === CODEX_REQUIRED_CONTRACTS.length && new Set(values).size === values.length),
+  terminal: z.object({
+    transport: z.literal("remote-tui-v1"),
+    deterministicProbesSha256: digest,
+    packedAcceptanceSha256: digest,
+    releaseApprovalSha256: digest,
+  }).strict().optional(),
   evidence: z.object({
     deterministicProbesSha256: digest,
     packedAcceptanceSha256: digest,
@@ -30,7 +37,20 @@ export type CodexCertification = z.infer<typeof codexCertificationSchema>;
 
 // Tested baseline evidence is not a production execution grant. Release
 // engineering must add an exact reviewed row, never a minimum-version range.
-export const CODEX_CERTIFIED_ROWS: readonly CodexCertification[] = Object.freeze([]);
+export const CODEX_CERTIFIED_ROWS: readonly CodexCertification[] = Object.freeze([
+{
+  "state": "certified_row",
+  "platform": "darwin-arm64",
+  "version": "0.156.1",
+  "executableSha256": "0196e89fe5a7598f816ee54232c3d7c26d75e502ab5cfe2c9240e81d90f7255a",
+  "source": "https://registry.npmjs.org/@openai/codex/-/codex-0.156.1-darwin-arm64.tgz",
+  "protocolSha256": "655adafa0ccea3d84f30bcbdc74e201fa14511c51e08d0cd024a0280daa8bc60",
+  "executionScope": { "models": ["gpt-5.5"], "entries": ["answer_query"] },
+  "contracts": [...CODEX_REQUIRED_CONTRACTS],
+  "terminal": {"transport": "remote-tui-v1", "deterministicProbesSha256": "9abc4615a9a6020d8d0a2efbeaf36306a48cf3675020e3d43039c6b3505be60f", "packedAcceptanceSha256": "e3a8080db623e4695fba916c1ba4b0da53559ada529de13ba594da7ab5350f71", "releaseApprovalSha256": "322145f63432c3c2751877f30bfc059e7af14af93818c176d50f99182546b0aa"},
+  "evidence": {"deterministicProbesSha256": "5ad42e18f831e1688bc76665224c627b3cb25919383717ade7d7107548e1ce90", "packedAcceptanceSha256": "d15692acec5557e41e5b4eed5ced697d5fed5c2aaf8f0c231ac7afca503f7ca0", "releaseApprovalSha256": "c9eb86e98e18fd5ebe6f3f21865facda6bf8b7beb4f2c6f200db9611dbecf88f"}
+}
+]);
 export interface CodexObservedIdentity {
   readonly platform: string;
   readonly versionOutput: string;
@@ -64,4 +84,25 @@ export function evaluateCodexIdentity(
     readiness: runtimeReady(row.version, ["app_server_rpc", "sandbox_policy", "filesystem_isolation", "network_isolation", "pty", "terminal_resize", "terminal_terminate"]),
     diagnostic: { phase: "capability", observedVersion: row.version },
   };
+}
+
+/** Application admission is narrower than the vendor protocol capability probe. */
+export function isCodexExecutionCertified(source: string, executableSha256: string, models: readonly string[], entry: string,
+  rows: readonly unknown[] = CODEX_CERTIFIED_ROWS): boolean {
+  return models.length > 0 && rows.some((value) => {
+    const row = codexCertificationSchema.safeParse(value);
+    return row.success && row.data.source === source && row.data.executableSha256 === executableSha256
+      && row.data.executionScope.entries.some((allowed) => allowed === entry)
+      && models.every((model) => row.data.executionScope.models.includes(model));
+  });
+}
+
+/** A driver certification alone never admits the remote CLI renderer. */
+export function isCodexTerminalCertified(source: string, executableSha256: string, models: readonly string[], entry: string,
+  rows: readonly unknown[] = CODEX_CERTIFIED_ROWS): boolean {
+  return rows.some((value) => {
+    const row = codexCertificationSchema.safeParse(value);
+    return row.success && row.data.terminal?.transport === "remote-tui-v1"
+      && isCodexExecutionCertified(source, executableSha256, models, entry, [row.data]);
+  });
 }

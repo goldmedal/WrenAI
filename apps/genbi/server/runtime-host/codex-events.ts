@@ -17,13 +17,27 @@ export const codexItemSchema = z.discriminatedUnion("type", [
   z.object({ ...itemBase, type: z.literal("contextCompaction") }),
   z.object({ ...itemBase, type: z.literal("dynamicToolCall"), tool: z.string().min(1).max(256), namespace: z.null().optional(), status: z.enum(["inProgress", "completed", "failed"]), success: z.boolean().nullable().optional() }),
 ]);
-export const codexTurnSchema = z.object({ id, status: z.enum(["inProgress", "completed", "interrupted", "failed"]), items: z.array(codexItemSchema).max(512) });
+export const codexTurnSchema = z.object({ id, status: z.enum(["inProgress", "completed", "interrupted", "failed"]), items: z.array(codexItemSchema).max(512), itemsView: z.enum(["full", "summary", "notLoaded"]).optional() })
+  .refine((turn) => turn.itemsView !== "notLoaded" || turn.items.length === 0);
 export const codexThreadSchema = z.object({ id, cwd: text, cliVersion: z.string(), ephemeral: z.boolean() });
 const scope = { threadId: id, turnId: id };
 const scopedItem = { ...scope, itemId: id };
 const delta = z.object({ ...scopedItem, delta: text });
 const usage = z.object({ totalTokens: z.number().int().nonnegative(), inputTokens: z.number().int().nonnegative(), cachedInputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), reasoningOutputTokens: z.number().int().nonnegative() });
+export const codexAccountUpdatedSchema = z.object({ authMode: z.literal("chatgpt"), planType: z.string().min(1).max(128).nullable().optional() }).strict();
+const limitText = z.string().max(256).nullish();
+const limitWindow = z.object({ usedPercent: z.number().int(), windowDurationMins: z.number().int().nullish(), resetsAt: z.number().int().nullish() }).strict().nullish();
+export const codexRateLimitsUpdatedSchema = z.object({ rateLimits: z.object({
+  limitId: limitText, limitName: limitText, normalModelSlug: limitText, planType: limitText,
+  primary: limitWindow, secondary: limitWindow,
+  credits: z.object({ hasCredits: z.boolean(), unlimited: z.boolean(), balance: limitText }).strict().nullish(),
+  individualLimit: z.object({ limit: z.string().max(256), used: z.string().max(256), remainingPercent: z.number().int(), resetsAt: z.number().int() }).strict().nullish(),
+  spendControlReached: z.boolean().nullish(),
+  rateLimitReachedType: z.enum(["rate_limit_reached", "workspace_owner_credits_depleted", "workspace_member_credits_depleted", "workspace_owner_usage_limit_reached", "workspace_member_usage_limit_reached"]).nullish(),
+}).strict() }).strict();
+export const codexDisabledCodeModeWarningSchema = z.object({ threadId: id, message: z.literal("Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.") }).strict();
 export const codexNotificationSchemas = {
+  "warning": codexDisabledCodeModeWarningSchema,
   "remoteControl/status/changed": z.object({ status: z.literal("disabled"), installationId: text, serverName: text, environmentId: z.null().optional() }),
   "thread/started": z.object({ thread: codexThreadSchema }),
   "thread/status/changed": z.object({ threadId: id, status: z.discriminatedUnion("type", [z.object({ type: z.literal("idle") }), z.object({ type: z.literal("active"), activeFlags: z.array(z.enum(["waitingOnApproval", "waitingOnUserInput"])) })]) }),

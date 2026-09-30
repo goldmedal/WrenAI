@@ -33,6 +33,9 @@ export const strings = {
     unverified: 'Unverified',
   },
   envelope: {
+    queryVerification: 'Query rows and SQL verified. Metric and time-range interpretation is not independently verified.',
+    interpretationTitle: 'Time range and metric interpretation',
+    definitionUnknown: 'Not supplied by the query tool',
     noTableData: 'No table data',
     derivationTitle: 'How this was derived',
     estimateBasisNote: 'projection · basis verified',

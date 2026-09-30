@@ -117,7 +117,8 @@ describe("native fixed-root admission", () => {
       }; },
       async runStep() { return { value: "result" }; },
     }));
-    await expect(admission.call(admission.list()[0]!.name, { request: "go" }, "cleanup")).resolves.toMatchObject({ status: "error" });
+    await expect(admission.call(admission.list()[0]!.name, { request: "go" }, "cleanup")).rejects.toThrow("cleanup failed");
+    expect(() => admission.list()).toThrow("cleanup failed");
     await expect(admission.close()).rejects.toThrow("cleanup failed");
     await expect(admission.close()).rejects.toThrow("cleanup failed");
   }));

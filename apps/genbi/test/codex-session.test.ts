@@ -24,6 +24,7 @@ class Peer implements RpcTransport {
     else if (message.method === "permissionProfile/list") this.response(message.id, { data: [{ id: "genbi-scoped", allowed: true }], nextCursor: null });
     else if (message.method === "thread/start") { this.event("thread/started", { thread }); this.response(message.id, { thread }); }
     else if (message.method === "turn/start") this.response(message.id, { turn: turn() });
+    else if (message.method === "turn/steer") this.response(message.id, { turnId: "turn-1" });
     else if (/^command\/exec\//.test(message.method) || message.method === "turn/interrupt") this.response(message.id, {});
   }
   last(method: string) { return [...this.messages].reverse().find((message) => message.method === method)!; }
@@ -34,6 +35,41 @@ async function fixture(tools?: CodexSessionTools) {
   return { peer, emit, revalidate, session };
 }
 describe("Codex session protocol", () => {
+  it("accepts startup auth before the pinned account response in the same buffer", async () => {
+    const peer = new Peer(); const tools = toolFixture();
+    peer.custom = (message) => {
+      if (message.method !== "account/read") return false;
+      peer.handlers.data(Buffer.from([
+        { method: "account/updated", params: { authMode: "chatgpt", planType: "plus" } },
+        { id: message.id, result: { requiresOpenaiAuth: true, account: { type: "chatgpt", email: "fixture@example.invalid" } } },
+      ].map((value) => JSON.stringify(value)).join("\n") + "\n")); return true;
+    };
+    const session = await CodexSession.connect(peer, policy, () => {}, () => {}, undefined, tools);
+    await session.startThread(); await session.close();
+  });
+  it("rejects account changes in the same buffer as the pinned account response", async () => {
+    const peer = new Peer(); const tools = toolFixture();
+    peer.custom = (message) => {
+      if (message.method !== "account/read") return false;
+      peer.handlers.data(Buffer.from([
+        { id: message.id, result: { requiresOpenaiAuth: true, account: { type: "chatgpt", email: "fixture@example.invalid" } } },
+        { method: "account/updated", params: { authMode: "chatgpt", planType: "plus" } },
+      ].map((value) => JSON.stringify(value)).join("\n") + "\n")); return true;
+    };
+    await expect(CodexSession.connect(peer, policy, () => {}, () => {}, undefined, tools)).rejects.toMatchObject({ reason: "protocol" });
+    expect(peer.messages.some((frame) => frame.method === "thread/start")).toBe(false);
+    expect(tools.call).not.toHaveBeenCalled(); expect(peer.close).toHaveBeenCalledOnce();
+  });
+  it("accepts startup auth notification only before pinned account verification", async () => {
+    const peer = new Peer(); const tools = toolFixture(); const emit = vi.fn();
+    peer.custom = (message) => { if (message.method === "config/read") peer.event("account/updated", { authMode: "chatgpt", planType: "plus" }); return false; };
+    const session = await CodexSession.connect(peer, policy, () => {}, emit, undefined, tools);
+    expect(peer.messages.some((m) => m.method === "account/read")).toBe(true);
+    expect(emit).not.toHaveBeenCalled();
+    peer.event("account/updated", { authMode: "chatgpt", planType: "plus" });
+    await expect(session.startThread()).rejects.toThrow(); await session.close();
+    expect(tools.call).not.toHaveBeenCalled();
+  });
   it("compares effective config and rejects inherited widening before thread/command", async () => {
     const peer = new Peer();
     peer.custom = (message) => {
@@ -88,6 +124,20 @@ describe("Codex session protocol", () => {
     }
     await session.close();
   });
+  it.each(["runtime", "tools"])("rejects no-tool terminal output after %s integrity changes", async (boundary) => {
+    const tools = toolFixture();
+    const { peer, session, emit, revalidate } = await fixture(tools);
+    await session.startThread();
+    const promise = session.runTurn("hello"); await Promise.resolve();
+    peer.event("turn/started", { threadId: thread.id, turn: turn() });
+    const guard = boundary === "runtime" ? revalidate : tools.assertCurrent;
+    vi.mocked(guard).mockImplementation(() => { throw new Error("integrity changed"); });
+    peer.event("turn/completed", { threadId: thread.id, turn: turn("completed") });
+    await expect(promise).rejects.toMatchObject({ reason: "protocol" });
+    expect(emit.mock.calls.some(([event]) => event.method === "turn/completed")).toBe(false);
+    expect(tools.call).not.toHaveBeenCalled();
+    expect(peer.close).toHaveBeenCalledOnce(); await session.close();
+  });
   it("keeps the turn pending after its start acknowledgement and strips raw vendor errors", async () => {
     const { peer, session } = await fixture(); await session.startThread();
     let settled = false; const promise = session.runTurn("hello").finally(() => { settled = true; });
@@ -131,6 +181,30 @@ describe("Codex session protocol", () => {
     if (reason === "disconnect") peer.handlers.end();
     if (reason === "shutdown") await session.close();
     await expect(promise).rejects.toBeInstanceOf(Error); expect(peer.close).toHaveBeenCalledOnce();
+  });
+  it("sends a text-only steer to the same active thread and rejects stale turn IDs", async () => {
+    const { peer, session } = await fixture(); await session.startThread();
+    const running = session.runTurn("question"); await Promise.resolve();
+    expect(await session.steerTurn("clarification", "turn-1")).toEqual({ turnId: "turn-1" });
+    expect(peer.last("turn/steer").params).toEqual({ threadId: thread.id, expectedTurnId: "turn-1", input: [{ type: "text", text: "clarification" }] });
+    await expect(session.steerTurn("bad", "other")).rejects.toThrow();
+    peer.event("turn/completed", { threadId: thread.id, turn: turn("completed") }); await running; await session.close();
+  });
+  it.each(["interrupting", "interrupted", "completed"])("rejects a delayed steer response after the turn is %s", async (state) => {
+    const { peer, session } = await fixture(); await session.startThread();
+    const running = session.runTurn("question"); await Promise.resolve();
+    peer.custom = (message) => message.method === "turn/steer";
+    const steering = session.steerTurn("clarification", "turn-1");
+    const rejected = expect(steering).rejects.toMatchObject({ reason: "protocol" });
+    if (state !== "completed") await session.interruptTurn();
+    if (state !== "interrupting") {
+      peer.event("turn/completed", { threadId: thread.id, turn: turn(state) }); await running;
+    }
+    peer.response(peer.last("turn/steer").id!, { turnId: "turn-1" }); await rejected;
+    if (state === "interrupting") {
+      peer.event("turn/completed", { threadId: thread.id, turn: turn("interrupted") }); await running;
+    }
+    await session.close();
   });
   it("interrupt acknowledgement is not completion", async () => {
     const { peer, session } = await fixture(); await session.startThread();
@@ -209,6 +283,26 @@ async function startToolTurn(tools = toolFixture()) {
   return { ...f, tools, running, request };
 }
 describe("direct-session tool RPC", () => {
+  it.each(["notLoaded", "summary"])("projects verified stream items and final text from a %s completion", async (itemsView) => {
+    const f = await fixture(toolFixture()); await f.session.startThread();
+    const running = f.session.runTurn("question"); await Promise.resolve();
+    f.peer.event("turn/started", { threadId: thread.id, turn: { ...turn(), itemsView: "notLoaded" } });
+    const reason = { id: "reason", type: "reasoning", content: [], summary: [] };
+    const answer = { id: "answer", type: "agentMessage", text: "verified streamed answer" };
+    for (const item of [reason, answer]) for (const phase of ["started", "completed"]) f.peer.event(`item/${phase}`, { threadId: thread.id, turnId: "turn-1", item });
+    f.peer.event("turn/completed", { threadId: thread.id, turn: { ...turn("completed"), itemsView, items: itemsView === "summary" ? [answer] : [] } });
+    expect(await running).toMatchObject({ itemsView: "full", items: [reason, answer] }); await f.session.close();
+  });
+  it.each(["unfinished", "changed", "hidden"])("rejects %s items in a summary completion", async (mode) => {
+    const f = await fixture(toolFixture()); await f.session.startThread();
+    const running = f.session.runTurn("question"); const rejected = expect(running).rejects.toThrow(); await Promise.resolve();
+    f.peer.event("turn/started", { threadId: thread.id, turn: turn() });
+    const item = { id: "answer", type: "agentMessage", text: "original" };
+    f.peer.event("item/started", { threadId: thread.id, turnId: "turn-1", item });
+    if (mode !== "unfinished") f.peer.event("item/completed", { threadId: thread.id, turnId: "turn-1", item });
+    f.peer.event("turn/completed", { threadId: thread.id, turn: { ...turn("completed"), itemsView: "summary", items: mode === "unfinished" ? [] : [{ ...item, ...(mode === "changed" ? { text: "forged" } : { id: "unseen" }) }] } });
+    await rejected; await f.session.close();
+  });
   it("offers fixed host tools, checks account, executes once and returns typed results", async () => {
     const f = await startToolTurn();
     expect(f.peer.last("thread/start").params).toMatchObject({ dynamicTools: f.tools.definitions, runtimeWorkspaceRoots: [] });
@@ -231,6 +325,34 @@ describe("direct-session tool RPC", () => {
     const tools = toolFixture();
     await expect(fixture({ ...tools, accountEmail: "other@example.invalid" })).rejects.toThrow();
     expect(tools.call).not.toHaveBeenCalled(); expect(tools.close).toHaveBeenCalledOnce();
+  });
+  it("interrupts an active tool without turning its expected abort into a protocol failure", async () => {
+    const tools = toolFixture(); let finish!: () => void;
+    vi.mocked(tools.call).mockImplementation(async (_name, _input, _id, signal) => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      signal.throwIfAborted(); return {};
+    });
+    const f = await startToolTurn(tools); f.request();
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    await f.session.interruptTurn();
+    f.peer.event("turn/completed", { threadId: thread.id, turn: turn("interrupted") });
+    let settled = false; void f.running.then(() => { settled = true; });
+    await Promise.resolve(); expect(settled).toBe(false);
+    finish(); expect((await f.running).status).toBe("interrupted");
+    await vi.waitFor(() => expect(f.peer.messages.some((m: any) => m.id === "server-call" && m.result?.success === false)).toBe(true));
+    expect(f.peer.close).not.toHaveBeenCalled();
+    const next = f.session.runTurn("follow up"); await Promise.resolve();
+    f.peer.event("turn/started", { threadId: thread.id, turn: turn() });
+    f.peer.event("turn/completed", { threadId: thread.id, turn: turn("completed") });
+    expect((await next).status).toBe("completed"); await f.session.close();
+  });
+  it("does not conceal a cleanup failure behind a concurrent cancellation", async () => {
+    const tools = toolFixture(); let fail!: () => void;
+    vi.mocked(tools.call).mockImplementation(() => new Promise((_resolve, reject) => { fail = () => reject(Error("cleanup failed")); }));
+    const f = await startToolTurn(tools); f.request(); await vi.waitFor(() => expect(fail).toBeDefined());
+    await f.session.interruptTurn(); fail();
+    await expect(f.running).rejects.toMatchObject({ reason: "protocol" });
+    await f.session.close();
   });
   it("aborts pending host access on disconnect and joins cleanup", async () => {
     const tools = toolFixture(); let seen: AbortSignal | undefined;

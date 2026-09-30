@@ -100,7 +100,8 @@ export async function compileProfile(options: CompileProfileOptions): Promise<Co
 
   return compileProfileSource(
     options,
-    await hashDirectory(path.resolve(options.userProject)),
+    // The compiled binding embeds the absolute project path, even for identical bytes.
+    planDigest({ project: path.resolve(options.userProject), content: await hashDirectory(path.resolve(options.userProject)) }),
     async () => options.contextLoaderIdentity ?? getContextLoaderIdentity(ensureContextLoader()),
     (workDir) => composeUserProfile({
       profileSource: options.profileSource,

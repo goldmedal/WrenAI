@@ -300,7 +300,7 @@ describe("dispatched dashboard/report turns persist an artifact from the recover
     const runtime = new StructuredRuntime({ selected: { codex: "codex-app-server", claude: "claude-sandbox-runtime" }, allowLocal: false,
       localRoute: deps.route, localSetupFor: () => undefined,
       adapters: { codex: { vendor: "codex", backend: "codex-app-server", probe: async () => runtimeReady("0.156.1", []),
-        ask: async () => ({ backend: "codex-app-server", warnings: [], finalText: JSON.stringify(envelope) }) } } });
+        ask: async () => ({ backend: "codex-app-server", warnings: [], envelope, finalText: "Orders" }) } } });
     const injected: TurnDeps = { ...deps, structuredRuntime: runtime,
       baseRouteOptions: { ...deps.baseRouteOptions, authChoice: { mode: "subscription", provider: "codex" } },
       describeBundle: async () => {

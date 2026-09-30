@@ -1,0 +1,107 @@
+{
+  "kind": "unmodified_installed_remote_terminal_acceptance",
+  "completedAt": "2026-09-30T08:34:27.764627+00:00",
+  "transport": "remote-tui-v1",
+  "platform": "darwin-arm64",
+  "vendorVersion": "0.156.1",
+  "model": "gpt-5.5",
+  "entry": "answer_query",
+  "packageVersion": "0.0.4",
+  "candidateAdmissionInjection": false,
+  "freshNpmInstall": true,
+  "isolatedBffDatabase": true,
+  "filesMatched": 407,
+  "tarballSha256": "1b3d1cf4535fcc185e1346cbc8bbfbca0727b0b2d8f31531e25442ea4d40352b",
+  "queryAndLifecycle": {
+    "ok": true,
+    "officialCli": "0.156.1",
+    "model": "gpt-5.5",
+    "query": {
+      "order_count": 99,
+      "revenue": 1672
+    },
+    "followup": {
+      "average": 16.89
+    },
+    "inFlightSteering": true,
+    "resize": true,
+    "reconnect": true,
+    "stop": true
+  },
+  "queryEvidenceSha256": "4b449e61fe47b2d97b7d5b1d7130cd62ded7caff8b612f73acb61d533d0ec99a",
+  "queryOutputSha256": "fc924d423f09045f2e7a83403feb1a0622459cbf81c2cb7a9b76fff34666605a",
+  "deterministicTerminalProbe": {
+    "officialCli": true,
+    "modelCalls": 0,
+    "fixtureTurns": 5,
+    "steer": true,
+    "resize": true,
+    "reconnect": true,
+    "cancel": true,
+    "protectedReadDenied": true,
+    "outsideWriteDenied": true,
+    "networkDenied": true,
+    "cleanup": true
+  },
+  "deterministicTerminalProbeSha256": "cf8dbcf5a606e06d2a29f62f8c064bfec726e57b92c0865953f7e4737831e5b1",
+  "packedOfflineAcceptanceSha256": "cdbffeb8dd006b40a4b596422e6ad273c44d547053f04f6ccbe4165231ab24a4",
+  "databaseUnchanged": true,
+  "ownedRuntimeChildrenAfterStop": 0,
+  "independentReview": "No outstanding findings after race, separate transport certification, cancellation and stale-steer acknowledgement fixes.",
+  "sourceVerification": {
+    "fullSuite": {
+      "passed": 2511,
+      "expectedFail": 1,
+      "skipped": 18
+    },
+    "typecheck": "passed",
+    "build": "passed",
+    "vendorContracts": "passed",
+    "packedOfflineAcceptance": "passed",
+    "finalFullSuite": {
+      "passed": 2512,
+      "expectedFail": 1,
+      "skipped": 18,
+      "outputSha256": "d382569bf9fec9a8a7b409d8984cde07cd6cb5983019bcf7603f2821be5a799d"
+    }
+  },
+  "scope": "Local installed acceptance and local approval only; no package publication, merge or deployment.",
+  "limitations": [
+    "macOS arm64 only",
+    "gpt-5.5 and answer_query only",
+    "No shell/config/auth mutations or cross-session commands",
+    "Provider resume, dashboard, Setup and Claude are not certified by this record"
+  ],
+  "dependencies": {
+    "warble": "0.15.2",
+    "ir": "0.8.0",
+    "context-loader": "0.1.1"
+  },
+  "installedPackageFilesMatched": 407,
+  "artifactScope": "Unmodified installed 0.15.2 acceptance candidate before evidence-only registry hash refresh. Execution code unchanged by refresh.",
+  "refreshedRegistryPackage": {
+    "tarballSha256": "5d18f6a7cc56f62fc2bfc25048f51422cc5431700f37214e3302bd34b7f35e89",
+    "filesMatched": 407,
+    "startupAndStop": {
+      "ok": true,
+      "officialCli": "0.156.1",
+      "modelCalls": 0,
+      "start": true,
+      "stop": true
+    },
+    "offlineTerminal": {
+      "officialCli": true,
+      "modelCalls": 0,
+      "fixtureTurns": 5,
+      "steer": true,
+      "resize": true,
+      "reconnect": true,
+      "cancel": true,
+      "protectedReadDenied": true,
+      "outsideWriteDenied": true,
+      "networkDenied": true,
+      "cleanup": true
+    },
+    "independentReview": "No actionable findings; evidence hashes and dependency alignment verified."
+  }
+}

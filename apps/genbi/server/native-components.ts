@@ -111,6 +111,7 @@ export class NativeComponentAdmission {
   }
   private check(): void {
     this.controller.signal.throwIfAborted();
+    if (this.cleanupFailure) throw new Error("Native component cleanup failed");
     if (!isDeepStrictEqual(this.current(), this.plans.identity)) {
       this.controller.abort(); throw new Error("Native component session expired");
     }

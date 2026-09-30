@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { StepRun, StepResponse } from "../../harness/components/runner.js";
 import { CODEX_BASELINE_VERSION } from "./codex-compatibility.js";
+import { codexAccountUpdatedSchema, codexDisabledCodeModeWarningSchema, codexRateLimitsUpdatedSchema } from "./codex-events.js";
 import { CodexRpcClient, CodexRpcError, object, type RpcTransport, type RpcNotification } from "./codex-rpc.js";
 
 /** Internal driver input from a certified provisioner, never browser configuration. */
@@ -14,10 +15,13 @@ export interface CodexComponentPolicy {
   readonly configuration: Readonly<Record<string, unknown>>;
   /** Revalidates approved account, exact executable, environment and generation. */
   assertCurrent(): void;
+  /** Cheap revocation check for passive events; full integrity is still checked at every effect boundary. */
+  assertLive?(): void;
 }
 const id = z.string().min(1).max(256);
 const callSchema = z.object({ threadId: id, turnId: id, callId: id, tool: id, arguments: z.unknown(), namespace: z.null().optional() }).strict();
-const turnSchema = z.object({ id, status: z.enum(["inProgress", "completed", "failed", "interrupted"]), items: z.array(z.unknown()).max(512), itemsView: z.literal("full").default("full") });
+const turnSchema = z.object({ id, status: z.enum(["inProgress", "completed", "failed", "interrupted"]), items: z.array(z.unknown()).max(512), itemsView: z.enum(["full", "notLoaded", "summary"]).default("full") })
+  .refine((turn) => turn.itemsView !== "notLoaded" || turn.items.length === 0);
 const threadSchema = z.object({ id, cwd: z.string(), cliVersion: z.literal(CODEX_BASELINE_VERSION), ephemeral: z.literal(true) });
 function deny(): never { throw new CodexRpcError("protocol"); }
 function parse<T>(schema: z.ZodType<T>, value: unknown): T { const result = schema.safeParse(value); return result.success ? result.data : deny(); }
@@ -69,7 +73,8 @@ export async function runCodexComponentStep(transport: RpcTransport, approved: C
   // Capture authority before callbacks or transport I/O can mutate the supplied object.
   const policy = freeze({ cwd: approved.cwd, codexHome: approved.codexHome,
     permissionProfile: approved.permissionProfile, model: approved.model, accountEmail: approved.accountEmail,
-    configuration: structuredClone(approved.configuration), assertCurrent: approved.assertCurrent.bind(approved) });
+    configuration: structuredClone(approved.configuration), assertCurrent: approved.assertCurrent.bind(approved),
+    ...(approved.assertLive ? { assertLive: approved.assertLive.bind(approved) } : {}) });
   let phase: "init" | "thread" | "starting" | "running" | "finished" = "init";
   let threadId: string | undefined; let turnId: string | undefined;
   let finalText: string | undefined;
@@ -77,6 +82,7 @@ export async function runCodexComponentStep(transport: RpcTransport, approved: C
   const items = new Map<string, { type: string; done: boolean; completed?: unknown }>();
   const calls = new Set<string>();
   let failed = false; let threadStarted = false; let turnStarted = false;
+  let accountResponseReceived = false;
   let queued: RpcNotification[] = []; let queuedBytes = 0;
   let pendingTools = 0; let toolQueue: Promise<unknown> = Promise.resolve();
   let resolveTurn!: () => void; let rejectTurn!: (error: unknown) => void;
@@ -84,11 +90,17 @@ export async function runCodexComponentStep(transport: RpcTransport, approved: C
   void completion.catch(() => {});
   let scopeReady!: () => void;
   const ready = new Promise<void>((resolve) => { scopeReady = resolve; });
-  const check = () => { if (failed) deny(); run.signal.throwIfAborted(); policy.assertCurrent(); };
+  const check = () => { if (failed) deny(); run.signal.throwIfAborted(); (policy.assertLive ?? policy.assertCurrent)(); };
+  const verify = () => { if (failed) deny(); run.signal.throwIfAborted(); policy.assertCurrent(); };
   const scope = (value: Record<string, unknown>) => { if (value.threadId !== threadId || value.turnId !== turnId) deny(); };
   const receive = (event: RpcNotification): void => {
     check();
     const p = object(event.params) ? event.params : deny();
+    if (event.method === "account/rateLimits/updated") { parse(codexRateLimitsUpdatedSchema, p); return; } // telemetry only, never authority
+    if (event.method === "account/updated") {
+      if (accountResponseReceived || phase !== "init") deny();
+      parse(codexAccountUpdatedSchema, p); return; // startup only; account/read must still verify the pinned identity
+    }
     if (event.method === "remoteControl/status/changed") { if (p.status !== "disabled") deny(); return; }
     if (phase === "thread" || phase === "starting") {
       queuedBytes += Buffer.byteLength(JSON.stringify(event));
@@ -98,6 +110,12 @@ export async function runCodexComponentStep(transport: RpcTransport, approved: C
       const t = parse(threadSchema, p.thread); if (threadStarted || t.id !== threadId || t.cwd !== policy.cwd) deny(); threadStarted = true; return;
     }
     if (!threadId || p.threadId !== threadId) deny();
+    if (event.method === "warning") {
+      parse(codexDisabledCodeModeWarningSchema, p);
+      const features = policy.configuration.features;
+      if (!object(features) || features.code_mode_host !== false || features.code_mode !== false) deny();
+      return; // exact denial warning only; no tool or permission is enabled
+    }
     if (event.method === "thread/status/changed") {
       parse(z.object({ type: z.enum(["notLoaded", "idle", "systemError", "active"]) }), p.status); return;
     }
@@ -112,7 +130,9 @@ export async function runCodexComponentStep(transport: RpcTransport, approved: C
         if (completedIds.has(item.id) || !observed?.done || observed.type !== item.type || !isDeepStrictEqual(observed.completed, raw)) deny();
         completedIds.add(item.id);
       }
-      if (!threadStarted || !turnStarted || completedIds.size !== items.size || t.status !== "completed" || pendingTools || [...items.values()].some((item) => !item.done) || finalText === undefined) deny();
+      // Summary/notLoaded views omit items; the complete streamed lifecycle is
+      // authoritative. Every supplied item still matches, and full views cover all.
+      if (!threadStarted || !turnStarted || (t.itemsView === "full" && completedIds.size !== items.size) || t.status !== "completed" || pendingTools || [...items.values()].some((item) => !item.done) || finalText === undefined) deny();
       phase = "finished"; resolveTurn(); return;
     }
     scope(p);
@@ -144,7 +164,8 @@ export async function runCodexComponentStep(transport: RpcTransport, approved: C
     const result = toolQueue.then(async () => {
       await Promise.race([ready, completion.then(deny)]); check(); scope(call); if (phase !== "running") deny();
       if (Buffer.byteLength(JSON.stringify(call.arguments)) > 65_536) deny();
-      const output = await run.tools[call.tool]!(call.arguments); check(); if (phase !== "running") deny();
+      verify();
+      const output = await run.tools[call.tool]!(call.arguments); verify(); if (phase !== "running") deny();
       const text = JSON.stringify(output); if (text === undefined || Buffer.byteLength(text) > 1_048_000) deny();
       return { contentItems: [{ type: "inputText", text }], success: true };
     });
@@ -156,7 +177,7 @@ export async function runCodexComponentStep(transport: RpcTransport, approved: C
   const timer = setTimeout(() => rpc.fail("timeout"), 120_000);
   const drain = () => { const events = queued; queued = []; queuedBytes = 0; for (const event of events) receive(event); };
   try {
-    check(); validatePolicy(policy);
+    verify(); validatePolicy(policy);
     const initialized = parse(z.object({ codexHome: z.literal(policy.codexHome), platformFamily: z.literal("unix"), platformOs: z.literal("macos"), userAgent: z.string() }), await rpc.request("initialize", { clientInfo: { name: "genbi-components", version: "1" }, capabilities: { experimentalApi: true } }));
     if (!initialized.userAgent.includes(`/${CODEX_BASELINE_VERSION} `)) deny(); rpc.notify("initialized", {});
     const effective = parse(z.object({ config: z.record(z.string(), z.unknown()) }), await rpc.request("config/read", { cwd: policy.cwd, includeLayers: false }));
@@ -166,8 +187,8 @@ export async function runCodexComponentStep(transport: RpcTransport, approved: C
         if (!object(features) || Object.values(configured(features) as Record<string, unknown>).some((value) => value !== false) || !object(expected) || Object.keys(expected).some((name) => features[name] !== false)) deny();
       } else if (!isDeepStrictEqual(configured(effective.config[key]), configured(expected))) deny();
     }
-    parse(z.object({ requiresOpenaiAuth: z.literal(true), account: z.object({ type: z.literal("chatgpt"), email: z.literal(policy.accountEmail) }) }), await rpc.request("account/read", { refreshToken: false }));
-    check(); phase = "thread";
+    parse(z.object({ requiresOpenaiAuth: z.literal(true), account: z.object({ type: z.literal("chatgpt"), email: z.literal(policy.accountEmail) }) }), await rpc.request("account/read", { refreshToken: false }, 10_000, undefined, () => { accountResponseReceived = true; }));
+    verify(); phase = "thread";
     const started = parse(z.object({ thread: threadSchema, model: z.literal(policy.model), modelProvider: z.literal("openai"),
       approvalPolicy: z.literal("never"), cwd: z.literal(policy.cwd),
       activePermissionProfile: z.object({ id: z.literal(policy.permissionProfile), extends: z.null().optional() }).strict(),
@@ -179,13 +200,13 @@ export async function runCodexComponentStep(transport: RpcTransport, approved: C
       dynamicTools: Object.keys(run.tools).map((name) => ({ name, description: run.toolDescriptions[name] ?? name, inputSchema: run.toolSchemas[name] ?? deny() })),
     }));
     if (started.thread.cwd !== policy.cwd) deny(); threadId = started.thread.id; phase = "init"; drain();
-    phase = "starting";
+    verify(); phase = "starting";
     const startedTurn = parse(z.object({ turn: turnSchema }), await rpc.request("turn/start", {
       threadId, model: policy.model, permissions: policy.permissionProfile, approvalPolicy: "never", cwd: policy.cwd, runtimeWorkspaceRoots: [], environments: [],
       input: [{ type: "text", text: JSON.stringify({ request: run.request, input: run.input, consumes: run.consumes }) }],
     }));
     if (startedTurn.turn.status !== "inProgress") deny(); turnId = startedTurn.turn.id; phase = "running"; scopeReady(); drain();
-    await completion; check(); return { value: finalText, usage };
+    await completion; verify(); return { value: finalText, usage };
   } catch (error) {
     rpc.fail(error instanceof CodexRpcError ? error.reason : "protocol");
     throw new CodexRpcError(error instanceof CodexRpcError ? error.reason : "protocol");
