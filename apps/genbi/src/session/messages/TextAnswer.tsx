@@ -17,7 +17,7 @@ export function TextAnswer({ answer }: Props) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       {answer.dataAnswer && <StatusTag state={verifiedStateOf(answer.verified)} />}
-      <Typography.Paragraph style={{ marginBottom: 0 }}>{answer.text}</Typography.Paragraph>
+      <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>{answer.text}</Typography.Paragraph>
     </div>
   );
 }

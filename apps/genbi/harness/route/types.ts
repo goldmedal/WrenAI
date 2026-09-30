@@ -296,4 +296,8 @@ export type RouteResult =
   | ({ readonly backend: "agent"; readonly warnings: readonly string[] } & RunAgentResult)
   | ({ readonly backend: "agent-sdk"; readonly warnings: readonly string[] } & DispatchedResult)
   | ({ readonly backend: "codex-local"; readonly warnings: readonly string[] } & CodexAskResult)
-  | ({ readonly backend: "codex-app-server"; readonly warnings: readonly string[] } & CodexAskResult);
+  | ({ readonly backend: "codex-app-server"; readonly warnings: readonly string[];
+      /** Host-captured normalized component evidence; never recovered from model prose. */
+      readonly envelope?: import("../render/envelope.js").RenderEnvelope;
+      readonly dataAttempted?: boolean;
+    } & CodexAskResult);

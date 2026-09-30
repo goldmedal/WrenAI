@@ -75,7 +75,12 @@ export function toAnswerOrRefusalEvent(
   result: RouteResult,
   worklog: readonly ToolStep[] = [],
 ): AnswerEvent | RefusalEvent {
-  if (result.backend === "agent-sdk" || (result.backend === "codex-local" || result.backend === "codex-app-server")) {
+  if (result.backend === "codex-app-server") {
+    return { id, kind: "answer", answer: result.envelope
+      ? { form: "rich", envelope: result.envelope }
+      : { form: "text", text: result.finalText, verified: false, dataAnswer: result.dataAttempted === true || attemptedDataAccess(worklog) } };
+  }
+  if (result.backend === "agent-sdk" || result.backend === "codex-local") {
     const envelope = extractEnvelopeFromText(result.finalText);
     if (envelope !== undefined) {
       return { id, kind: "answer", answer: { form: "rich", envelope } };
@@ -172,7 +177,10 @@ export function clarifyDecisionStep(detail: string): ToolStep {
  *    -> `undefined`, so no gate entry is appended.
  */
 export function gateDecisionStep(result: RouteResult): ToolStep | undefined {
-  if (result.backend === "agent-sdk" || (result.backend === "codex-local" || result.backend === "codex-app-server")) return undefined;
+  if (result.backend === "codex-app-server") return result.envelope?.verified === true
+    ? { id: DECISION_GATE_ID, kind: "decision", label: "Verify gate", state: "done", detail: "Query rows and SQL captured from successful host execution; interpretation is not verified." }
+    : undefined;
+  if (result.backend === "agent-sdk" || result.backend === "codex-local") return undefined;
   if (result.kind === "refusal") {
     return { id: DECISION_GATE_ID, kind: "decision", label: "Verify gate", state: "error", detail: result.reason };
   }

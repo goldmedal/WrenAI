@@ -193,3 +193,20 @@ and the UI renders it.
 It is a plain SPA rather than an SSR framework on purpose: it only talks to the
 BFF over HTTP/SSE and builds to static assets, so a future desktop shell or PWA
 stays a thin increment.
+
+
+### Structured Ask query evidence
+
+The direct Codex runtime carries host-normalized query results to the answer independently
+of the model's final text. Tables preserve the executed rows and SQL. A model-written
+`verified` flag cannot promote a text answer. If any root call fails or its evidence cannot
+be represented, the answer falls back to unverified text. Multiple successful query roots
+retain their table/SQL pairs in call order.
+
+The query verification badge covers rows and SQL, not the model's explanation of business
+meaning. Time-range and metric interpretation appears separately. Missing tool-supplied
+lineage or filters is shown as unknown. Questions without a period use the available data
+range and disclose that assumption; relative periods distinguish the current calendar from
+the latest data date. Explanations should identify date bounds, date field, week start,
+timezone (or unknown), partial periods and metric meanings. These are model instructions,
+not proof of business semantics; ambiguous definitions still require clarification.

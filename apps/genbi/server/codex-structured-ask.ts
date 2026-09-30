@@ -1,6 +1,7 @@
 import { createAgentEventEmitter, enforceCompliance, type RouteOptions } from "../harness/index.js";
 import { CodexBackendError, type CodexAppServerBackend, type CodexLaunchPermit } from "./runtime-host/codex-app-server.js";
 import type { CodexSessionTools } from "./runtime-host/codex-direct-tools.js";
+import { structuredQueryEnvelope, analyticalAskPrompt } from "./structured-query-evidence.js";
 import { StructuredRuntimeError, type StructuredAdapter, type StructuredScope } from "./structured-runtime.js";
 
 type OpenInput = Omit<Parameters<CodexAppServerBackend["open"]>[1], "onEvent" | "tools"> & { readonly tools: CodexSessionTools };
@@ -42,7 +43,18 @@ export function createCodexStructuredAdapter(provisioner: CodexStructuredProvisi
         prepared = await provisioner.prepare({ options, scope, permit });
         scope.assertCurrent(); permit.assertActive(); prepared.input.tools.assertCurrent();
         const hostGuard = prepared.input.assertScopeActive;
-        driver = await provisioner.backend.open(permit, { ...prepared.input, assertScopeActive: () => { scope.assertCurrent(); hostGuard(); }, onEvent(event) {
+        const hostTools = prepared.input.tools;
+        const rootResults: unknown[] = [];
+        let toolFailed = false;
+        const tools: CodexSessionTools = { ...hostTools, async call(...args) {
+          try {
+            const value = await hostTools.call(...args);
+            scope.assertCurrent(); hostTools.assertCurrent();
+            rootResults.push(structuredClone(value));
+            return value;
+          } catch (error) { toolFailed = true; throw error; }
+        } };
+        driver = await provisioner.backend.open(permit, { ...prepared.input, tools, assertScopeActive: () => { scope.assertCurrent(); hostGuard(); }, onEvent(event) {
           scope.assertCurrent();
           if ((event.method === "item/started" || event.method === "item/completed") && event.params.item.type === "dynamicToolCall") {
             const item = event.params.item;
@@ -54,14 +66,15 @@ export function createCodexStructuredAdapter(provisioner: CodexStructuredProvisi
         scope.assertCurrent();
         emitter.emit({ kind: "run.start", mode: "B", agentId: options.agentId ?? "answer_query" });
         await driver.startThread(); scope.assertCurrent();
-        const result = await driver.runTurn(options.question, { ...(scope.signal ? { signal: scope.signal } : {}), ...(options.chatTimeoutMs !== undefined ? { timeoutMs: options.chatTimeoutMs } : {}) });
+        const result = await driver.runTurn(analyticalAskPrompt(options.question, new Date()), { ...(scope.signal ? { signal: scope.signal } : {}), ...(options.chatTimeoutMs !== undefined ? { timeoutMs: options.chatTimeoutMs } : {}) });
         scope.assertCurrent(); prepared.input.tools.assertCurrent();
         if (result.status !== "completed") throw new StructuredRuntimeError("failed");
         const finalText = result.items.filter((item) => item.type === "agentMessage").map((item) => item.text).join("\n");
         if (!finalText.trim() || Buffer.byteLength(finalText) > 1_048_576) throw new StructuredRuntimeError("failed");
+        const envelope = toolFailed ? undefined : structuredQueryEnvelope(rootResults, finalText);
         await close(); scope.assertCurrent();
         emitter.emit({ kind: "run.finish", status: "answer" });
-        return { backend: "codex-app-server", warnings, finalText };
+        return { backend: "codex-app-server", warnings, finalText, ...(envelope ? { envelope } : {}), dataAttempted: toolFailed || rootResults.length > 0 };
       } catch (error) {
         if (error instanceof CodexBackendError && error.code === "codex_app_server_cleanup_failed") unconfirmedOpenCleanup = true;
         try { await close(); } catch { throw new StructuredRuntimeError("cleanup"); }

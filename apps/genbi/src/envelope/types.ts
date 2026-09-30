@@ -53,8 +53,8 @@ export interface ChartBlock {
 export interface DefinitionBlock {
   type: 'definition';
   sql: string;
-  source_tables: string[];
-  filters: string[];
+  source_tables?: string[];
+  filters?: string[];
 }
 
 export interface NarrativeBlock {
@@ -118,6 +118,9 @@ export function isKnownBlock(block: AnyBlock): block is KnownBlock {
  * promoting it to live data would require widening the agent output_schema.
  */
 export interface RenderEnvelope {
+  /** Host query evidence is verified separately from model interpretation. */
+  verificationScope?: 'query-results';
+  explanation?: string;
   blocks: AnyBlock[];
   summary?: string | null;
   verified?: boolean | null;

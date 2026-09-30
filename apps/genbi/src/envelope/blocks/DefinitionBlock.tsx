@@ -35,7 +35,7 @@ export function DefinitionBlock({ block }: Props) {
       <KVRow
         label={t('envelope.definitionSources')}
         value={
-          source_tables.length ? (
+          source_tables?.length ? (
             <span>
               {source_tables.map((s) => (
                 <Tag key={s} style={{ marginInlineEnd: 4 }}>
@@ -44,14 +44,14 @@ export function DefinitionBlock({ block }: Props) {
               ))}
             </span>
           ) : (
-            t('envelope.definitionNoneFallback')
+            source_tables === undefined ? t('envelope.definitionUnknown') : t('envelope.definitionNoneFallback')
           )
         }
       />
       <KVRow
         label={t('envelope.definitionFilters')}
         value={
-          filters.length ? (
+          filters?.length ? (
             <span>
               {filters.map((f) => (
                 <Tag key={f} color="blue" style={{ marginInlineEnd: 4 }}>
@@ -60,7 +60,7 @@ export function DefinitionBlock({ block }: Props) {
               ))}
             </span>
           ) : (
-            t('envelope.definitionEmptyFallback')
+            filters === undefined ? t('envelope.definitionUnknown') : t('envelope.definitionEmptyFallback')
           )
         }
       />

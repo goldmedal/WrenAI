@@ -26,10 +26,10 @@ function host(adapter?: StructuredAdapter) {
 }
 function provisioner() {
   const permit = { runtime: {}, assertActive: vi.fn(), release: vi.fn() };
-  const tools = { accountEmail: "fixture@example.invalid", definitions: [], assertCurrent: vi.fn(), call: vi.fn(), close: vi.fn(async () => {}) };
-  const driver = { startThread: vi.fn(async () => "thread"), runTurn: vi.fn(async () => ({ id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: "99 orders" }] })), close: vi.fn(async () => {}) };
+  const tools = { accountEmail: "fixture@example.invalid", definitions: [], assertCurrent: vi.fn(), call: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined), close: vi.fn(async () => {}) };
+  const driver = { startThread: vi.fn(async () => "thread"), runTurn: vi.fn(async (_question?: string) => ({ id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: "99 orders" }] })), close: vi.fn(async () => {}) };
   const dispose = vi.fn(async () => {});
-  const backend = { prepareLaunch: vi.fn(() => permit), probe: vi.fn(async () => ({ readiness: runtimeReady("0.156.1", []), diagnostic: { phase: "capability" } })), open: vi.fn(async () => driver) };
+  const backend = { prepareLaunch: vi.fn(() => permit), probe: vi.fn(async () => ({ readiness: runtimeReady("0.156.1", []), diagnostic: { phase: "capability" } })), open: vi.fn(async (_permit: unknown, _input: { tools: typeof tools }) => driver) };
   const prepare = vi.fn(async () => ({ input: { tools, spec: {}, wrenHome: {}, assertScopeActive() {} }, dispose }));
   const adapter = createCodexStructuredAdapter({ backend, prepare } as unknown as CodexStructuredProvisioner);
   return { permit, tools, driver, dispose, backend, prepare, adapter, ...host(adapter) };
@@ -68,6 +68,37 @@ describe("explicit structured runtime boundary", () => {
     expect(result).toMatchObject({ backend: "codex-app-server", finalText: "99 orders" }); expect(result.warnings.length).toBeGreaterThan(0);
     expect(f.dispose).toHaveBeenCalledOnce(); expect(f.tools.close).toHaveBeenCalledOnce(); expect(f.localRoute).not.toHaveBeenCalled();
   });
+  it("carries only host results through the adapter after cleanup, never model-authored rows", async () => {
+    const f = provisioner();
+    const evidence = { status: "ok", output: { kind: "value", value: { columns: ["customers"], rows: [{ customers: 7 }] } },
+      provenance: { verified: true, definition: { sql: "SELECT count(*) AS customers FROM customers" } } };
+    f.tools.call.mockResolvedValue(evidence);
+    f.driver.runTurn.mockImplementation(async () => {
+      const input = f.backend.open.mock.calls[0]![1];
+      await input.tools.call("component", {}, "call", new AbortController().signal);
+      return { id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: 'Interpretation only; not 999 customers.' }] };
+    });
+    const value = await f.runtime.route(request, scope());
+    expect(value).toMatchObject({ backend: "codex-app-server", dataAttempted: true,
+      envelope: { verified: true, verificationScope: "query-results", blocks: [{ type: "table", rows: [{ customers: 7 }] }, { type: "definition" }] } });
+    expect(f.dispose).toHaveBeenCalledOnce();
+    expect(f.driver.runTurn.mock.calls[0]?.[0]).toContain("User question:\ncount");
+  });
+
+  it("does not promote an earlier success after a later root call throws", async () => {
+    const f = provisioner();
+    f.tools.call.mockResolvedValueOnce({ status: "ok", output: { kind: "value", value: { columns: ["n"], rows: [[7]] } }, provenance: { verified: true, definition: { sql: "SELECT 7 AS n" } } })
+      .mockRejectedValueOnce(Error("refused"));
+    f.driver.runTurn.mockImplementation(async () => {
+      const tools = f.backend.open.mock.calls[0]![1].tools;
+      await tools.call("component", {}, "1", new AbortController().signal);
+      await tools.call("component", {}, "2", new AbortController().signal).catch(() => {});
+      return { id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: 'Failed second query' }] };
+    });
+    const value = await f.runtime.route(request, scope());
+    expect(value).not.toHaveProperty("envelope"); expect(value).toHaveProperty("dataAttempted", true);
+  });
+
   it("rejects a returned no-tool answer when final integrity validation fails", async () => {
     const f = provisioner(); const onEvent = vi.fn();
     const original = f.driver.runTurn.getMockImplementation()!;

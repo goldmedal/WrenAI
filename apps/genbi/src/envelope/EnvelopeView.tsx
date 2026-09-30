@@ -44,11 +44,23 @@ export function EnvelopeView({ envelope }: Props) {
         )}
       </div>
 
+      {envelope.verificationScope === 'query-results' && (
+        <Typography.Text type="secondary">{t('envelope.queryVerification')}</Typography.Text>
+      )}
+
       {envelope.summary ? (
         <Typography.Paragraph style={{ marginBottom: 0 }}>
           {envelope.summary}
         </Typography.Paragraph>
       ) : null}
+
+      {envelope.explanation && (
+        <Panel title={t('envelope.interpretationTitle')}>
+          <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
+            {envelope.explanation}
+          </Typography.Paragraph>
+        </Panel>
+      )}
 
       {kpis.length > 0 && (
         <Row gutter={[16, 16]}>
