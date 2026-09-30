@@ -1,5 +1,6 @@
 import { createAgentEventEmitter, enforceCompliance, type RouteOptions } from "../harness/index.js";
 import { CodexBackendError, type CodexAppServerBackend, type CodexLaunchPermit } from "./runtime-host/codex-app-server.js";
+import { CodexRpcError } from "./runtime-host/codex-rpc.js";
 import type { CodexSessionTools } from "./runtime-host/codex-direct-tools.js";
 import { structuredQueryEnvelope, analyticalAskPrompt } from "./structured-query-evidence.js";
 import { StructuredRuntimeError, type StructuredAdapter, type StructuredScope } from "./structured-runtime.js";
@@ -66,7 +67,7 @@ export function createCodexStructuredAdapter(provisioner: CodexStructuredProvisi
         scope.assertCurrent();
         emitter.emit({ kind: "run.start", mode: "B", agentId: options.agentId ?? "answer_query" });
         await driver.startThread(); scope.assertCurrent();
-        const result = await driver.runTurn(analyticalAskPrompt(options.question, new Date()), { ...(scope.signal ? { signal: scope.signal } : {}), ...(options.chatTimeoutMs !== undefined ? { timeoutMs: options.chatTimeoutMs } : {}) });
+        const result = await driver.runTurn(analyticalAskPrompt(options.question, new Date()), { ...(scope.signal ? { signal: scope.signal } : {}), timeoutMs: options.chatTimeoutMs ?? 300_000 });
         scope.assertCurrent(); prepared.input.tools.assertCurrent();
         if (result.status !== "completed") throw new StructuredRuntimeError("failed");
         const finalText = result.items.filter((item) => item.type === "agentMessage").map((item) => item.text).join("\n");
@@ -78,7 +79,8 @@ export function createCodexStructuredAdapter(provisioner: CodexStructuredProvisi
       } catch (error) {
         if (error instanceof CodexBackendError && error.code === "codex_app_server_cleanup_failed") unconfirmedOpenCleanup = true;
         try { await close(); } catch { throw new StructuredRuntimeError("cleanup"); }
-        throw error instanceof StructuredRuntimeError ? error : new StructuredRuntimeError(scope.signal?.aborted ? "cancelled" : "failed");
+        throw error instanceof StructuredRuntimeError ? error : new StructuredRuntimeError(scope.signal?.aborted ? "cancelled"
+          : error instanceof CodexRpcError && error.reason === "timeout" ? "timeout" : "failed");
       } finally { scope.signal?.removeEventListener("abort", abort); permit.release(); }
     },
   };

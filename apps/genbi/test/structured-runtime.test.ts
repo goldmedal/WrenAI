@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { CodexRpcError } from "../server/runtime-host/codex-rpc.js";
 import { CodexBackendError } from "../server/runtime-host/codex-app-server.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { StructuredRuntime, type StructuredAdapter, type StructuredScope } from "../server/structured-runtime.js";
@@ -27,7 +28,7 @@ function host(adapter?: StructuredAdapter) {
 function provisioner() {
   const permit = { runtime: {}, assertActive: vi.fn(), release: vi.fn() };
   const tools = { accountEmail: "fixture@example.invalid", definitions: [], assertCurrent: vi.fn(), call: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined), close: vi.fn(async () => {}) };
-  const driver = { startThread: vi.fn(async () => "thread"), runTurn: vi.fn(async (_question?: string) => ({ id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: "99 orders" }] })), close: vi.fn(async () => {}) };
+  const driver = { startThread: vi.fn(async () => "thread"), runTurn: vi.fn(async (_question?: string, _options?: { timeoutMs?: number }) => ({ id: "turn", status: "completed", items: [{ type: "agentMessage", id: "answer", text: "99 orders" }] })), close: vi.fn(async () => {}) };
   const dispose = vi.fn(async () => {});
   const backend = { prepareLaunch: vi.fn(() => permit), probe: vi.fn(async () => ({ readiness: runtimeReady("0.156.1", []), diagnostic: { phase: "capability" } })), open: vi.fn(async (_permit: unknown, _input: { tools: typeof tools }) => driver) };
   const prepare = vi.fn(async () => ({ input: { tools, spec: {}, wrenHome: {}, assertScopeActive() {} }, dispose }));
@@ -99,6 +100,17 @@ describe("explicit structured runtime boundary", () => {
     expect(value).not.toHaveProperty("envelope"); expect(value).toHaveProperty("dataAttempted", true);
   });
 
+  it("gives the outer turn room for a bounded component and preserves explicit caller timeout", async () => {
+    const f = provisioner(); await f.runtime.route(request, scope());
+    expect(f.driver.runTurn.mock.calls[0]![1]).toMatchObject({ timeoutMs: 300_000 });
+    await f.runtime.route({ ...request, chatTimeoutMs: 7_000 }, scope());
+    expect(f.driver.runTurn.mock.calls[1]![1]).toMatchObject({ timeoutMs: 7_000 });
+  });
+  it("reports a safe timeout reason after cleanup without exposing vendor details", async () => {
+    const f = provisioner(); f.driver.runTurn.mockRejectedValue(new CodexRpcError("timeout"));
+    await expect(f.runtime.route(request, scope())).rejects.toMatchObject({ code: "timeout" });
+    expect(f.dispose).toHaveBeenCalledOnce();
+  });
   it("rejects a returned no-tool answer when final integrity validation fails", async () => {
     const f = provisioner(); const onEvent = vi.fn();
     const original = f.driver.runTurn.getMockImplementation()!;

@@ -210,3 +210,7 @@ range and disclose that assumption; relative periods distinguish the current cal
 the latest data date. Explanations should identify date bounds, date field, week start,
 timezone (or unknown), partial periods and metric meanings. These are model instructions,
 not proof of business semantics; ambiguous definitions still require clarification.
+
+Structured Ask allows up to five minutes for the outer conversation (including the bounded
+component call and explanation). Individual component/step deadlines remain unchanged. An
+explicit caller timeout is preserved, and outer timeout failures are reported distinctly.
