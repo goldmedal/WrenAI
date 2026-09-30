@@ -192,9 +192,13 @@ function smallestGroup(table: TableAnswer): number | undefined {
 function modelText(answer: { readonly summary?: string | undefined; readonly text?: string | undefined; readonly unit?: string | undefined }): string[] {
   return [answer.summary, answer.text, answer.unit].filter((value): value is string => typeof value === "string");
 }
-/** The policy's sensitive-column patterns and the PII patterns, applied to free text. */
+/**
+ * The policy's sensitive-column patterns and the PII patterns, applied to free text. In prose a
+ * column pattern must match as a whole word ("phone" hits "contact phone", not "iPhone"); column
+ * names are still matched exactly as written.
+ */
 function textReason(texts: readonly string[], policy: DisclosurePolicy): EgressReason | undefined {
-  const sensitive = policy.sensitive_column_patterns.map(compile);
+  const sensitive = policy.sensitive_column_patterns.map(compile).map((pattern) => new RegExp(`\\b(?:${pattern.source})\\b`, "i"));
   if (texts.some((text) => sensitive.some((pattern) => pattern.test(text)))) return "sensitive_column";
   const pii = [...BUILT_IN_PII_PATTERNS, ...policy.pii_patterns.map(compile)];
   if (texts.some((text) => pii.some((pattern) => pattern.test(text)))) return "pii_pattern";
@@ -269,16 +273,21 @@ function neutralSummary(columns: readonly string[], rowCount: number): string {
  * callee's `summary`, `text`, `unit` and every other field are model-written or undeclared and are
  * not carried, because the redacted values may be named in them; `summary` becomes {@link neutralSummary}.
  */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
 function redactColumns(table: TableAnswer, columns: readonly string[]): TableAnswer | undefined {
   const drop = new Set(columns);
   if (columns.some((column) => !table.columns.includes(column))) return undefined;
   const keep = table.columns.filter((column) => !drop.has(column));
   if (keep.length === 0) return undefined;
-  const rows = table.rows.map((row) => {
-    if (Array.isArray(row)) return keep.map((column) => row[table.columns.indexOf(column)]);
-    if (row && typeof row === "object") return Object.fromEntries(keep.map((column) => [column, (row as Record<string, unknown>)[column]]));
-    return row;
-  });
+  // A row that is neither positional nor keyed cannot be projected, so the redaction cannot be shown to hold.
+  if (!table.rows.every((row) => Array.isArray(row) || isPlainObject(row))) return undefined;
+  const rows = table.rows.map((row) => Array.isArray(row)
+    ? keep.map((column) => row[table.columns.indexOf(column)])
+    : Object.fromEntries(keep.map((column) => [column, (row as Record<string, unknown>)[column]])));
   return { columns: keep, rows, summary: neutralSummary(keep, rows.length) };
 }
 /** Redacted string values shorter than this would match almost any text, so they are not searched for. */
@@ -306,7 +315,8 @@ function refusedAnswer(slot: SlotDeclaration, reason: EgressReason): DisclosedAn
 function discloseTable(slot: SlotDeclaration, table: TableAnswer, status: EgressStatus): DisclosedAnswer {
   const value = slot.expected_shape === "scalar" ? columnValues(table, table.columns[0]!)[0] : undefined;
   return { slot_id: slot.slot_id, status, shape: slot.expected_shape, columns: [...table.columns], rows: structuredClone(table.rows),
-    ...(value !== undefined ? { value } : {}), ...(slot.unit !== undefined ? { unit: slot.unit } : table.unit !== undefined ? { unit: table.unit } : {}),
+    // Only the planner-declared unit crosses; the callee model's `unit` is model text the judge never sees.
+    ...(value !== undefined ? { value } : {}), ...(slot.unit !== undefined ? { unit: slot.unit } : {}),
     ...(table.summary !== undefined ? { summary: table.summary } : {}) };
 }
 function provenanceOf(slot: SlotDeclaration, table: { definition?: unknown; columns?: readonly string[]; rows?: readonly unknown[]; verified?: boolean | undefined }): EgressProvenance {
@@ -419,7 +429,8 @@ export async function verifyEgress(
       const judged = await consultJudge(options.judge, { policy: options.policy, untrusted_question: slot.question, ...(preamble !== undefined ? { untrusted_preamble: preamble } : {}),
         expected_shape: slot.expected_shape, answer: { columns: [], rows: [], text }, metadata: { row_count: 0, group_count: 0, identifier_like_keys: [], columns_touched: [] } }, options.policy, options.signal);
       if (judged.verdict !== "pass") {
-        const reason = "reason" in judged ? judged.reason : "judge_invalid";
+        // A narrative answer has no columns to drop: a redact verdict on it cannot be carried through.
+        const reason: EgressReason = "reason" in judged ? judged.reason : "redact_leak";
         decisions.push({ slot_id: slot.slot_id, status: "refused", reason_category: reason, judge: judged.verdict, row_count: 0 }); disclosed.push(refusedAnswer(slot, reason)); continue;
       }
       decisions.push({ slot_id: slot.slot_id, status: "ok", judge: "pass", row_count: 0 });

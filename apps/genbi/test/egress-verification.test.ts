@@ -245,6 +245,36 @@ describe("egress verification: model-written text", () => {
     withoutNames(leaked.disclosed);
     expect(answers(leaked)[0]).toEqual({ slot_id: "s1", status: "refused", reason_category: "redact_leak" });
   });
+  it("a redaction over rows that are neither positional nor keyed is refused, not passed through", async () => {
+    const dropCustomer: EgressJudge = async () => JSON.stringify({ verdict: "redact", redact_columns: ["customer"] });
+    // min_group_size 1, so the identifier-like `customer` key does not already refuse the slot before the judge.
+    const bare = await verifyEgress(slots(), ok({ columns: ["customer", "revenue"], rows: ["Northwind", "Contoso"], summary: "two" }), { policy: { ...policy, min_group_size: 1 }, judge: dropCustomer });
+    expect(bare.decisions[0]).toMatchObject({ judge: "redact" });
+    expect(JSON.stringify(bare.disclosed)).not.toMatch(/Northwind|Contoso/);
+    expect(answers(bare)[0]).toEqual({ slot_id: "s1", status: "refused", reason_category: "judge_invalid" });
+  });
+  it("only the planner-declared unit crosses; the callee model's unit never does, even on pass", async () => {
+    const scalar = { columns: ["total"], rows: [{ total: 5 }], summary: "total", unit: "USD; top account Northwind Traders" };
+    const undeclared = await verify(scalar, slots({ expected_shape: "scalar" }));
+    expect(answers(undeclared)[0]).toEqual({ slot_id: "s1", status: "ok", shape: "scalar", columns: ["total"], rows: [{ total: 5 }], value: 5, summary: "total" });
+    expect(JSON.stringify(undeclared.disclosed)).not.toContain("Northwind");
+    const declared = await verifyEgress({ request: "x", input: { slots: [{ slot_id: "s1", expected_shape: "scalar", question: "q", unit: "USD" }] } }, ok(scalar), { policy, judge: passJudge });
+    expect(answers(declared)[0]).toMatchObject({ status: "ok", unit: "USD" });
+    expect(JSON.stringify(declared.disclosed)).not.toContain("Northwind");
+  });
+  it("a redact verdict on a narrative answer is refused as redact_leak", async () => {
+    const outcome = await verify({ text: "Avery Quill led the year." }, slots({ expected_shape: "narrative" }), redactNames);
+    withoutNames(outcome.disclosed);
+    expect(answers(outcome)[0]).toEqual({ slot_id: "s1", status: "refused", reason_category: "redact_leak" });
+  });
+  it("in prose a sensitive-column pattern must match a whole word; column names match as before", async () => {
+    const words = parseDisclosurePolicy({ max_rows: 3, min_group_size: 1, sensitive_column_patterns: ["email", "phone"], judge_timeout_ms: 50 });
+    const run = (value: unknown) => verifyEgress(slots(), ok(value), { policy: words, judge: passJudge });
+    expect(answers(await run({ columns: ["region", "revenue"], rows: [{ region: "a", revenue: 1 }], summary: "iPhone led revenue" }))[0]).toMatchObject({ status: "ok", summary: "iPhone led revenue" });
+    expect(answers(await run({ columns: ["region", "revenue"], rows: [{ region: "a", revenue: 1 }], summary: "contact phone: 555 0100" }))[0]).toEqual({ slot_id: "s1", status: "refused", reason_category: "sensitive_column" });
+    // A column name is still matched as a bare substring.
+    expect(answers(await run({ columns: ["region", "iphone_revenue"], rows: [{ region: "a", iphone_revenue: 1 }], summary: "done" }))[0]).toEqual({ slot_id: "s1", status: "refused", reason_category: "sensitive_column" });
+  });
   it("a refused slot crosses as exactly its id, status and reason category", async () => {
     const refusing: EgressJudge = async () => JSON.stringify({ verdict: "refuse", reason_category: "individual_level" });
     const judged = await verify(people(), slots(), refusing);
