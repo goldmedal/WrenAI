@@ -89,8 +89,13 @@ const LAYOUT = {
 
 vi.mock("../harness/components/ai-step.js", () => ({ runAiComponentStep: vi.fn() }));
 // Each judge call reports its usage the way the real judge does (egress-verification.test.ts covers the real wiring).
-vi.mock("../harness/components/egress-judge.js", () => ({ createModelJudge: (_model: unknown, onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void) => async () => {
+// A test may script the judge to redact one column wherever an answer carries it; otherwise it passes everything.
+const judgeScript = vi.hoisted(() => ({ redactColumn: undefined as string | undefined }));
+vi.mock("../harness/components/egress-judge.js", () => ({ createModelJudge: (_model: unknown, onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void) => async (input: { answer: { columns: readonly string[] } }) => {
   onUsage?.({ inputTokens: 21, outputTokens: 3 });
+  if (judgeScript.redactColumn !== undefined && input.answer.columns.includes(judgeScript.redactColumn)) {
+    return JSON.stringify({ verdict: "redact", reason_category: "individual_level", redact_columns: [judgeScript.redactColumn] });
+  }
   return JSON.stringify({ verdict: "pass", reason_category: "aggregate" });
 } }));
 vi.mock("../harness/components/wren-access.js", async (original) => ({ ...await original<typeof import("../harness/components/wren-access.js")>(), openWrenComponentAccess: vi.fn() }));
@@ -118,7 +123,7 @@ const roles = { judge: "judge", render: "render" };
 interface Captured { readonly step: string; readonly tier: string; readonly modelId: string; readonly brief?: string; readonly prompt: string; readonly request: string; readonly input: unknown; readonly consumes: unknown; readonly output: string }
 
 /** The fake models, one behaviour per step, dispatched on what the host hands the step (tools, consumes). */
-function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: string; usage?: Readonly<Record<string, StepUsage>> }) {
+function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: string; namingSummary?: boolean; usage?: Readonly<Record<string, StepUsage>> }) {
   const calls: Captured[] = [];
   const askRequests: unknown[] = [];
   const askResults: unknown[] = [];
@@ -160,7 +165,11 @@ function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: 
         const observed = await run.tools["query"]!({ sql }) as { columns: string[]; rows: unknown[] };
         // The model's own copy of the rows is deliberately wrong for one slot: the observed rows must win.
         const rows = slot.slot_id === "total_revenue" ? [[999]] : observed.rows;
-        entries.push({ slot_id: slot.slot_id, columns: observed.columns, rows, summary: `Answer for ${slot.slot_id}: ${slot.slot_id === "growth_story" ? "revenue rose every quarter of fiscal 2025, from 290,000 USD in Q1 to 362,000 USD in Q4; Q4 contributed the most at 28% of the year." : "see rows"}`,
+        // The callee's model may also write the customers it saw into its free text, not only into the rows.
+        const naming = options.namingSummary && slot.slot_id === "top_customers";
+        const summary = naming ? `The top five were ${(observed.rows as { customer: string; revenue: number }[]).map((row) => `${row.customer} (${row.revenue} USD)`).join(", ")}.`
+          : `Answer for ${slot.slot_id}: ${slot.slot_id === "growth_story" ? "revenue rose every quarter of fiscal 2025, from 290,000 USD in Q1 to 362,000 USD in Q4; Q4 contributed the most at 28% of the year." : "see rows"}`;
+        entries.push({ slot_id: slot.slot_id, columns: observed.columns, rows, summary, ...(naming ? { highlight: `${(observed.rows[0] as { customer: string }).customer} led the year` } : {}),
           verified: true, definition: { sql, source_tables: sql.includes("customers") ? ["orders", "customers"] : ["orders"], filters: ["fiscal year 2025", "completed orders only"] } });
       }
       return record("generate_sql", JSON.stringify(entries));
@@ -171,9 +180,10 @@ function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: 
   return { calls, askRequests, askResults };
 }
 
-async function runReport(project: string, options: { mutateNarration?: boolean; toolErrorSlot?: string; usage?: Record<string, StepUsage>; zoneRoles?: Record<string, string>; tierBinding?: Record<string, AdapterSpec> } = {}) {
+async function runReport(project: string, options: { mutateNarration?: boolean; toolErrorSlot?: string; namingSummary?: boolean; usage?: Record<string, StepUsage>; zoneRoles?: Record<string, string>; tierBinding?: Record<string, AdapterSpec> } = {}) {
   const { plan, ir } = await loadReportPlan(project);
-  const fakes = installFakeModels({ mutateNarration: options.mutateNarration ?? false, ...(options.toolErrorSlot ? { toolErrorSlot: options.toolErrorSlot } : {}), ...(options.usage ? { usage: options.usage } : {}) });
+  const fakes = installFakeModels({ mutateNarration: options.mutateNarration ?? false, ...(options.toolErrorSlot ? { toolErrorSlot: options.toolErrorSlot } : {}),
+    ...(options.namingSummary ? { namingSummary: true } : {}), ...(options.usage ? { usage: options.usage } : {}) });
   vi.mocked(openWrenComponentAccess).mockResolvedValue({
     async query(input) { if (input.sql === CUBE_AS_TABLE) throw new GovernedWrenError("model_not_found"); const table = TABLES[input.sql]; if (!table) throw new Error(`unexpected SQL: ${input.sql}`); return structuredClone(table); },
     async inspect() { return {}; }, async close() {},
@@ -188,7 +198,7 @@ async function runReport(project: string, options: { mutateNarration?: boolean; 
   return { result, events, elapsedMs, contract, ...fakes };
 }
 
-beforeEach(() => vi.resetAllMocks());
+beforeEach(() => { vi.resetAllMocks(); judgeScript.redactColumn = undefined; });
 
 describe("M1: the annual revenue report end to end, offline", () => {
   it("runs one batched call, verifies every slot, materialises, narrates, synthesises with provenance, and validates the envelope", async () => {
@@ -371,6 +381,38 @@ describe("M1: the annual revenue report end to end, offline", () => {
         expect(call.brief).toContain("wren -q");
         expect(Object.values(record.surfaces)).not.toContain(card.digest);
       }
+    } finally { await rm(project, { recursive: true, force: true }); }
+  });
+
+  it("a judge redact removes the named column from the rows and every model-written text: no redacted value reaches a public-tier surface", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "genbi-report-redact-"));
+    try {
+      judgeScript.redactColumn = "customer";
+      const { result, calls, askResults } = await runReport(project, { namingSummary: true });
+      if (result.kind !== "answer") throw new Error("expected an answer");
+      const names = TABLES[SQL.top_customers]!.rows.map((row) => String(row["customer"]));
+      const withoutNames = (label: string, value: unknown) => { const text = JSON.stringify(value); for (const name of names) expect(text, `${label}: ${name}`).not.toContain(name); };
+      // The planner's tool result (the disclosed alias-call result) is what reaches the public model inside plan_layout.
+      withoutNames("disclosed alias-call result", askResults);
+      const disclosed = askResults[0] as { output: { value: { answers: Record<string, unknown>[] } } };
+      expect(disclosed.output.value.answers.find((answer) => answer["slot_id"] === "top_customers")).toEqual({
+        slot_id: "top_customers", status: "partial", shape: "table", columns: ["revenue"], rows: [{ revenue: 96200 }, { revenue: 88750 }, { revenue: 81400 }, { revenue: 74900 }, { revenue: 69300 }],
+        unit: "USD", summary: "5 rows; columns: revenue." });
+      expect(result.trace?.steps.filter((step) => step.tool === "egress").map((step) => step.detail)).toContain("ask/top_customers: partial");
+      // Every recorded public-tier surface audits exactly the texts the model received, and none of those texts names a customer.
+      const publicSurfaces = (result.trace?.surfaces ?? []).filter((record) => record.zone === "public");
+      expect(publicSurfaces.map((record) => record.step)).toEqual(["plan_layout", "narrate"]);
+      for (const record of publicSurfaces) {
+        const call = calls.find((candidate) => candidate.step === record.step)!;
+        expect(record.surfaces["input"]).toBe(sha(JSON.stringify({ request: call.request, input: call.input })));
+        expect(record.surfaces["consumes"]).toBe(sha(JSON.stringify(call.consumes)));
+        expect(record.surfaces["brief"]).toBe(sha(call.brief!));
+        withoutNames(record.step, { brief: call.brief, prompt: call.prompt, request: call.request, input: call.input, consumes: call.consumes, output: call.output });
+      }
+      // The report still renders the surviving column, and the final envelope names no customer either.
+      const envelope = result.envelope as { blocks: Record<string, unknown>[] };
+      expect(envelope.blocks.find((block) => block.type === "table" && block.slot_id === "top_customers")).toMatchObject({ columns: ["revenue"], rows: [[96200], [88750], [81400], [74900], [69300]] });
+      withoutNames("envelope", envelope);
     } finally { await rm(project, { recursive: true, force: true }); }
   });
 
