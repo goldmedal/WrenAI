@@ -52,6 +52,9 @@ try {
  let unlisten=terminal.onData(s=>{output+=s;});
  await until(()=>text().includes('OpenAI Codex'),'official CLI banner');
  terminal.resize(120,40);
+ // The banner is rendered before remote thread initialization finishes. Wait
+ // for the bound workspace/model status line, or startup can discard input.
+ await until(()=>text().includes(`gpt-5.5 default · ${cwd}`),'initialized remote composer');
  // Bracketed paste gives the official CLI an explicit end-of-input marker.
  // A fixed delay can leave Enter inside the CLI paste buffer on loaded CI hosts.
  const submit=async(q)=>{const start=output.length;terminal.write('\x1b[200~'+q+'\x1b[201~');await until(()=>output.slice(start).includes(q),'rendered input');terminal.write('\r');};
