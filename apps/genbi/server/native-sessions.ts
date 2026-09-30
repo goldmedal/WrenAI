@@ -1,4 +1,5 @@
 import type { DirectCodexProvisioner } from "./codex-native-session.js";
+import { startCodexTerminal } from "./runtime-host/codex-terminal.js";
 import { CodexConversation, type CodexConversationAttachment, type ConversationFrame, type ConversationReplay } from "./runtime-host/codex-conversation.js";
 import { runNativeDispatchProcess } from "./native-dispatch-process.js";
 import { NativeComponentAdmission, nativeComponentHostContract, readNativeComponentPlans, type NativeComponentPreparation, type NativeComponentReceipt } from "./native-components.js";
@@ -1267,7 +1268,7 @@ export class NativeSessionService {
 
   /** Browser-visible resume state uses the same current-scope fence as launch, plus *why* when it fails. */
   resumeAvailability(row: NativeSessionRow): NativeSessionResumeAvailability {
-    if (row.transport === "conversation") return { available: false, cause: "no_resume_handle" };
+    if (row.transport === "conversation" || (row.vendor === "codex" && this.options.directCodex?.terminal)) return { available: false, cause: "no_resume_handle" };
     if (row.status !== "exited" && row.status !== "stopped" && row.status !== "interrupted" && row.status !== "failed" && row.status !== "stale") {
       return { available: false, cause: "not_terminal" };
     }
@@ -1293,7 +1294,7 @@ export class NativeSessionService {
    * no global Codex state and persists only a provider-bound encrypted envelope.
    */
   private captureCodexResumeHandle(row: NativeSessionRow): void {
-    if (row.vendor !== "codex" || this.options.store.hasAvailableNativeSessionResume(row.id, "codex")) return;
+    if (row.vendor !== "codex" || this.options.directCodex?.terminal || this.options.store.hasAvailableNativeSessionResume(row.id, "codex")) return;
     const state = this.materializationState();
     if (!state) return;
     const root = path.join(state.root, "native", row.id);
@@ -1491,7 +1492,9 @@ export class NativeSessionService {
         : this.options.store.hasExplicitRuntimeSettings() && runtimeSettingsCorrection(this.options.store.getRuntimeSettings()) ? runtimeSettingsCorrection(this.options.store.getRuntimeSettings())
         : !this.options.directCodex ? "Direct Codex preparation is unavailable."
         : !runtime.configured || runtime.provider !== "codex" ? "Select a Codex Runtime binding."
-        : !binding ? "Bind a project before starting a conversation." : undefined;
+        : !binding ? "Bind a project before starting a conversation."
+        : this.options.directCodex.terminal && !this.options.directCodex.terminalCertified?.("answer_query") ? "Native terminal version is not certified."
+        : this.options.directCodex.terminal && !(await terminalHostAvailable()) ? "Native terminal host is unavailable." : undefined;
       const purposes = Object.fromEntries(NATIVE_PURPOSES.map((purpose) => {
         const unavailable = reason ?? (purpose !== "analysis" ? "This purpose is not supported by direct Codex sessions." : undefined);
         return [purpose, { scopeKind: NATIVE_DISPATCH_REGISTRY[purpose].scopeKind, profile: NATIVE_DISPATCH_REGISTRY[purpose].profile,
@@ -1917,6 +1920,7 @@ export class NativeSessionService {
 
   private async createDirectCodex(binding: EnrichmentBinding, runtime: NativeRuntimeBinding, entryVerb: string): Promise<NativeSessionLaunch> {
     const provisioner = this.options.directCodex!;
+    if (provisioner.terminal && !provisioner.terminalCertified?.(entryVerb)) throw new InteractiveLaunchError("Native terminal version is not certified");
     const permit = provisioner.backend.prepareLaunch(); // before rows, credentials or workspace writes
     const capturedBinding = structuredClone(binding);
     const capturedRuntime = structuredClone(runtime);
@@ -1925,6 +1929,7 @@ export class NativeSessionService {
     const signal = AbortSignal.any([controller.signal, this.shutdownController.signal]);
     let prepared: Awaited<ReturnType<DirectCodexProvisioner["prepare"]>> | undefined;
     let conversation: CodexConversation | undefined;
+    let renderer: Awaited<ReturnType<typeof startCodexTerminal>> | undefined;
     let closing: Promise<void> | undefined;
     const assertActive = () => {
       signal.throwIfAborted(); this.assertRuntimeDispatchable();
@@ -1934,14 +1939,14 @@ export class NativeSessionService {
     };
     const close = () => closing ??= (async () => {
       controller.abort();
-      const results = await Promise.allSettled([conversation?.close(), prepared?.input.tools.close()]);
+      const results = await Promise.allSettled([renderer?.close(), conversation?.close(), prepared?.input.tools.close()]);
       // Keep materialized resources if process/tool cleanup could not be confirmed.
       if (results.some((result) => result.status === "rejected")) throw new InteractiveLaunchError("native conversation cleanup failed");
       await prepared?.dispose();
     })();
     try {
       assertActive(); permit.assertActive();
-      const row = this.options.store.createNativeSession({ id, transport: "conversation", purpose: "analysis", vendor: "codex", agent: agentFor("analysis", "codex"),
+      const row = this.options.store.createNativeSession({ id, ...(!provisioner.terminal ? { transport: "conversation" as const } : {}), purpose: "analysis", vendor: "codex", agent: agentFor("analysis", "codex"),
         entryVerb, scopeKind: "bound_project", scopeId: newId("native-scope"), dispatchProfile: NATIVE_DISPATCH_REGISTRY.analysis.profile,
         dispatchTarget: "codex:interactive", runtimeGeneration: capturedRuntime.generation,
         projectIdentity: capturedBinding.identity, bindingGeneration: capturedBinding.generation, projectRevision: capturedBinding.revision });
@@ -1963,19 +1968,38 @@ export class NativeSessionService {
       this.conversations.set(id, { conversation, assertActive, close });
       await conversation.ready;
       assertActive();
+      if (provisioner.terminal) {
+        const vendor = prepared.input.spec.executables.vendor;
+        if (!vendor || !prepared.input.model) throw new InteractiveLaunchError("Native terminal configuration is unavailable");
+        renderer = await startCodexTerminal({ id, conversation, manager: await this.options.terminalManager(), vendor,
+          cwd: prepared.input.spec.workspace, model: prepared.input.model, assertActive });
+        this.sessions.set(id, renderer.terminal);
+      }
       this.options.store.transitionNativeSession(id, "running", { started: true });
+      if (renderer) {
+        renderer.terminal.onExit((exitCode) => {
+          const current = this.options.store.getNativeSession(id);
+          if (current && ["creating", "running", "detached"].includes(current.status)) {
+            this.options.store.transitionNativeSession(id, exitCode === 0 ? "exited" : "failed", { ended: true,
+              ...(exitCode !== 0 ? { failure: "Codex terminal exited" } : {}) });
+          }
+          queueMicrotask(() => this.revokeCapabilities([id]));
+        });
+      }
+      assertActive();
       this.armLease(id, "native session attachment timed out", NATIVE_SESSION_INITIAL_ATTACHMENT_GRACE_MS);
       return { row: this.options.store.getNativeSession(id)!, capability: conversation.capability };
     } catch (error) {
       const row = this.options.store.getNativeSession(id);
       if (row && ["creating", "running", "detached"].includes(row.status)) this.options.store.transitionNativeSession(id, "failed", { ended: true, failure: "Direct Codex launch failed" });
-      this.conversations.delete(id); permit.release();
+      this.sessions.delete(id); this.conversations.delete(id); permit.release();
       try { await close(); } catch { this.componentCleanupFailed = true; throw new InteractiveLaunchError("native conversation cleanup failed"); }
       throw error;
     }
   }
 
   attachConversation(id: string, capability: string, listener: (frame: ConversationFrame | ConversationReplay) => void, afterSequence = 0): CodexConversationAttachment | undefined {
+    if (this.options.directCodex?.terminal) return undefined;
     const direct = this.conversations.get(id);
     if (!direct) return undefined;
     let attachment: CodexConversationAttachment;

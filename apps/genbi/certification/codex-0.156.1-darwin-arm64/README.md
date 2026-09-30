@@ -46,3 +46,23 @@ The integrity optimization does not cache hashes by file metadata or time:
 passive component notifications check live authority; protected operations and
 terminal results perform full validation. Unknown executable identities and
 changed runtime bytes remain denied.
+
+## Official remote terminal
+
+The `remote-tui-v1` transport has separate deterministic, installed candidate and
+local approval records (`terminal-*.json`). Driver certification alone cannot
+admit this renderer. The scope remains macOS arm64, Codex 0.156.1, gpt-5.5 and
+`answer_query`; dashboard and other providers remain outside this record.
+
+`node scripts/probe-codex-terminal.mjs /absolute/path/to/codex` runs the official
+CLI against an in-memory peer with no login or model calls. Set
+`GENBI_TERMINAL_PACKAGE_ROOT` to an installed package to test its compiled files.
+The deterministic vendor-contract CI runner also runs this probe. It covers
+input, follow-up, in-flight text steering, resize, reconnect, cancellation, protected-path and network
+denials, and cleanup. The authenticated candidate evidence additionally covers
+cancellation while a governed tool is active, real Jaffle results and follow-up.
+
+`terminal-installed-acceptance.json` records the final unmodified package's
+authenticated query, in-flight steering, follow-up, resize, reconnect and stop,
+plus exact installed-file/tarball verification. It is intentionally outside the
+registry hash chain to avoid circular package/evidence hashes.

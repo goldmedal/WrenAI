@@ -27,8 +27,8 @@ the rest:
 
 `@wrenai/genbi` is published at `0.0.4`. Nothing here is under a compatibility
 commitment yet — commands, environment variables and interfaces move without
-notice. The Codex runtime is supported in code but has not been exercised end
-to end; Claude is the one that is. See
+notice. Runtime support is limited to the exact versions and execution scopes in the
+packaged certification records; a supported protocol alone does not enable a runtime. See
 [MAINTAINING.md](./MAINTAINING.md#versioning) for what the version number does
 and does not promise.
 
@@ -156,12 +156,20 @@ rather than inferring validity from model prose. Filter and order dimensions cou
 the drill limit. Guarded parents currently refuse child evidence without semantic provenance.
 
 Native composition requires a separately certified, server-provided runtime for the same
-approved account, with fresh per-step resources and revocation checks. The default server
-composition does not configure that provider. Native host interfaces and passing deterministic
+approved account, with fresh per-step resources and revocation checks. Native host interfaces and passing deterministic
 probes do not activate this capability. Claude retains its scope entry; Codex Analysis selects
 one answer or dashboard entry before session creation and keeps that pin for the session.
 A compatible CLI/package tuple and runtime certification are required before enabling the
 native path; the pinned 0.13.0 CLI alone does not provide the new host contracts.
+
+Codex Native sessions use the official CLI's remote terminal interface. A credential-free
+renderer runs in the vendor sandbox and connects to one host-owned session over a private
+Unix socket. The browser terminal supports text input, resize, reconnect and cancellation;
+model, account, project scope and tools remain pinned by the server. General shell access,
+configuration changes, login changes and cross-session commands are unavailable. Ending a
+session closes its processes; restart creates a fresh session rather than resuming a provider
+thread. Remote terminal admission requires its own `remote-tui-v1` certification evidence in
+addition to the driver certification.
 
 `test/component-default-parity.test.ts` compares the real default profile across Vercel and
 both native producer formats using deterministic model/database responses. It exercises the

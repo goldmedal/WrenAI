@@ -14,7 +14,7 @@ import { Store } from "../server/db.js";
 import type { NativeArtifactService } from "../server/native-artifacts.js";
 import type { NativeSessionRow } from "../server/db.js";
 vi.mock("../server/runtime-host/codex-compatibility.js", async (original) => ({
-  ...(await original<typeof import("../server/runtime-host/codex-compatibility.js")>()), isCodexExecutionCertified: vi.fn(() => true),
+  ...(await original<typeof import("../server/runtime-host/codex-compatibility.js")>()), isCodexExecutionCertified: vi.fn(() => true), isCodexTerminalCertified: vi.fn(() => true),
 }));
 vi.mock("../harness/compile/index.js", () => ({ compileProfile: vi.fn() }));
 vi.mock("../harness/compile/context-loader.js", () => ({ resolveContextLoaderBinary: vi.fn() }));

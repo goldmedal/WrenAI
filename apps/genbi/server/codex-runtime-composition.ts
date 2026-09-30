@@ -18,7 +18,7 @@ import { CodexAppServerBackend, CodexBackendError, type CodexLaunchPermit } from
 import type { CodexSessionTools } from "./runtime-host/codex-direct-tools.js";
 import type { RpcTransport } from "./runtime-host/codex-rpc.js";
 import { buildCodexSessionPolicy } from "./runtime-host/codex-policy.js";
-import { isCodexExecutionCertified } from "./runtime-host/codex-compatibility.js";
+import { isCodexExecutionCertified, isCodexTerminalCertified } from "./runtime-host/codex-compatibility.js";
 import { runtimeNotReady } from "./runtime-host/policy.js";
 import type { RuntimeBackendProbeResult } from "./runtime-host/types.js";
 import type { DirectCodexProvisioner } from "./codex-native-session.js";
@@ -169,9 +169,16 @@ export function createCodexRuntimeComposition(options: Options) {
       throw error;
     }
   }
-  const native: DirectCodexProvisioner = { backend, async prepare(input) {
+  const terminalCertified = (entry: string) => {
+    try {
+      const vendor = attestNativeExecutable("vendor", config.executable!);
+      return isCodexTerminalCertified(config.source!, vendor.digest.slice(7), Object.values(codexModelsForRuntime(options.store.getRuntimeSettings())), entry);
+    } catch { return false; }
+  };
+  const native: DirectCodexProvisioner = { backend, terminal: true, terminalCertified, async prepare(input) {
     input.permit.assertActive(); input.assertActive(); input.signal.throwIfAborted();
     checkConfiguration(); checkExecutionScope(input.session.entryVerb ?? "answer_query");
+    if (!terminalCertified(input.session.entryVerb ?? "answer_query")) throw unavailable();
     const credential = options.artifacts.issue(input.session, input.binding).credential;
     try {
       const prepared = await prepare({ id: input.session.id, binding: input.binding, entry: input.session.entryVerb ?? "answer_query",

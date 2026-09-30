@@ -2,7 +2,8 @@
 
 /**
  * Run only deterministic Phase 0 contracts. This runner deliberately never
- * invokes an authenticated probe or `turn/start`; exact tested-baseline
+ * invokes an authenticated probe or a model-backed turn; the terminal uses
+ * an in-memory peer. Exact tested-baseline
  * versions are evidence inputs, not a production certification claim.
  */
 import { spawn } from "node:child_process";
@@ -54,6 +55,7 @@ try {
   }
   await run(process.execPath, [path.join(process.cwd(), "scripts", "codex-component-probe.mjs")], { ...probeEnv, CODEX_BIN: nativeCodex });
   await run(process.execPath, [path.join(process.cwd(), "scripts", "claude-component-probe.mjs")], probeEnv);
+  await run(process.execPath, [path.join(process.cwd(), "scripts", "probe-codex-terminal.mjs"), nativeCodex], probeEnv);
   process.stdout.write(`${JSON.stringify({
     ok: true,
     evidenceState: "tested_baseline",

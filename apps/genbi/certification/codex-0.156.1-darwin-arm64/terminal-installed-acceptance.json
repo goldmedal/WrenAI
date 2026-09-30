@@ -1,0 +1,77 @@
+{
+  "kind": "unmodified_installed_remote_terminal_acceptance",
+  "completedAt": "2026-09-30T08:12:30.930593+00:00",
+  "transport": "remote-tui-v1",
+  "platform": "darwin-arm64",
+  "vendorVersion": "0.156.1",
+  "model": "gpt-5.5",
+  "entry": "answer_query",
+  "packageVersion": "0.0.4",
+  "candidateAdmissionInjection": false,
+  "freshNpmInstall": true,
+  "isolatedBffDatabase": true,
+  "filesMatched": 407,
+  "tarballSha256": "a02f035df87e7e298594b610f77a9ca95bbb5b7f7921205d4de55c0e65734511",
+  "queryAndLifecycle": {
+    "ok": true,
+    "officialCli": "0.156.1",
+    "model": "gpt-5.5",
+    "query": {
+      "order_count": 99,
+      "revenue": 1672
+    },
+    "followup": {
+      "average": 16.89
+    },
+    "inFlightSteering": true,
+    "resize": true,
+    "reconnect": true,
+    "stop": true
+  },
+  "queryEvidenceSha256": "a9374e344e2e011acf7d2e34b0cac76c70566f54ac62fb0800c927b121bbd1c0",
+  "queryOutputSha256": "fc924d423f09045f2e7a83403feb1a0622459cbf81c2cb7a9b76fff34666605a",
+  "deterministicTerminalProbe": {
+    "officialCli": true,
+    "modelCalls": 0,
+    "fixtureTurns": 5,
+    "steer": true,
+    "resize": true,
+    "reconnect": true,
+    "cancel": true,
+    "protectedReadDenied": true,
+    "outsideWriteDenied": true,
+    "networkDenied": true,
+    "cleanup": true
+  },
+  "deterministicTerminalProbeSha256": "cf8dbcf5a606e06d2a29f62f8c064bfec726e57b92c0865953f7e4737831e5b1",
+  "packedOfflineAcceptanceSha256": "cdbffeb8dd006b40a4b596422e6ad273c44d547053f04f6ccbe4165231ab24a4",
+  "databaseUnchanged": true,
+  "ownedRuntimeChildrenAfterStop": 0,
+  "independentReview": "No outstanding findings after race, separate transport certification, cancellation and stale-steer acknowledgement fixes.",
+  "sourceVerification": {
+    "fullSuite": {
+      "passed": 2504,
+      "expectedFail": 1,
+      "skipped": 18
+    },
+    "finalSteerAndCancellationSuite": {
+      "passed": 110,
+      "files": 3
+    },
+    "finalCertificationSuite": {
+      "passed": 20,
+      "files": 1
+    },
+    "typecheck": "passed",
+    "build": "passed",
+    "vendorContracts": "passed",
+    "packedOfflineAcceptance": "passed"
+  },
+  "scope": "Local installed acceptance and local approval only; no package publication, merge or deployment.",
+  "limitations": [
+    "macOS arm64 only",
+    "gpt-5.5 and answer_query only",
+    "No shell/config/auth mutations or cross-session commands",
+    "Provider resume, dashboard, Setup and Claude are not certified by this record"
+  ]
+}

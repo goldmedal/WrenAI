@@ -1,0 +1,40 @@
+{
+  "kind": "installed_remote_terminal_candidate_acceptance",
+  "date": "2026-09-30",
+  "transport": "remote-tui-v1",
+  "candidateTarballSha256": "9f3e3b45966cf48ca4dc6a104c48f96b198cfe21b492a7904357c836acdbb859",
+  "admission": "Unmodified installed package using packaged terminal certification; no admission or loader injection.",
+  "queryAndLifecycle": {
+    "ok": true,
+    "officialCli": "0.156.1",
+    "model": "gpt-5.5",
+    "query": {
+      "order_count": 99,
+      "revenue": 1672
+    },
+    "followup": {
+      "average": 16.89
+    },
+    "resize": true,
+    "reconnect": true,
+    "stop": true
+  },
+  "queryEvidenceSha256": "a95a1541639211f8b984704e9920768eb62d726ad53b4593e9f2e7df246b76f9",
+  "cancelDuringToolExecution": true,
+  "cancelRetainsSession": true,
+  "cancelEvidenceSha256": "e860e323cb74b680b281d005c4b5006dbb4fc16a6337be12f2d19c3448123fe7",
+  "browser": "Official CLI banner, query, follow-up and reconnect verified in browser. Final cancellation and lifecycle checks repeated through the installed terminal WebSocket.",
+  "databaseUnchanged": true,
+  "databaseSha256": "bc04d3057e3875663046c917295186ebaebdea498dc046bbe311ad9dcdba2d30",
+  "packedOfflineAcceptanceSha256": "cdbffeb8dd006b40a4b596422e6ad273c44d547053f04f6ccbe4165231ab24a4",
+  "excluded": [
+    "other platforms",
+    "other models",
+    "dashboard root",
+    "Setup",
+    "Claude",
+    "provider resume"
+  ],
+  "querySessionEvidenceSha256": "2a37bdeb32b421847d72930bc97cce1799d83ff293358b9c48910143a83f2d46",
+  "cancelEvidenceScope": "Tool-active cancellation tested on installed candidate with diagnostic admission harness; exact account/model/scope checks retained. Final terminal lifecycle also verified without injection."
+}

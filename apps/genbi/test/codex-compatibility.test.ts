@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { CODEX_BASELINE_VERSION, CODEX_CERTIFIED_ROWS, CODEX_REQUIRED_CONTRACTS, evaluateCodexIdentity, isCodexExecutionCertified, type CodexCertification, type CodexObservedIdentity } from "../server/runtime-host/codex-compatibility.js";
+import { CODEX_BASELINE_VERSION, CODEX_CERTIFIED_ROWS, CODEX_REQUIRED_CONTRACTS, evaluateCodexIdentity, isCodexExecutionCertified, isCodexTerminalCertified, type CodexCertification, type CodexObservedIdentity } from "../server/runtime-host/codex-compatibility.js";
 
 const row: CodexCertification = {
   state: "certified_row", platform: "darwin-arm64", version: CODEX_BASELINE_VERSION,
@@ -16,6 +16,15 @@ const observed: CodexObservedIdentity = {
   protocolSha256: row.protocolSha256, contracts: row.contracts,
 };
 describe("Codex exact certification", () => {
+  it("requires separate terminal evidence in addition to driver certification", () => {
+    const check = (value: unknown, model = "gpt-5.5", entry = "answer_query") => isCodexTerminalCertified(row.source, row.executableSha256, [model], entry, [value]);
+    expect(check(row)).toBe(false);
+    const terminal = { transport: "remote-tui-v1", deterministicProbesSha256: "f".repeat(64), packedAcceptanceSha256: "a".repeat(64), releaseApprovalSha256: "b".repeat(64) };
+    expect(check({ ...row, terminal })).toBe(true);
+    expect(check({ ...row, terminal }, "other")).toBe(false);
+    expect(check({ ...row, terminal }, "gpt-5.5", "generate_dashboard")).toBe(false);
+    expect(check({ ...row, terminal: { ...terminal, releaseApprovalSha256: "pending" } })).toBe(false);
+  });
   it("denies unknown source identities even when the certified version matches", () => {
     expect(CODEX_CERTIFIED_ROWS).toHaveLength(1);
     expect(evaluateCodexIdentity(observed).readiness).toMatchObject({ code: "codex_identity_uncertified" });
@@ -37,6 +46,20 @@ describe("Codex exact certification", () => {
       contracts: certified.contracts };
     expect(evaluateCodexIdentity(exact).readiness.state).toBe("ready");
     expect(evaluateCodexIdentity({ ...exact, executableSha256: "f".repeat(64) }).readiness.state).not.toBe("ready");
+  });
+  it("binds terminal admission to its separate reviewed evidence", () => {
+    const row = CODEX_CERTIFIED_ROWS[0]!;
+    const evidence = new URL("../certification/codex-0.156.1-darwin-arm64/", import.meta.url);
+    expect(row.terminal?.transport).toBe("remote-tui-v1");
+    for (const [file, digest] of [
+      ["terminal-deterministic.json", row.terminal!.deterministicProbesSha256],
+      ["terminal-candidate-acceptance.json", row.terminal!.packedAcceptanceSha256],
+      ["terminal-local-approval.json", row.terminal!.releaseApprovalSha256],
+    ]) expect(createHash("sha256").update(readFileSync(new URL(file!, evidence))).digest("hex")).toBe(digest);
+    expect(isCodexTerminalCertified(row.source, row.executableSha256, ["gpt-5.5"], "answer_query")).toBe(true);
+    expect(isCodexTerminalCertified(row.source, row.executableSha256, ["gpt-5.5"], "generate_dashboard")).toBe(false);
+    const { terminal: _, ...driverOnly } = row;
+    expect(isCodexTerminalCertified(row.source, row.executableSha256, ["gpt-5.5"], "answer_query", [driverOnly])).toBe(false);
   });
   it("accepts only complete matching fixture evidence without mutating the production matrix", () => {
     expect(evaluateCodexIdentity(observed, [row]).readiness.state).toBe("ready");

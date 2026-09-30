@@ -1,0 +1,20 @@
+{
+  "kind": "local_exact_version_terminal_approval",
+  "date": "2026-09-30",
+  "transport": "remote-tui-v1",
+  "authority": "User authorized this local approval record conditional on successful installed candidate acceptance. Conditions satisfied by referenced evidence.",
+  "version": "0.156.1",
+  "platform": "darwin-arm64",
+  "executableSha256": "0196e89fe5a7598f816ee54232c3d7c26d75e502ab5cfe2c9240e81d90f7255a",
+  "source": "https://registry.npmjs.org/@openai/codex/-/codex-0.156.1-darwin-arm64.tgz",
+  "models": [
+    "gpt-5.5"
+  ],
+  "entries": [
+    "answer_query"
+  ],
+  "deterministicProbesSha256": "c9d87247cc5c747d95cf1f6f6c75078d0ec465d946bdcca0c514d332418abbdd",
+  "packedAcceptanceSha256": "f925e75e134a9fbe84d89873a28c02590d93d0219ea70b3a74524c44aa14b476",
+  "scope": "Local terminal registry and installed validation. No publication, merge, release or deployment.",
+  "nextGate": "Final package startup, pinned steering and offline regression validation. Query/follow-up/reconnect/stop passed on unmodified candidate."
+}

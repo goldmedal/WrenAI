@@ -5,6 +5,9 @@ import type { NativeSessionRow } from "./db.js";
 
 /** Server-only provisioner. A ready probe alone never authorizes materialization. */
 export interface DirectCodexProvisioner {
+  /** Official remote CLI renderer; the host still owns the governed thread. */
+  readonly terminal?: boolean;
+  readonly terminalCertified?: (entry: string) => boolean;
   readonly backend: Pick<CodexAppServerBackend, "prepareLaunch" | "open">;
   /** Own and clean partial allocations on failure. Never receives browser paths or credentials. */
   prepare(input: {

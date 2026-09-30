@@ -6,6 +6,8 @@ import { serve } from "@hono/node-server";
 import { WebSocket, WebSocketServer } from "ws";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { startCodexTerminal } from "../server/runtime-host/codex-terminal.js";
+vi.mock("../server/runtime-host/codex-terminal.js", () => ({ startCodexTerminal: vi.fn() }));
 import { Store } from "../server/db.js";
 import { NativeSessionService } from "../server/native-sessions.js";
 import type { DirectCodexProvisioner } from "../server/codex-native-session.js";
@@ -50,6 +52,37 @@ function fixture(database = ":memory:") {
 }
 const launch = (f: ReturnType<typeof fixture>) => f.service.startSeparate({ purpose: "analysis", idempotencyKey: randomUUID() });
 describe("durable direct Codex Sessions", () => {
+  it("denies an uncertified terminal before allocating a permit or row", async () => {
+    const f = fixture(); Object.assign(f.options.directCodex, { terminal: true, terminalCertified: () => false });
+    await expect(launch(f)).rejects.toThrow("not certified");
+    expect(f.backend.prepareLaunch).not.toHaveBeenCalled(); expect(f.store.listNativeSessions()).toEqual([]);
+    expect((await f.service.readiness()).analysis.available).toBe(false);
+  });
+  it.each([0, 1])("never revives a renderer that already exited with code %s", async (code) => {
+    const f = fixture(); Object.assign(f.options.directCodex, { terminal: true, terminalCertified: () => true });
+    f.terminalManager.mockResolvedValue({} as never);
+    f.prepare.mockResolvedValue({ input: { spec: { executables: { vendor: {} }, workspace: "/fixture" }, model: "driver", wrenHome: {}, tools: f.tools, assertScopeActive() {} }, dispose: f.dispose } as never);
+    const close = vi.fn(async () => {});
+    vi.mocked(startCodexTerminal).mockResolvedValue({ terminal: { onExit(fn: (code: number) => void) { fn(code); return () => {}; }, close }, close } as never);
+    await expect(launch(f)).rejects.toThrow();
+    expect(f.store.listNativeSessions()[0]?.status).toBe(code === 0 ? "exited" : "failed");
+    expect(f.dispose).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalled();
+  });
+  it("registers terminal transport and awaits renderer cleanup before disposal", async () => {
+    const f = fixture(); Object.assign(f.options.directCodex, { terminal: true, terminalCertified: () => true });
+    f.terminalManager.mockResolvedValue({} as never);
+    f.prepare.mockResolvedValue({ input: { spec: { executables: { vendor: {} }, workspace: "/fixture" }, model: "driver", wrenHome: {}, tools: f.tools, assertScopeActive() {} }, dispose: f.dispose } as never);
+    let release!: () => void;
+    const close = vi.fn(() => new Promise<void>(resolve => { release = resolve; }));
+    const terminal = { onExit: () => () => {}, close: vi.fn(), capability: "terminal" };
+    vi.mocked(startCodexTerminal).mockResolvedValue({ terminal, close } as never);
+    const result = await launch(f);
+    expect(result.row.transport).toBeUndefined(); expect(f.service.runtime(result.row.id)).toBe(terminal);
+    expect(f.service.attachConversation(result.row.id, result.capability!, () => {})).toBeUndefined();
+    const stopped = f.service.stopAndWait(result.row.id, result.capability!);
+    await vi.waitFor(() => expect(release).toBeDefined()); expect(f.dispose).not.toHaveBeenCalled();
+    release(); await stopped; expect(f.dispose).toHaveBeenCalledOnce();
+  });
   it("acquires the permit before rows/preparation and never falls back to PTY", async () => {
     const f = fixture();
     f.backend.prepareLaunch.mockImplementation(() => { expect(f.store.listNativeSessions()).toEqual([]); throw Error("uncertified"); });

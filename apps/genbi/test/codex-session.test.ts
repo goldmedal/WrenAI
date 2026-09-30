@@ -24,6 +24,7 @@ class Peer implements RpcTransport {
     else if (message.method === "permissionProfile/list") this.response(message.id, { data: [{ id: "genbi-scoped", allowed: true }], nextCursor: null });
     else if (message.method === "thread/start") { this.event("thread/started", { thread }); this.response(message.id, { thread }); }
     else if (message.method === "turn/start") this.response(message.id, { turn: turn() });
+    else if (message.method === "turn/steer") this.response(message.id, { turnId: "turn-1" });
     else if (/^command\/exec\//.test(message.method) || message.method === "turn/interrupt") this.response(message.id, {});
   }
   last(method: string) { return [...this.messages].reverse().find((message) => message.method === method)!; }
@@ -181,6 +182,30 @@ describe("Codex session protocol", () => {
     if (reason === "shutdown") await session.close();
     await expect(promise).rejects.toBeInstanceOf(Error); expect(peer.close).toHaveBeenCalledOnce();
   });
+  it("sends a text-only steer to the same active thread and rejects stale turn IDs", async () => {
+    const { peer, session } = await fixture(); await session.startThread();
+    const running = session.runTurn("question"); await Promise.resolve();
+    expect(await session.steerTurn("clarification", "turn-1")).toEqual({ turnId: "turn-1" });
+    expect(peer.last("turn/steer").params).toEqual({ threadId: thread.id, expectedTurnId: "turn-1", input: [{ type: "text", text: "clarification" }] });
+    await expect(session.steerTurn("bad", "other")).rejects.toThrow();
+    peer.event("turn/completed", { threadId: thread.id, turn: turn("completed") }); await running; await session.close();
+  });
+  it.each(["interrupting", "interrupted", "completed"])("rejects a delayed steer response after the turn is %s", async (state) => {
+    const { peer, session } = await fixture(); await session.startThread();
+    const running = session.runTurn("question"); await Promise.resolve();
+    peer.custom = (message) => message.method === "turn/steer";
+    const steering = session.steerTurn("clarification", "turn-1");
+    const rejected = expect(steering).rejects.toMatchObject({ reason: "protocol" });
+    if (state !== "completed") await session.interruptTurn();
+    if (state !== "interrupting") {
+      peer.event("turn/completed", { threadId: thread.id, turn: turn(state) }); await running;
+    }
+    peer.response(peer.last("turn/steer").id!, { turnId: "turn-1" }); await rejected;
+    if (state === "interrupting") {
+      peer.event("turn/completed", { threadId: thread.id, turn: turn("interrupted") }); await running;
+    }
+    await session.close();
+  });
   it("interrupt acknowledgement is not completion", async () => {
     const { peer, session } = await fixture(); await session.startThread();
     const promise = session.runTurn("hello"); await Promise.resolve(); await session.interruptTurn();
@@ -300,6 +325,34 @@ describe("direct-session tool RPC", () => {
     const tools = toolFixture();
     await expect(fixture({ ...tools, accountEmail: "other@example.invalid" })).rejects.toThrow();
     expect(tools.call).not.toHaveBeenCalled(); expect(tools.close).toHaveBeenCalledOnce();
+  });
+  it("interrupts an active tool without turning its expected abort into a protocol failure", async () => {
+    const tools = toolFixture(); let finish!: () => void;
+    vi.mocked(tools.call).mockImplementation(async (_name, _input, _id, signal) => {
+      await new Promise<void>(resolve => { finish = resolve; });
+      signal.throwIfAborted(); return {};
+    });
+    const f = await startToolTurn(tools); f.request();
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    await f.session.interruptTurn();
+    f.peer.event("turn/completed", { threadId: thread.id, turn: turn("interrupted") });
+    let settled = false; void f.running.then(() => { settled = true; });
+    await Promise.resolve(); expect(settled).toBe(false);
+    finish(); expect((await f.running).status).toBe("interrupted");
+    await vi.waitFor(() => expect(f.peer.messages.some((m: any) => m.id === "server-call" && m.result?.success === false)).toBe(true));
+    expect(f.peer.close).not.toHaveBeenCalled();
+    const next = f.session.runTurn("follow up"); await Promise.resolve();
+    f.peer.event("turn/started", { threadId: thread.id, turn: turn() });
+    f.peer.event("turn/completed", { threadId: thread.id, turn: turn("completed") });
+    expect((await next).status).toBe("completed"); await f.session.close();
+  });
+  it("does not conceal a cleanup failure behind a concurrent cancellation", async () => {
+    const tools = toolFixture(); let fail!: () => void;
+    vi.mocked(tools.call).mockImplementation(() => new Promise((_resolve, reject) => { fail = () => reject(Error("cleanup failed")); }));
+    const f = await startToolTurn(tools); f.request(); await vi.waitFor(() => expect(fail).toBeDefined());
+    await f.session.interruptTurn(); fail();
+    await expect(f.running).rejects.toMatchObject({ reason: "protocol" });
+    await f.session.close();
   });
   it("aborts pending host access on disconnect and joins cleanup", async () => {
     const tools = toolFixture(); let seen: AbortSignal | undefined;

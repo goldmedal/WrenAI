@@ -1,0 +1,43 @@
+{
+  "kind": "remote_terminal_deterministic_evidence",
+  "transport": "remote-tui-v1",
+  "date": "2026-09-30",
+  "version": "0.156.1",
+  "platform": "darwin-arm64",
+  "officialRendererProbe": {
+    "officialCli": true,
+    "modelCalls": 0,
+    "fixtureTurns": 5,
+    "steer": true,
+    "resize": true,
+    "reconnect": true,
+    "cancel": true,
+    "protectedReadDenied": true,
+    "outsideWriteDenied": true,
+    "networkDenied": true,
+    "cleanup": true
+  },
+  "probeOutputSha256": "cf8dbcf5a606e06d2a29f62f8c064bfec726e57b92c0865953f7e4737831e5b1",
+  "vendorContractsSha256": "bbdf1119374e3b8f3f3de61641f75b076d2d6bec0f2969b10a29a4c7d41dcd65",
+  "fullSuite": {
+    "passed": 2504,
+    "expectedFail": 1,
+    "skipped": 18,
+    "stage": "Before final stale steering acknowledgement guard"
+  },
+  "fullSuiteOutputSha256": "858c8dd01bfa7333402d0c19799d451585182e33479544c0254768655637cb10",
+  "security": [
+    "credential-free renderer home",
+    "vendor sandbox denies protected files and network",
+    "private single-client Unix socket",
+    "pinned model and single root entry",
+    "no shell/config/auth/cross-thread forwarding"
+  ],
+  "independentReview": "Lifecycle, terminal admission and cancellation reviewed; final stale-steer acknowledgement fix reviewed separately.",
+  "finalAffectedSuite": {
+    "passed": 110,
+    "files": 3,
+    "outputSha256": "c05b7cfba07ca0d2f73fe190f6382433b1bf298a0c85dddb7ab1107b3ea0384e",
+    "includes": "Three delayed-steer reply cases: interrupting, interrupted, completed"
+  }
+}

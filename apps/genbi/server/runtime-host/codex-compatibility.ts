@@ -21,6 +21,12 @@ export const codexCertificationSchema = z.object({
   executionScope: z.object({ models: z.array(z.string().min(1)).min(1), entries: z.array(z.enum(["answer_query", "generate_dashboard"])).min(1) }).strict(),
   contracts: z.array(z.enum(CODEX_REQUIRED_CONTRACTS)).refine((values) =>
     values.length === CODEX_REQUIRED_CONTRACTS.length && new Set(values).size === values.length),
+  terminal: z.object({
+    transport: z.literal("remote-tui-v1"),
+    deterministicProbesSha256: digest,
+    packedAcceptanceSha256: digest,
+    releaseApprovalSha256: digest,
+  }).strict().optional(),
   evidence: z.object({
     deterministicProbesSha256: digest,
     packedAcceptanceSha256: digest,
@@ -41,6 +47,7 @@ export const CODEX_CERTIFIED_ROWS: readonly CodexCertification[] = Object.freeze
   "protocolSha256": "655adafa0ccea3d84f30bcbdc74e201fa14511c51e08d0cd024a0280daa8bc60",
   "executionScope": { "models": ["gpt-5.5"], "entries": ["answer_query"] },
   "contracts": [...CODEX_REQUIRED_CONTRACTS],
+  "terminal": {"transport": "remote-tui-v1", "deterministicProbesSha256": "c9d87247cc5c747d95cf1f6f6c75078d0ec465d946bdcca0c514d332418abbdd", "packedAcceptanceSha256": "f925e75e134a9fbe84d89873a28c02590d93d0219ea70b3a74524c44aa14b476", "releaseApprovalSha256": "d79c37c2e6c645c91dd6372d118ab811c1c2981a72486acd28b9d09a432521eb"},
   "evidence": {
     "deterministicProbesSha256": "b9e76d5f6f3ddc68dcaf3c78a080d246d3f838f88158a06311876340f412378c",
     "packedAcceptanceSha256": "06969b1568c79b27751c992798a36a115bc905619cb1be5c21d0ea07d324a95d",
@@ -91,5 +98,15 @@ export function isCodexExecutionCertified(source: string, executableSha256: stri
     return row.success && row.data.source === source && row.data.executableSha256 === executableSha256
       && row.data.executionScope.entries.some((allowed) => allowed === entry)
       && models.every((model) => row.data.executionScope.models.includes(model));
+  });
+}
+
+/** A driver certification alone never admits the remote CLI renderer. */
+export function isCodexTerminalCertified(source: string, executableSha256: string, models: readonly string[], entry: string,
+  rows: readonly unknown[] = CODEX_CERTIFIED_ROWS): boolean {
+  return rows.some((value) => {
+    const row = codexCertificationSchema.safeParse(value);
+    return row.success && row.data.terminal?.transport === "remote-tui-v1"
+      && isCodexExecutionCertified(source, executableSha256, models, entry, [row.data]);
   });
 }

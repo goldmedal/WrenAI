@@ -49,6 +49,8 @@ interface ActiveTurn {
   readonly toolsAbort: AbortController;
   readonly calls: Set<string>;
   pendingTools: number;
+  toolFinished?: Promise<void>;
+  interruptRequested?: boolean;
   ready: Promise<void>;
   releaseTools(): void;
 }
@@ -190,15 +192,26 @@ export class CodexSession {
       throw error instanceof CodexRpcError ? error : new CodexRpcError("protocol");
     }
   }
+  async steerTurn(text: string, expectedTurnId: string): Promise<{ turnId: string }> {
+    this.check();
+    const active = this.turn;
+    if (!active?.id || active.id !== expectedTurnId || active.interruptRequested || !text.trim() || Buffer.byteLength(text) > 262_144) throw new CodexRpcError("protocol");
+    const result = parse(z.object({ turnId: z.literal(active.id) }).strict(), await this.rpc.request("turn/steer", {
+      threadId: this.threadId, expectedTurnId, input: [{ type: "text", text }],
+    }));
+    if (this.turn !== active || active.interruptRequested) throw new CodexRpcError("protocol");
+    return result;
+  }
   async interruptTurn(): Promise<void> {
     this.check();
     const active = this.turn;
     if (!active?.id) throw new CodexRpcError("protocol");
     try {
+      active.interruptRequested = true;
       active.toolsAbort.abort();
-      parse(z.object({}).strict(), await this.rpc.request("turn/interrupt", { threadId: this.threadId, turnId: active.id }, 2_000));
+      parse(z.object({}).strict(), await this.rpc.request("turn/interrupt", { threadId: this.threadId, turnId: active.id }, 10_000));
       // An ack is not completion. Bound how long a silent peer may keep working.
-      if (this.turn === active) { clearTimeout(active.timer); active.timer = setTimeout(() => this.rpc.fail("timeout"), 2_000); }
+      if (this.turn === active) { clearTimeout(active.timer); active.timer = setTimeout(() => this.rpc.fail("timeout"), 10_000); }
     } catch { await this.close(); throw new CodexRpcError("protocol"); }
   }
   startCommand(input: CodexCommandInput, signal?: AbortSignal): CodexCommand {
@@ -249,6 +262,11 @@ export class CodexSession {
   private settleTurn(value?: Turn, error?: unknown): void {
     const active = this.turn;
     if (!active) return;
+    if (value?.status === "interrupted" && active.pendingTools) {
+      active.toolsAbort.abort();
+      void active.toolFinished!.then(() => { if (this.turn === active) this.settleTurn(value); });
+      return;
+    }
     this.turn = undefined; clearTimeout(active.timer); active.detach(); active.toolsAbort.abort(); active.releaseTools();
     if (value) active.resolve(value); else active.reject(error);
   }
@@ -332,6 +350,8 @@ export class CodexSession {
       || !this.tools.definitions.some((tool) => tool.name === call.tool) || active.calls.has(call.callId)
       || active.calls.size >= 32 || active.pendingTools || Buffer.byteLength(JSON.stringify(call.arguments) ?? "") > 65_536) this.protocolFailure();
     active.calls.add(call.callId); active.pendingTools++;
+    let finished!: () => void;
+    active.toolFinished = new Promise<void>((resolve) => { finished = resolve; });
     try {
       await active.ready;
       this.check(); active.toolsAbort.signal.throwIfAborted();
@@ -343,7 +363,13 @@ export class CodexSession {
       const text = JSON.stringify(result);
       if (text === undefined || Buffer.byteLength(text) > 1_048_000) this.protocolFailure();
       return { contentItems: [{ type: "inputText", text }], success: true };
-    } finally { active.pendingTools--; }
+    } catch (error) {
+      // A requested cancellation is a failed tool result, not malformed RPC.
+      // Recheck the session scope and integrity before keeping it reusable.
+      if (!active.interruptRequested || !active.toolsAbort.signal.aborted || error !== active.toolsAbort.signal.reason) throw error;
+      this.check();
+      return { contentItems: [{ type: "inputText", text: "Operation cancelled." }], success: false };
+    } finally { active.pendingTools--; finished(); }
   }
   private closeTools(): Promise<void> {
     return this.toolsClosing ??= Promise.resolve().then(() => this.tools?.close()).catch(() => { throw new CodexRpcError("cleanup"); });
