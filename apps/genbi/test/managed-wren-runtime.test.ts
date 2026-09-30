@@ -193,7 +193,6 @@ describe("managed Wren runtime", () => {
     });
     expect(localAvailable).toHaveBeenCalledTimes(1); expect(fetch).not.toHaveBeenCalled(); expect(existsSync(value.runtimeRoot)).toBe(false);
     const productionComposition = readFileSync(path.resolve("server", "bin.ts"), "utf8");
-    expect(productionComposition).toContain("managedWrenReadinessFailure({ packageRoot })");
     expect(productionComposition).not.toContain("provisionManagedWrenRuntime");
   });
 

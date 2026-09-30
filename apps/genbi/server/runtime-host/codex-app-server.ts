@@ -7,6 +7,8 @@ import { CODEX_CERTIFIED_ROWS, codexCertificationSchema, evaluateCodexIdentity }
 import { buildCodexSessionPolicy } from "./codex-policy.js";
 import { spawnCodexTransport } from "./codex-process.js";
 import { CodexSession } from "./codex-session.js";
+import type { CodexComponentPolicy } from "./codex-component-step.js";
+import type { RpcTransport } from "./codex-rpc.js";
 import { CodexRpcError } from "./codex-rpc.js";
 import type { CodexEvent } from "./codex-events.js";
 import { runtimeNotReady } from "./policy.js";
@@ -39,6 +41,7 @@ export class CodexAppServerBackend {
   private permits = new WeakMap<CodexLaunchPermit, PermitState>();
   private leases = new Set<PermitState>();
   private sessions = new Set<CodexSession>();
+  private steps = new Set<RpcTransport>();
   private stopped = false;
   private shutdownPromise?: Promise<void>;
   private readonly options: CodexBackendOptions;
@@ -108,6 +111,7 @@ export class CodexAppServerBackend {
   }
 
   async open(permit: CodexLaunchPermit, input: {
+    readonly model?: string;
     readonly tools?: CodexSessionTools;
     readonly spec: NativeRuntimeSpec;
     readonly wrenHome: CodexWrenHome;
@@ -123,7 +127,7 @@ export class CodexAppServerBackend {
       if (input.spec.executables.vendor?.digest !== state.vendor.digest || input.spec.executables.vendor?.executable !== state.vendor.executable) throw new CodexBackendError("codex_identity_uncertified");
       try { input.assertScopeActive(); }
       catch { throw new CodexBackendError("runtime_policy_unavailable"); }
-      try { return buildCodexSessionPolicy(input.spec, current, input.wrenHome, input.tools !== undefined); }
+      try { return buildCodexSessionPolicy(input.spec, current, input.wrenHome, input.tools !== undefined, input.model); }
       catch { throw new CodexBackendError("codex_wren_child_env_invalid"); }
     };
     let spawned = false;
@@ -152,10 +156,40 @@ export class CodexAppServerBackend {
       throw new CodexBackendError("codex_app_server_protocol_incompatible");
     }
   }
+  /** A fresh, governed transport per component step; same certification gate as the outer session. */
+  openStep(permit: CodexLaunchPermit, input: {
+    readonly spec: NativeRuntimeSpec; readonly wrenHome: CodexWrenHome;
+    readonly model: string; readonly accountEmail: string; readonly signal: AbortSignal;
+    readonly assertScopeActive: () => void;
+  }): { transport: RpcTransport; policy: CodexComponentPolicy } {
+    const state = this.permits.get(permit);
+    if (!state || state.consumed || state.released || this.stopped) throw new CodexBackendError("runtime_policy_unavailable");
+    const check = () => {
+      input.signal.throwIfAborted(); input.assertScopeActive();
+      if (this.stopped) throw new CodexBackendError("runtime_policy_unavailable");
+      const runtime = this.assertRecord(state);
+      if (input.spec.executables.vendor?.digest !== state.vendor.digest || input.spec.executables.vendor?.executable !== state.vendor.executable) throw new CodexBackendError("codex_identity_uncertified");
+      return buildCodexSessionPolicy(input.spec, runtime, input.wrenHome, true, input.model);
+    };
+    const launch = check(); state.consumed = true;
+    let raw: RpcTransport;
+    try { raw = spawnCodexTransport({ executable: state.vendor.executable, args: launch.args, cwd: launch.cwd, env: { ...launch.environment } }); }
+    catch (error) { this.leases.delete(state); throw error; }
+    let closing: Promise<void> | undefined;
+    const transport: RpcTransport = { listen: raw.listen.bind(raw), write: raw.write.bind(raw), close: () => closing ??= (async () => {
+      await raw.close(); this.steps.delete(transport); this.leases.delete(state); input.signal.removeEventListener("abort", abort);
+    })() };
+    const abort = () => { void transport.close().catch(() => {}); };
+    this.steps.add(transport); input.signal.addEventListener("abort", abort, { once: true });
+    if (input.signal.aborted) abort();
+    return { transport, policy: { cwd: launch.cwd, codexHome: launch.codexHome, permissionProfile: launch.profile,
+      model: input.model, accountEmail: input.accountEmail, configuration: launch.configuration,
+      assertCurrent() { if (JSON.stringify(check()) !== JSON.stringify(launch)) throw new CodexBackendError("runtime_policy_unavailable"); } } };
+  }
   shutdown(): Promise<void> {
     this.stopped = true;
     this.shutdownPromise ??= (async () => {
-      const results = await Promise.allSettled([...this.sessions].map((session) => session.close()));
+      const results = await Promise.allSettled([...this.sessions, ...this.steps].map((session) => session.close()));
       for (const state of this.leases) if (!state.consumed) { state.released = true; this.leases.delete(state); }
       if (results.some((result) => result.status === "rejected")) throw new CodexBackendError("codex_app_server_cleanup_failed");
     })();

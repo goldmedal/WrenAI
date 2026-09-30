@@ -82,3 +82,11 @@ it("captures direct Codex context through the same project and credential identi
   vi.mocked(options.currentIdentity).mockReturnValue({ ...options.identity, auth_identity: "rotated" });
   expect(() => captured.bindings.assertCurrent()).toThrow();
 });
+
+
+it("captures the explicit host Wren environment instead of ambient model credentials", async () => {
+  const { ir, scope, options } = setup("codex");
+  const wrenEnvironment = { PATH: "/trusted", HOME: "/isolated", WREN_HOME: "/credential-scope" };
+  await prepareCapturedCodexDirectTools(JSON.stringify(ir), scope, { ...options, wrenEnvironment, producerBinary: "/fixture/producer", expiresAt: Date.now() + 60_000 });
+  expect(captureWrenAccessIdentity).toHaveBeenCalledWith(project, wrenEnvironment);
+});

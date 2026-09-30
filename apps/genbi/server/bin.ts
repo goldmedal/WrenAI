@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { createCodexRuntimeComposition, readCodexBootConfiguration } from "./codex-runtime-composition.js";
+import { createCodexStructuredAdapter } from "./codex-structured-ask.js";
 import { StructuredRuntime } from "./structured-runtime.js";
 import { shutdownNativeResources } from "./native-shutdown.js";
 /**
@@ -146,7 +148,7 @@ import { NativeSessionService } from "./native-sessions.js";
 import { NativeArtifactService } from "./native-artifacts.js";
 import { RuntimeHost } from "./runtime-host/local.js";
 import { runtimeNotReady } from "./runtime-host/policy.js";
-import { managedWrenReadinessFailure, resolveManagedWrenRuntime } from "./managed-wren-runtime.js";
+import { resolveManagedWrenRuntime } from "./managed-wren-runtime.js";
 import { assertNativeExecutableIdentity, assertNativeRuntimeSpec, attestNativeExecutable, buildNativeChildEnvironment, buildNativeRuntimeSpec, resolveNativeExecutable } from "./native-runtime-spec.js";
 import type { NativeExecutableIdentity } from "./native-runtime-spec.js";
 import { initializeNativeSessionStateBase, legacyInteractiveWorkspace, validateLegacyInteractiveWorkspace } from "./native-session-workspace.js";
@@ -588,25 +590,15 @@ async function main(): Promise<void> {
   };
   // This is the sole production composition of the Phase-1 policy. Browser
   // requests never reach this selection or its executable/policy inputs.
-  const managedCodexRuntimeProbe = async () => {
-    const code = managedWrenReadinessFailure({ packageRoot });
-    if (code !== undefined) {
-      return {
-        readiness: runtimeNotReady("codex-app-server", "unprovisioned", code),
-        diagnostic: { phase: "provisioning" as const },
-      };
-    }
-    // A verified runtime alone does not enable the future app-server adapter.
-    return {
-      readiness: runtimeNotReady("codex-app-server", "unprovisioned", "codex_app_server_unprovisioned"),
-      diagnostic: { phase: "provisioning" as const },
-    };
-  };
+  const codexConfiguration = readCodexBootConfiguration(process.env);
+  const codexComposition = createCodexRuntimeComposition({ configuration: codexConfiguration, packageRoot,
+    producerBinary: producerExecutable?.executable ?? "", profileSource: harnessProfileSources.analysis, store,
+    getBinding: currentInteractiveBinding, sourceWrenHome: nativeSourceWrenHome, artifacts: nativeArtifacts });
   const nativeRuntimeHost = new RuntimeHost({
-    selected: "local",
+    selected: codexConfiguration.selected,
     deployment: process.env["NODE_ENV"] === "production" ? "production" : "development",
-    localAvailable: nativeTerminalHostAvailable,
-    vendorProbes: { "codex-app-server": managedCodexRuntimeProbe },
+    localAvailable: () => codexConfiguration.allowLocal ? nativeTerminalHostAvailable() : false,
+    vendorProbes: { "codex-app-server": codexComposition.probe },
   });
   const nativeSessions = new NativeSessionService({
     store,
@@ -636,6 +628,7 @@ async function main(): Promise<void> {
     warbleBin: producerExecutable?.executable ?? "warble",
     terminalHostAvailable: nativeTerminalHostAvailable,
     runtimeHost: nativeRuntimeHost,
+    directCodex: codexComposition.native,
     resolveManagedCodexWrenRuntime: () => resolveManagedWrenRuntime({ packageRoot }),
     nativeHome,
     sourceWrenHome: nativeSourceWrenHome,
@@ -647,10 +640,10 @@ async function main(): Promise<void> {
     artifactService: nativeArtifacts,
   });
 
-  // Explicit legacy composition. Isolated vendors require their own provisioner
-  // and certification before this selection can change.
+  // Explicit opt-in remains behind the packaged exact-version certification gate.
   const structuredRuntime = new StructuredRuntime({
-    selected: { codex: "local", claude: "local" }, allowLocal: true, deployment,
+    selected: { codex: codexConfiguration.selected, claude: "local" }, allowLocal: codexConfiguration.allowLocal, deployment,
+    adapters: { codex: createCodexStructuredAdapter(codexComposition.structured) },
     localRoute: route, localSetupFor: (choice) => setupRunnerFor?.(choice) ?? setupRunner,
   });
   deps = {
@@ -749,7 +742,7 @@ async function main(): Promise<void> {
     const deadline = setTimeout(() => process.exit(1), 12_000);
     void shutdownNativeResources({
       shutdownSessions: async () => {
-        const results = await Promise.allSettled([nativeSessions.shutdown(), structuredRuntime.shutdown()]);
+        const results = await Promise.allSettled([nativeSessions.shutdown(), structuredRuntime.shutdown(), codexComposition.shutdown()]);
         if (results.some((result) => result.status === "rejected")) throw new Error("Session cleanup failed");
       },
       closeTerminals: () => interactiveTerminal?.closeAll(),
