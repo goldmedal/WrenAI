@@ -20,7 +20,13 @@ export type EgressReason =
   | "judge_refused" | "judge_unavailable" | "judge_invalid"
   | "callee_refused" | "callee_error" | "invalid_answer" | "invalid_request" | "policy_missing"
   /** The callee itself reported the slot as unanswerable (or refused it); its reason text does not cross. */
-  | "unanswerable";
+  | "unanswerable"
+  /**
+   * The judge's redaction cannot be carried through to what would cross: a value
+   * from a redacted column survives in a crossing field, or the slot's answer is
+   * model-written prose, which no column drop can be shown to have cleaned.
+   */
+  | "redact_leak";
 export type JudgeVerdict = "pass" | "redact" | "refuse";
 
 export const slotDeclarationSchema = z.object({
@@ -177,6 +183,24 @@ function smallestGroup(table: TableAnswer): number | undefined {
   return values.length ? Math.min(...values) : undefined;
 }
 
+/**
+ * The free text the callee's model wrote on an entry. It is model output, not data: it is scanned
+ * like the cells before the judge, and after a non-pass verdict none of it crosses (see `redactColumns`).
+ * Keys outside the declared entry shape are never scanned because they never cross: every disclosed
+ * answer is rebuilt field by field.
+ */
+function modelText(answer: { readonly summary?: string | undefined; readonly text?: string | undefined; readonly unit?: string | undefined }): string[] {
+  return [answer.summary, answer.text, answer.unit].filter((value): value is string => typeof value === "string");
+}
+/** The policy's sensitive-column patterns and the PII patterns, applied to free text. */
+function textReason(texts: readonly string[], policy: DisclosurePolicy): EgressReason | undefined {
+  const sensitive = policy.sensitive_column_patterns.map(compile);
+  if (texts.some((text) => sensitive.some((pattern) => pattern.test(text)))) return "sensitive_column";
+  const pii = [...BUILT_IN_PII_PATTERNS, ...policy.pii_patterns.map(compile)];
+  if (texts.some((text) => pii.some((pattern) => pattern.test(text)))) return "pii_pattern";
+  return undefined;
+}
+
 function deterministic(slot: SlotDeclaration, table: TableAnswer, policy: DisclosurePolicy): EgressReason | undefined {
   if (!policy.allowed_shapes.includes(slot.expected_shape) || !actualShapeFits(slot.expected_shape, table)) return "shape_mismatch";
   const limit = Math.min(policy.max_rows, slot.max_rows ?? Number.POSITIVE_INFINITY);
@@ -185,6 +209,8 @@ function deterministic(slot: SlotDeclaration, table: TableAnswer, policy: Disclo
   if (table.columns.some((column) => sensitive.some((pattern) => pattern.test(column)))) return "sensitive_column";
   const pii = [...BUILT_IN_PII_PATTERNS, ...policy.pii_patterns.map(compile)];
   if (cellStrings(table.rows).some((cell) => pii.some((pattern) => pattern.test(cell)))) return "pii_pattern";
+  const inText = textReason(modelText(table), policy);
+  if (inText) return inText;
   if (policy.min_group_size > 1 && table.rows.length > 0) {
     if (identifierLikeKeys(table).length > 0) return "group_size";
     const smallest = smallestGroup(table);
@@ -192,11 +218,9 @@ function deterministic(slot: SlotDeclaration, table: TableAnswer, policy: Disclo
   }
   return undefined;
 }
-function deterministicNarrative(slot: SlotDeclaration, text: string, policy: DisclosurePolicy): EgressReason | undefined {
+function deterministicNarrative(slot: SlotDeclaration, text: string, policy: DisclosurePolicy, unit?: string): EgressReason | undefined {
   if (slot.expected_shape !== "narrative" || !policy.allowed_shapes.includes("narrative")) return "shape_mismatch";
-  const pii = [...BUILT_IN_PII_PATTERNS, ...policy.pii_patterns.map(compile)];
-  if (pii.some((pattern) => pattern.test(text))) return "pii_pattern";
-  return undefined;
+  return textReason(unit !== undefined ? [text, unit] : [text], policy);
 }
 
 function extractJsonObject(text: string): unknown {
@@ -236,6 +260,15 @@ async function consultJudge(judge: EgressJudge | undefined, input: EgressJudgeIn
   }
 }
 
+/** A host-written, value-free description of a redacted table: the row count and the surviving column names. */
+function neutralSummary(columns: readonly string[], rowCount: number): string {
+  return `${rowCount} ${rowCount === 1 ? "row" : "rows"}; columns: ${columns.join(", ")}.`;
+}
+/**
+ * Drops the judge's columns and rebuilds the entry from the surviving columns and rows alone. The
+ * callee's `summary`, `text`, `unit` and every other field are model-written or undeclared and are
+ * not carried, because the redacted values may be named in them; `summary` becomes {@link neutralSummary}.
+ */
 function redactColumns(table: TableAnswer, columns: readonly string[]): TableAnswer | undefined {
   const drop = new Set(columns);
   if (columns.some((column) => !table.columns.includes(column))) return undefined;
@@ -246,11 +279,28 @@ function redactColumns(table: TableAnswer, columns: readonly string[]): TableAns
     if (row && typeof row === "object") return Object.fromEntries(keep.map((column) => [column, (row as Record<string, unknown>)[column]]));
     return row;
   });
-  return { ...table, columns: keep, rows };
+  return { columns: keep, rows, summary: neutralSummary(keep, rows.length) };
+}
+/** Redacted string values shorter than this would match almost any text, so they are not searched for. */
+const LEAK_MIN_LENGTH = 3;
+/**
+ * Post-redaction consistency: no string value of a redacted column may survive in anything that
+ * crosses (the entry's free text, the surviving column names, the surviving string cells).
+ * Numeric values are not searched for: digits recur in counts and amounts by coincidence.
+ */
+function redactionLeaks(original: TableAnswer, dropped: readonly string[], redacted: TableAnswer): boolean {
+  const values = dropped.flatMap((column) => columnValues(original, column))
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length >= LEAK_MIN_LENGTH);
+  if (values.length === 0) return false;
+  const crossing = [...modelText(redacted), ...redacted.columns, ...cellStrings(redacted.rows)].map((text) => text.toLowerCase());
+  return values.some((value) => crossing.some((text) => text.includes(value)));
 }
 
+/** A refused slot crosses as its id, the status and the reason category, nothing else. */
 function refusedAnswer(slot: SlotDeclaration, reason: EgressReason): DisclosedAnswer {
-  return { slot_id: slot.slot_id, status: "refused", shape: slot.expected_shape, reason_category: reason };
+  return { slot_id: slot.slot_id, status: "refused", reason_category: reason };
 }
 /** The disclosed shape of a table: columns and rows only. `definition`, SQL and every unknown key are dropped by construction. */
 function discloseTable(slot: SlotDeclaration, table: TableAnswer, status: EgressStatus): DisclosedAnswer {
@@ -326,7 +376,10 @@ function declinedOf(value: unknown): Set<string> {
  * provenance. Deterministic checks run first; only a slot that passes them
  * reaches the judge. On `pass` and `redact` the disclosed answer is rebuilt
  * from columns and rows alone, so `definition`, SQL and any other key the
- * callee attached never cross.
+ * callee attached never cross. Text the callee's model wrote (`summary`,
+ * `text`, `unit`) is scanned before the judge, crosses only on `pass`, and on
+ * `redact` is replaced by a host-written sentence naming the row count and
+ * the surviving columns.
  */
 export async function verifyEgress(
   request: { readonly request: string; readonly input: Readonly<Record<string, unknown>> },
@@ -360,7 +413,7 @@ export async function verifyEgress(
     }
     if (answer.kind === "narrative") {
       const text = answer.narrative.text;
-      const reason = deterministicNarrative(slot, text, options.policy);
+      const reason = deterministicNarrative(slot, text, options.policy, answer.narrative.unit);
       provenance.push(provenanceOf(slot, answer.narrative));
       if (reason) { decisions.push({ slot_id: slot.slot_id, status: "refused", reason_category: reason, judge: "skipped", row_count: 0 }); disclosed.push(refusedAnswer(slot, reason)); continue; }
       const judged = await consultJudge(options.judge, { policy: options.policy, untrusted_question: slot.question, ...(preamble !== undefined ? { untrusted_preamble: preamble } : {}),
@@ -386,8 +439,12 @@ export async function verifyEgress(
     }
     let status: EgressStatus = "ok";
     if (judged.verdict === "redact") {
-      const redacted = redactColumns(table, judged.redact_columns ?? []);
-      const again = redacted ? deterministic(slot, redacted, options.policy) : "judge_invalid";
+      const dropped = judged.redact_columns ?? [];
+      const redacted = redactColumns(table, dropped);
+      const again: EgressReason | undefined = !redacted ? "judge_invalid" : deterministic(slot, redacted, options.policy)
+        ?? (redactionLeaks(table, dropped, redacted) ? "redact_leak" : undefined)
+        // A narrative slot's answer is the model's prose itself; after a redact verdict no model text crosses.
+        ?? (slot.expected_shape === "narrative" ? "redact_leak" : undefined);
       if (!redacted || again) {
         const reasonCategory: EgressReason = again ?? "judge_invalid";
         decisions.push({ slot_id: slot.slot_id, status: "refused", reason_category: reasonCategory, judge: "redact", row_count: table.rows.length }); disclosed.push(refusedAnswer(slot, reasonCategory)); continue;
