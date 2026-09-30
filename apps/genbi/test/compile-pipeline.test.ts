@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -115,6 +115,22 @@ describe.skipIf(!canRun)("compileProfile against the real warble binary + genbi-
     expect(second.cacheHit).toBe(true);
     expect(second.irPath).toBe(first.irPath);
     expect(second.bundlePath).toBe(first.bundlePath);
+  });
+
+  it("does not reuse an embedded project binding for a byte-identical project at another path", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "genbi-project-cache-"));
+    try {
+      const firstProject = path.join(root, "first"); const secondProject = path.join(root, "second");
+      await cp(JAFFLE_WREN, firstProject, { recursive: true });
+      await cp(JAFFLE_WREN, secondProject, { recursive: true });
+      const cache = createFileSystemCompileCache({ cacheDir: path.join(root, "cache") });
+      const first = await compileProfile({ profileSource: PROFILE_SOURCE, userProject: firstProject, mode: "native", cache });
+      const second = await compileProfile({ profileSource: PROFILE_SOURCE, userProject: secondProject, mode: "native", cache });
+      expect(second.cacheHit).toBe(false); expect(second.irPath).not.toBe(first.irPath);
+      const ir = JSON.parse(await readFile(second.irPath, "utf8"));
+      expect(ir.components.every((node: { context_binding: { project: string } }) => node.context_binding.project === secondProject)).toBe(true);
+      expect((await compileProfile({ profileSource: PROFILE_SOURCE, userProject: secondProject, mode: "native", cache })).cacheHit).toBe(true);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("recompiles when the user project (context) changes to a different project", async () => {

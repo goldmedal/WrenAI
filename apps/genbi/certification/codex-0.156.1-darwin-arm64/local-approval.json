@@ -1,0 +1,17 @@
+{
+  "kind": "local_exact_version_approval",
+  "date": "2026-09-30",
+  "authority": "User authorized this local record conditional on successful installed candidate acceptance. Conditions satisfied by referenced evidence.",
+  "platform": "darwin-arm64",
+  "version": "0.156.1",
+  "executableSha256": "0196e89fe5a7598f816ee54232c3d7c26d75e502ab5cfe2c9240e81d90f7255a",
+  "source": "https://registry.npmjs.org/@openai/codex/-/codex-0.156.1-darwin-arm64.tgz",
+  "npmIntegrity": "sha512-Jg6wbdV+wmMZczhwE74GSxOYEZlViKXn6KyCw/yfrz3PAKFD14xljuPopmdhWC1+8IKU2WdN5fdmXNPt2q4HPA==",
+  "protocolSha256": "655adafa0ccea3d84f30bcbdc74e201fa14511c51e08d0cd024a0280daa8bc60",
+  "deterministicProbesSha256": "b9e76d5f6f3ddc68dcaf3c78a080d246d3f838f88158a06311876340f412378c",
+  "packedAcceptanceSha256": "06969b1568c79b27751c992798a36a115bc905619cb1be5c21d0ea07d324a95d",
+  "scope": "Local exact-version registry and unmodified installed acceptance only. No publication, merge, release or default activation authorized.",
+  "liveModel": "gpt-5.5",
+  "review": "Independent read-only reviews approved protocol ordering, passive/full integrity boundaries, terminal rejection and table persistence repair.",
+  "nextGate": "Repeat installed Ask and Native query/reconnect/stop with the packaged row and no admission injection."
+}

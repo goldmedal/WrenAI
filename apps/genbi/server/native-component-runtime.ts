@@ -15,6 +15,7 @@ export type NativeComponentVendor = {
   readonly generation: string;
   readonly models: Readonly<Record<string, string>>;
   assertCurrent(): void;
+  assertLive?(): void;
 } & ({
   readonly vendor: "claude";
   open(model: string, signal: AbortSignal): Promise<ClaudeComponentRuntime>;
@@ -26,6 +27,8 @@ export type NativeComponentVendor = {
 export interface NativeComponentRuntimeOptions extends Pick<NativeComponentBindings,
   "identity" | "contexts" | "verifierBinary" | "currentIdentity" | "assertCurrent" | "persistRoot" | "onEvent"> {
   readonly vendor: NativeComponentVendor;
+  /** Optional cheap scope guard; integrity remains mandatory at protected operations. */
+  assertLive?(): void;
   readonly wren: { readonly executable: string; readonly project: string; readonly fingerprint: string; readonly identity: WrenAccessIdentity };
 }
 
@@ -44,13 +47,16 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
   const wren = { ...options.wren };
   const persistRoot = options.persistRoot;
   const used = new WeakSet<object>();
-  const check = () => {
-    assertBinding(); assertVendor();
+  const assertBindingLive = options.assertLive?.bind(options) ?? assertBinding;
+  const assertVendorLive = provider.assertLive?.bind(provider) ?? assertVendor;
+  const checkIdentity = () => {
     if (identity.vendor !== vendor || identity.auth_identity !== account.authIdentity || identity.runtime_generation !== account.generation
       || !account.accountEmail || !isDeepStrictEqual(currentIdentity(), identity)
       || provider.vendor !== vendor || provider.authIdentity !== account.authIdentity || provider.accountEmail !== account.accountEmail
       || provider.generation !== account.generation || !isDeepStrictEqual(provider.models, models)) throw new Error("Native component runtime binding expired");
   };
+  const check = () => { assertBinding(); assertVendor(); checkIdentity(); };
+  const checkLive = () => { assertBindingLive(); assertVendorLive(); checkIdentity(); };
   check();
   const checkAccess = async (signal: AbortSignal) => { signal.throwIfAborted(); check(); await wren.identity.assertCurrent();
     if (await hashDirectory(wren.project) !== wren.fingerprint) throw new Error("Native component project changed");
@@ -81,8 +87,10 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
         if (vendor === "codex" && "transport" in resource) {
           if (resource.policy.accountEmail !== account.accountEmail || resource.policy.model !== model) throw new Error("Native component account or model mismatch");
           const originalCheck = resource.policy.assertCurrent.bind(resource.policy);
+          const originalLive = resource.policy.assertLive?.bind(resource.policy) ?? originalCheck;
           return await runCodexComponentStep({ listen: resource.transport.listen.bind(resource.transport), write: resource.transport.write.bind(resource.transport), close },
-            { ...resource.policy, assertCurrent() { check(); originalCheck(); } }, run);
+            { ...resource.policy, assertCurrent() { check(); originalCheck(); },
+              assertLive() { checkLive(); originalLive(); } }, run);
         }
         if (vendor === "claude" && !("transport" in resource)) {
           if (resource.account.email !== account.accountEmail || resource.model !== model) throw new Error("Native component account or model mismatch");

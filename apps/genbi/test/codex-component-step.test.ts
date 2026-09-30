@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCodexComponentStep, codexComponentConfiguration, type CodexComponentPolicy } from "../server/runtime-host/codex-component-step.js";
 import { CODEX_BASELINE_VERSION } from "../server/runtime-host/codex-compatibility.js";
+import { codexDisabledCodeModeWarningSchema } from "../server/runtime-host/codex-events.js";
 import type { RpcTransport } from "../server/runtime-host/codex-rpc.js";
 import type { StepRun } from "../harness/components/runner.js";
 
@@ -23,6 +24,8 @@ class Peer implements RpcTransport {
   omitStarts = false;
   threadOverrides: Record<string, unknown> = {};
   afterConfig?: () => void;
+  accountUpdateWithReply = false;
+  accountUpdateBeforeReply = false;
   onToolResponse?: (frame: Frame) => void;
   listen(handlers: Peer["handlers"]) { this.handlers = handlers; }
   line(frame: Frame) { this.handlers.data(Buffer.from(JSON.stringify(frame) + "\n")); }
@@ -39,6 +42,13 @@ class Peer implements RpcTransport {
     if (frame.method === "turn/start") {
       if (!this.omitStarts) this.event("turn/started", { threadId: "thread", turn });
       this.beforeTurnReply?.();
+    }
+    if (frame.method === "account/read" && this.accountUpdateBeforeReply) this.event("account/updated", { authMode: "chatgpt", planType: "plus" });
+    if (frame.method === "account/read" && this.accountUpdateWithReply) {
+      this.handlers.data(Buffer.from([
+        { id: frame.id, result: results[frame.method] },
+        { method: "account/updated", params: { authMode: "chatgpt", planType: "plus" } },
+      ].map((value) => JSON.stringify(value)).join("\n") + "\n")); return;
     }
     if (frame.id !== undefined) this.line({ id: frame.id, result: results[frame.method] });
     if (frame.method === "config/read") this.afterConfig?.();
@@ -66,9 +76,103 @@ async function ready(peer: Peer) { await vi.waitFor(() => expect(peer.writes.som
 afterEach(() => vi.useRealTimers());
 
 describe("governed Codex component step", () => {
+  it("does not repeat disk-integrity checks for passive deltas but verifies final results", async () => {
+    const peer = new Peer(); const approved = { ...policy(), assertLive: vi.fn() }; const result = runCodexComponentStep(peer, approved, step());
+    await ready(peer);
+    peer.event("item/started", { threadId: "thread", turnId: "turn", item: { id: "reason", type: "reasoning" }, startedAtMs: 1 });
+    const before = vi.mocked(approved.assertCurrent).mock.calls.length;
+    for (let i = 0; i < 1000; i++) peer.event("item/reasoning/textDelta", { threadId: "thread", turnId: "turn", itemId: "reason", delta: "token" });
+    expect(approved.assertLive).toHaveBeenCalled(); expect(approved.assertCurrent).toHaveBeenCalledTimes(before);
+    peer.event("item/completed", { threadId: "thread", turnId: "turn", item: { id: "reason", type: "reasoning" }, completedAtMs: 2 });
+    peer.completed.push({ id: "reason", type: "reasoning" });
+    peer.finish(); await expect(result).resolves.toMatchObject({ value: "synthetic answer" });
+    expect(vi.mocked(approved.assertCurrent).mock.calls.length).toBeGreaterThan(before);
+  });
+  it.each(["before-tool", "after-tool", "final"])("rejects disk tampering at the %s effect boundary", async (boundary) => {
+    const peer = new Peer(); const run = step(); let intact = true;
+    const approved = { ...policy(), assertLive: vi.fn(), assertCurrent() { if (!intact) throw Error("tampered"); } };
+    const result = runCodexComponentStep(peer, approved, run); const rejected = expect(result).rejects.toMatchObject({ reason: "protocol" });
+    await ready(peer);
+    if (boundary === "after-tool") vi.mocked(run.tools.query!).mockImplementation(async () => { intact = false; return { rows: [] }; });
+    else intact = false;
+    if (boundary === "final") peer.finish(); else peer.call();
+    await rejected;
+    if (boundary === "before-tool") expect(run.tools.query).not.toHaveBeenCalled();
+    if (boundary === "after-tool") expect(peer.writes.some((frame) => frame.id === "rpc-tool-1" && frame.result !== undefined)).toBe(false);
+    expect(peer.close).toHaveBeenCalledOnce();
+  });
+  it("revokes immediately on a passive event even without disk-integrity scanning", async () => {
+    const peer = new Peer(); let live = true;
+    const approved = { ...policy(), assertLive() { if (!live) throw Error("revoked"); } };
+    const result = runCodexComponentStep(peer, approved, step()); const rejected = expect(result).rejects.toMatchObject({ reason: "protocol" });
+    await ready(peer); live = false;
+    peer.event("thread/status/changed", { threadId: "thread", status: { type: "active" } });
+    await rejected; expect(peer.close).toHaveBeenCalledOnce();
+  });
+
+  it("accepts startup auth while account/read is pending, before its response", async () => {
+    const peer = new Peer(); peer.accountUpdateBeforeReply = true;
+    const result = runCodexComponentStep(peer, policy(), step()); await ready(peer);
+    peer.finish(); await expect(result).resolves.toMatchObject({ value: "synthetic answer" });
+  });
+  it("rejects account changes in the same buffer as the pinned account response", async () => {
+    const peer = new Peer(); peer.accountUpdateWithReply = true;
+    await expect(runCodexComponentStep(peer, policy(), step())).rejects.toMatchObject({ reason: "protocol" });
+    expect(peer.writes.some((frame) => frame.method === "thread/start")).toBe(false);
+    expect(peer.close).toHaveBeenCalledOnce();
+  });
+  it("uses completed item events when the vendor sends an unloaded turn summary", async () => {
+    const peer = new Peer(); const result = runCodexComponentStep(peer, policy(), step()); await ready(peer);
+    peer.item({ id: "answer", type: "agentMessage", text: "streamed answer" });
+    peer.event("turn/completed", { threadId: "thread", turn: { ...turn, status: "completed", items: [], itemsView: "notLoaded" } });
+    await expect(result).resolves.toMatchObject({ value: "streamed answer" });
+  });
+  it("matches a summary subset to completed stream items without requiring omitted items", async () => {
+    const peer = new Peer(); const result = runCodexComponentStep(peer, policy(), step()); await ready(peer);
+    peer.item({ id: "reason", type: "reasoning" });
+    const answer = { id: "answer", type: "agentMessage", text: "streamed answer" }; peer.item(answer);
+    peer.event("turn/completed", { threadId: "thread", turn: { ...turn, status: "completed", items: [answer], itemsView: "summary" } });
+    await expect(result).resolves.toMatchObject({ value: "streamed answer" });
+  });
+  it("rejects an unloaded summary with hidden items or an unfinished streamed item", async () => {
+    for (const hidden of [false, true]) {
+      const peer = new Peer(); const result = runCodexComponentStep(peer, policy(), step());
+      const rejected = expect(result).rejects.toThrow("Codex RPC protocol"); await ready(peer);
+      peer.item({ id: "answer", type: "agentMessage", text: "answer" });
+      if (!hidden) peer.event("item/started", { threadId: "thread", turnId: "turn", item: { id: "unfinished", type: "reasoning" }, startedAtMs: 1 });
+      peer.event("turn/completed", { threadId: "thread", turn: { ...turn, status: "completed", itemsView: "notLoaded", items: hidden ? [{ id: "hidden", type: "commandExecution" }] : [] } });
+      await rejected;
+    }
+  });
+  it("accepts only the scoped disabled-code-mode warning without enabling that capability", async () => {
+    const peer = new Peer(); const result = runCodexComponentStep(peer, policy(), step()); await ready(peer);
+    peer.event("warning", { threadId: "thread", message: codexDisabledCodeModeWarningSchema.shape.message.value });
+    peer.finish(); await expect(result).resolves.toMatchObject({ value: "synthetic answer" });
+  });
+  it.each(["message", "thread"])("rejects a changed warning %s", async (change) => {
+    const peer = new Peer(); const result = runCodexComponentStep(peer, policy(), step());
+    const rejected = expect(result).rejects.toThrow("Codex RPC protocol"); await ready(peer);
+    peer.event("warning", { threadId: change === "thread" ? "other" : "thread", message: change === "message" ? "sandbox disabled" : codexDisabledCodeModeWarningSchema.shape.message.value });
+    await rejected;
+  });
+  it("validates startup auth notification but still checks the account and rejects later changes", async () => {
+    const peer = new Peer(); peer.afterConfig = () => peer.event("account/updated", { authMode: "chatgpt", planType: "plus" });
+    const result = runCodexComponentStep(peer, policy(), step());
+    const rejected = expect(result).rejects.toThrow("Codex RPC protocol");
+    await ready(peer);
+    expect(peer.writes.some((f) => f.method === "account/read")).toBe(true);
+    peer.event("account/updated", { authMode: "chatgpt", planType: "plus" });
+    await rejected; expect(peer.close).toHaveBeenCalledOnce();
+  });
+  it.each(["apikey", null])("rejects unsupported startup auth mode %s before a turn", async (authMode) => {
+    const peer = new Peer(); peer.afterConfig = () => peer.event("account/updated", { authMode, planType: null });
+    await expect(runCodexComponentStep(peer, policy(), step())).rejects.toThrow("Codex RPC protocol");
+    expect(peer.writes.some((f) => f.method === "turn/start")).toBe(false);
+  });
   it("uses a fresh ephemeral pinned model thread and returns observed usage", async () => {
     const peer = new Peer(); const run = step(); const result = runCodexComponentStep(peer, policy(), run);
     await ready(peer);
+    peer.event("account/rateLimits/updated", { rateLimits: { limitId: "codex", primary: { usedPercent: 1, windowDurationMins: 300, resetsAt: 123 } } });
     peer.event("thread/tokenUsage/updated", { threadId: "thread", turnId: "turn", tokenUsage: { total: { inputTokens: 17, outputTokens: 4 } } });
     peer.finish();
     await expect(result).resolves.toEqual({ value: "synthetic answer", usage: { inputTokens: 17, outputTokens: 4 } });

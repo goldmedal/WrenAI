@@ -1,0 +1,54 @@
+{
+  "kind": "installed_candidate_acceptance",
+  "date": "2026-09-30",
+  "packageVersion": "0.0.4",
+  "candidateTarballSha256": "825fe2b9ce95c414e4f817c00b7bb46089fa7ea46e532e6331603055e6f8af3b",
+  "offlineRunner": "scripts/installed-package-acceptance.mjs",
+  "offlineOutputSha256": "cdbffeb8dd006b40a4b596422e6ad273c44d547053f04f6ccbe4165231ab24a4",
+  "admission": "private test harness only; exact vendor source/version/digest and managed runtime checks retained; no production registry override ships",
+  "vendorVersion": "0.156.1",
+  "model": "gpt-5.5",
+  "managedRuntimeManifestSha256": "d1ad640f3569d9cec3102110c18627180e22793ad644418ed9a93b475f06e33a",
+  "dependencies": {
+    "warble": "0.15.1",
+    "ir": "0.8.0",
+    "context-loader": "0.1.1"
+  },
+  "data": "Jaffle sample",
+  "question": "COUNT(*) AS order_count and SUM(amount) AS revenue FROM orders",
+  "expected": {
+    "order_count": 99,
+    "revenue": 1672
+  },
+  "databaseUnchanged": true,
+  "ask": {
+    "passed": true,
+    "outputSha256": "c16eda3b19dbe0fea799380f88600e58af278dac4c3ac8e732b70c56aa65ac7c",
+    "note": "Passed before the subsequent native-only table-row persistence repair."
+  },
+  "native": {
+    "ok": true,
+    "model": "gpt-5.5",
+    "query": true,
+    "reconnect": true,
+    "stop": true,
+    "events": 30,
+    "replayed": 31
+  },
+  "nativeOutputSha256": "5995071510e60595337e3eefbcde441adfbb2f2a6a3421e90d5b6014ead112e2",
+  "scope": [
+    "Structured Ask answer_query",
+    "Native Analysis answer_query",
+    "WebSocket reconnect and retained replay",
+    "explicit stop and owned process cleanup"
+  ],
+  "excluded": [
+    "other models",
+    "other platforms",
+    "dashboard live acceptance",
+    "Setup",
+    "Claude",
+    "provider resume"
+  ],
+  "projectPolicy": "No .codex configuration in project ancestry; dedicated independent login; no ambient MCP or shell tools."
+}

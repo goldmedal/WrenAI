@@ -9,9 +9,13 @@ import { buildCodexSessionPolicy } from "../server/runtime-host/codex-policy.js"
 import { compileProfile } from "../harness/compile/index.js";
 import { resolveContextLoaderBinary } from "../harness/compile/context-loader.js";
 import { prepareCapturedCodexDirectTools } from "../server/native-component-context.js";
+import { isCodexExecutionCertified } from "../server/runtime-host/codex-compatibility.js";
 import { Store } from "../server/db.js";
 import type { NativeArtifactService } from "../server/native-artifacts.js";
 import type { NativeSessionRow } from "../server/db.js";
+vi.mock("../server/runtime-host/codex-compatibility.js", async (original) => ({
+  ...(await original<typeof import("../server/runtime-host/codex-compatibility.js")>()), isCodexExecutionCertified: vi.fn(() => true),
+}));
 vi.mock("../harness/compile/index.js", () => ({ compileProfile: vi.fn() }));
 vi.mock("../harness/compile/context-loader.js", () => ({ resolveContextLoaderBinary: vi.fn() }));
 vi.mock("../server/native-component-context.js", () => ({ prepareCapturedCodexDirectTools: vi.fn() }));
@@ -22,7 +26,7 @@ vi.mock("../server/runtime-host/codex-app-server.js", async (original) => {
 });
 const roots: string[] = [], stores: Store[] = [];
 afterEach(() => { stores.splice(0).forEach((store) => store.close()); roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })); });
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => { vi.clearAllMocks(); vi.mocked(isCodexExecutionCertified).mockReturnValue(true); });
 function fixture() {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "codex-composition-test-"))); roots.push(root);
   const login = path.join(root, "login"), project = path.join(root, "project");
@@ -66,6 +70,16 @@ describe("Codex application composition", () => {
     expect((await f.composition.probe()).readiness).toMatchObject({ code: "codex_identity_uncertified" });
     expect(compileProfile).not.toHaveBeenCalled(); expect(prepareCapturedCodexDirectTools).not.toHaveBeenCalled();
   });
+  it("denies uncertified execution scope before readiness or any materialization", async () => {
+    const f = fixture(); vi.mocked(isCodexExecutionCertified).mockReturnValue(false);
+    expect((await f.composition.probe()).readiness.state).not.toBe("ready");
+    await expect(f.composition.structured.prepare(f.input)).rejects.toThrow();
+    await expect(f.composition.native.prepare({ session: { id: "session", entryVerb: "generate_dashboard" } as NativeSessionRow,
+      binding: f.binding, permit: f.input.permit, signal: f.controller.signal, assertActive() {} })).rejects.toThrow();
+    expect(isCodexExecutionCertified).toHaveBeenCalledWith("https://example.invalid/codex", expect.any(String), ["driver", "step", "step"], "generate_dashboard");
+    expect(f.artifacts.issue).not.toHaveBeenCalled(); expect(compileProfile).not.toHaveBeenCalled();
+    expect(f.backend.openStep).not.toHaveBeenCalled();
+  });
   it("prepares an isolated workspace with exact model and host-only Wren environment", async () => {
     const f = fixture(); const result = await f.composition.structured.prepare(f.input); roots.push(path.dirname(result.input.spec.workspace));
     expect(result.input.model).toBe("driver"); expect(result.input.spec.workspace).not.toBe(f.binding.path);
@@ -80,6 +94,17 @@ describe("Codex application composition", () => {
     expect(captured.vendor.models).toEqual({ cheap: "step", strong: "step" });
     expect(f.backend.openStep).not.toHaveBeenCalled();
     await result.input.tools.close(); await result.dispose(); expect(existsSync(result.input.spec.workspace)).toBe(false);
+  });
+  it("keeps cheap scope checks separate while disk tampering still blocks the next protected operation", async () => {
+    const f = fixture(); const result = await f.composition.structured.prepare(f.input); roots.push(path.dirname(result.input.spec.workspace));
+    const captured = vi.mocked(prepareCapturedCodexDirectTools).mock.calls[0]![2];
+    writeFileSync(path.join(f.root, "fixture-runtime"), "tampered");
+    expect(() => captured.assertLive!()).not.toThrow();
+    expect(() => captured.assertCurrent()).toThrow();
+    await expect(captured.vendor.open("step", f.controller.signal)).rejects.toThrow();
+    expect(f.backend.openStep).not.toHaveBeenCalled();
+    f.changeBinding(); expect(() => captured.assertLive!()).toThrow();
+    await result.input.tools.close(); await result.dispose();
   });
   it.each(["binding", "settings", "cancel"])("rejects %s changes after preparation", async (change) => {
     const f = fixture(); const result = await f.composition.structured.prepare(f.input); roots.push(path.dirname(result.input.spec.workspace));
@@ -110,6 +135,23 @@ describe("Codex application composition", () => {
     await expect(f.composition.native.prepare({ session: { id: "session", entryVerb: "answer_query" } as NativeSessionRow, binding: f.binding,
       permit: f.input.permit, signal: f.controller.signal, assertActive() {} })).rejects.toThrow();
     expect(f.artifacts.issue).not.toHaveBeenCalled(); expect(compileProfile).not.toHaveBeenCalled();
+  });
+  it.each([
+    [{ revenue: 1672, order_count: 99 }],
+    [[99, 1672]],
+  ])("persists verified query rows in the artifact service supported shape: %j", async (row) => {
+    const f = fixture(); const prepared = await f.composition.native.prepare({ session: { id: "session", entryVerb: "answer_query" } as NativeSessionRow,
+      binding: f.binding, permit: f.input.permit, signal: f.controller.signal, assertActive() {} }); roots.push(path.dirname(prepared.input.spec.workspace));
+    const sink = vi.mocked(prepareCapturedCodexDirectTools).mock.calls[0]![2].persistRoot!;
+    const value = { columns: ["order_count", "revenue"], rows: [row] };
+    const result = { status: "ok" as const, output: { kind: "value" as const, value }, provenance: { verified: false } };
+    await sink(result, {} as never, f.controller.signal);
+    expect(f.artifacts.persistAnswer).not.toHaveBeenCalled();
+    await sink({ ...result, provenance: { verified: true } }, {} as never, f.controller.signal);
+    expect(f.artifacts.persistAnswer).toHaveBeenCalledWith("host-only", expect.objectContaining({
+      envelope: { blocks: [{ type: "table", ...value }], verified: true },
+    }));
+    await prepared.input.tools.close(); await prepared.dispose();
   });
   it("uses the native artifact sink only for verified root results and revokes its credential", async () => {
     const f = fixture(); const prepared = await f.composition.native.prepare({ session: { id: "session", entryVerb: "generate_dashboard" } as NativeSessionRow,

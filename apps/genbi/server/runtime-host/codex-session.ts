@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { CODEX_BASELINE_VERSION } from "./codex-compatibility.js";
-import { codexThreadSchema, codexTurnSchema, parseCodexEvent, type CodexEvent } from "./codex-events.js";
+import { codexAccountUpdatedSchema, codexRateLimitsUpdatedSchema, codexThreadSchema, codexTurnSchema, parseCodexEvent, type CodexEvent } from "./codex-events.js";
 import type { CodexSessionPolicy } from "./codex-policy.js";
 import { CodexRpcClient, CodexRpcError, object, type RpcTransport } from "./codex-rpc.js";
 import { isDeepStrictEqual } from "node:util";
@@ -45,7 +45,7 @@ interface ActiveTurn {
   reject(error: unknown): void;
   timer: ReturnType<typeof setTimeout>;
   detach(): void;
-  items: Map<string, { type: string; completed: boolean }>;
+  items: Map<string, { type: string; completed: boolean; item?: Turn["items"][number] }>;
   readonly toolsAbort: AbortController;
   readonly calls: Set<string>;
   pendingTools: number;
@@ -68,6 +68,7 @@ export class CodexSession {
   private turn: ActiveTurn | undefined;
   private commands = new Map<string, { tty: boolean; stdinClosed: boolean; bytes: number }>();
   private ready = false;
+  private accountResponseReceived = false;
   private closed = false;
   private closePromise?: Promise<void>;
   private constructor(
@@ -76,7 +77,14 @@ export class CodexSession {
   ) {
     this.tools = tools ? Object.freeze({ accountEmail: tools.accountEmail, definitions: structuredClone(tools.definitions),
       assertCurrent: tools.assertCurrent.bind(tools), call: tools.call.bind(tools), close: tools.close.bind(tools) }) : undefined;
-    this.rpc = new CodexRpcClient(transport, ({ method, params }) => this.receive(parseCodexEvent(method, params)), 1_048_576,
+    this.rpc = new CodexRpcClient(transport, ({ method, params }) => {
+      if (method === "account/rateLimits/updated") { parse(codexRateLimitsUpdatedSchema, params); return; } // host-only telemetry
+      if (method === "account/updated") {
+        if (this.accountResponseReceived || !this.tools) this.protocolFailure();
+        parse(codexAccountUpdatedSchema, params); return; // account/read still pins identity before ready; never project auth to UI
+      }
+      this.receive(parseCodexEvent(method, params));
+    }, 1_048_576,
       this.tools ? (request) => this.callTool(request.method, request.params) : undefined);
     this.rpc.onFailure((error) => {
       this.closed = true;
@@ -108,7 +116,8 @@ export class CodexSession {
       if (session.closed) throw new CodexRpcError("closed");
       if (session.tools) {
         parse(z.object({ requiresOpenaiAuth: z.literal(true), account: z.object({ type: z.literal("chatgpt"), email: z.literal(session.tools.accountEmail) }) }),
-          await session.rpc.request("account/read", { refreshToken: false }));
+          await session.rpc.request("account/read", { refreshToken: false }, 10_000, undefined, () => { session.accountResponseReceived = true; }));
+        if (session.closed) throw new CodexRpcError("protocol");
         session.tools.assertCurrent();
       }
       session.ready = true;
@@ -259,6 +268,11 @@ export class CodexSession {
       this.threadEventId = event.params.thread.id; return;
     }
     if (!this.threadId || event.params.threadId !== this.threadId) this.protocolFailure();
+    if (event.method === "warning") {
+      const features = this.policy.configuration.features;
+      if (!this.tools || !object(features) || features.code_mode_host !== false || features.code_mode !== false) this.protocolFailure();
+      return; // validated disabled capability; never forward raw vendor warnings
+    }
     if (event.method === "thread/status/changed") { this.emit(event); return; }
     const active = this.turn;
     if (!active) this.protocolFailure();
@@ -274,15 +288,22 @@ export class CodexSession {
       if (active!.started || event.params.turn.status !== "inProgress") this.protocolFailure();
       active!.started = true;
     } else if (event.method === "turn/completed") {
+      // Full integrity validation before terminal output is emitted or settled.
+      this.check();
       if (event.params.turn.status === "inProgress" || (active!.pendingTools && event.params.turn.status === "completed")) this.protocolFailure();
       if (this.tools && event.params.turn.status === "completed") {
         const returned = new Set<string>();
         for (const item of event.params.turn.items) {
           const observed = active!.items.get(item.id);
-          if (!observed?.completed || observed.type !== item.type || returned.has(item.id)) this.protocolFailure();
+          if (!observed?.completed || observed.type !== item.type || !isDeepStrictEqual(observed.item, item) || returned.has(item.id)) this.protocolFailure();
           returned.add(item.id);
         }
-        if (returned.size !== active!.items.size) this.protocolFailure();
+        if (!active!.started || [...active!.items.values()].some((item) => !item.completed)
+          || ((event.params.turn.itemsView ?? "full") === "full" && returned.size !== active!.items.size)) this.protocolFailure();
+        if (event.params.turn.itemsView === "summary" || event.params.turn.itemsView === "notLoaded") {
+          const complete: Turn = { ...event.params.turn, itemsView: "full", items: [...active!.items.values()].map((item) => item.item!) };
+          this.emit({ ...event, params: { ...event.params, turn: complete } }); this.settleTurn(complete); return;
+        }
       }
       this.emit(event); this.settleTurn(event.params.turn); return;
     } else if (event.method === "item/started") {
@@ -295,6 +316,7 @@ export class CodexSession {
       if (!item || item.completed || item.type !== event.params.item.type) this.protocolFailure();
       if (event.params.item.type === "dynamicToolCall" && (!active!.calls.has(event.params.item.id) || active!.pendingTools)) this.protocolFailure();
       item!.completed = true;
+      item!.item = structuredClone(event.params.item);
     } else if ("itemId" in event.params) {
       const item = active!.items.get(event.params.itemId);
       if (!item || item.completed) this.protocolFailure();

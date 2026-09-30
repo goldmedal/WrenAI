@@ -505,9 +505,13 @@ async function verifyInstalledCodexBackend(input) {
     import { existsSync } from 'node:fs';
     import { CodexAppServerBackend } from ${JSON.stringify(moduleUrl("codex-app-server"))};
     import { CodexConversation } from ${JSON.stringify(moduleUrl("codex-conversation"))};
-    import { CODEX_CERTIFIED_ROWS } from ${JSON.stringify(moduleUrl("codex-compatibility"))};
+    import { CODEX_CERTIFIED_ROWS, evaluateCodexIdentity } from ${JSON.stringify(moduleUrl("codex-compatibility"))};
     import { CodexSession } from ${JSON.stringify(moduleUrl("codex-session"))};
-    assert.equal(CODEX_CERTIFIED_ROWS.length, 0);
+    for (const row of CODEX_CERTIFIED_ROWS) {
+      assert.notEqual(evaluateCodexIdentity({ platform: row.platform, versionOutput: 'codex-cli ' + row.version,
+        executableSha256: '0'.repeat(64), source: row.source, protocolSha256: row.protocolSha256,
+        contracts: row.contracts }).readiness.state, 'ready');
+    }
     const backend = new CodexAppServerBackend({ executable: '/not-installed/codex', source: 'https://example.invalid/fixture', runtimeRoot: ${JSON.stringify(runtimeRoot)} });
     const readiness = (await backend.probe()).readiness;
     assert.notEqual(readiness.state, 'ready');

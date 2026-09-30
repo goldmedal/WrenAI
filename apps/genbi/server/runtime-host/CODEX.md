@@ -1,9 +1,9 @@
 # Codex backend contracts
 
-The server-side backend, RPC and process contracts are implemented independently of
-production backend activation. The packaged certification registry deliberately
-contains no execution grants. The application still uses its existing backend
-composition.
+The server-side backend, RPC and process contracts require exact executable
+certification independently of backend selection. The registry includes a locally
+approved Codex 0.156.1 macOS arm64 identity. Local runners remain the default;
+app-server selection is explicit. See the [certification record](../../certification/codex-0.156.1-darwin-arm64/README.md).
 
 ## RPC and cleanup
 
@@ -34,7 +34,7 @@ required before certification.
 `evaluateCodexIdentity` compares the exact baseline version, executable digest,
 source, protocol digest, required contracts, and evidence records. The optional
 row argument is a pure release-validation/test seam. A successful fixture
-comparison cannot mutate the empty packaged registry or activate a backend.
+comparison cannot mutate the packaged registry or certify an unknown executable.
 The backend hashes the selected native executable before running its bounded
 version query. The reviewed row binds that executable to its generated schema
 and behavior evidence. npm shell/Node wrappers are not executable identities:
@@ -250,10 +250,14 @@ a thread/model turn. The runner repeats it with both shared scratch roots as
 Packed-install acceptance loads these modules through `npx` with checkout access
 blocked and proves that fixture protocol success cannot make production ready.
 
-The certified registry remains empty. The 0.156.1 version is a candidate baseline,
-not an execution grant. An approved managed runtime alone does not certify the
-vendor backend. Authenticated named-profile turn acceptance is not claimed. Release approval, exact certification evidence
-and later application wiring must all precede activation.
+Only the exact reviewed 0.156.1 macOS arm64 source and executable are admitted.
+The local approval binds deterministic, protocol and installed candidate evidence.
+Authenticated acceptance covers gpt-5.5 with Jaffle answer_query through Structured
+Ask and Native Analysis, including reconnect and stop. Other models, dashboard,
+Setup, Claude and other platforms do not inherit that live acceptance. The row
+records its model/entry scope; application readiness checks all selected models,
+and preparation rejects entries outside that scope. An approved
+managed runtime alone never certifies a different vendor executable.
 
 Protocol reference: [Codex App Server](https://developers.openai.com/codex/app-server).
 The installed baseline's generated schema remains the version-specific reference.
@@ -276,7 +280,7 @@ on error. Process/tool cleanup must complete before disposal or delivery of a
 successful result. Direct Setup has no accepted producer contract and remains
 unsupported. Claude sandbox likewise requires its separate backend. Injected
 Setup contracts are tested synthetically; they cannot create legacy resume
-anchors. No production provisioner or certification row is installed here.
+anchors. The application provisioner and exact certification registry remain separate gates.
 
 Structured results retain the existing answer/artifact folding, with the direct
 Codex backend recorded separately. Runtime/binding changes revoke active runs;
@@ -303,10 +307,9 @@ The direct provisioner requires server-owned configuration:
 - `GENBI_CODEX_ACCOUNT_EMAIL`: expected ChatGPT account, checked by the protocol.
 - Saved Codex Runtime settings: explicit driver and cheap/strong tier models.
 
-These values do not grant certification. The registry remains empty and the
-real backend rejects launches until separately reviewed exact-version evidence
-is packaged, including account verification, dynamic tools, and component-step
-isolation contracts. Readiness is resolve-only; it neither provisions nor logs in.
+These values do not grant certification. The real backend rejects identities
+absent from the exact reviewed registry. Evidence includes account verification,
+dynamic tools, and component-step isolation contracts. Readiness is resolve-only; it neither provisions nor logs in.
 
 After a launch permit, each operation gets a fresh private workspace and HOME.
 The vendor receives only the pinned component tool, with host filesystem,
@@ -316,4 +319,23 @@ opens its own certified transport with the same account and captured tier model.
 Native verified root results use the existing answer/artifact validator. Cleanup
 must finish before workspace disposal; unconfirmed cleanup retains materialization.
 The installed-package test checks explicit selection and refusal without checkout
-access or model calls. Authenticated end-to-end acceptance remains a later gate.
+access or model calls. The exact local authenticated acceptance scope is recorded
+in the certification evidence; it is not a general model compatibility claim.
+
+
+### Passive component event checks
+
+Component notifications check the captured account, model, runtime generation,
+project binding and cancellation state without re-hashing the runtime closure
+for every streamed token. The production provisioner supplies this separate,
+server-owned `assertLive` callback; callers without one retain the full check.
+No browser input or environment variable can replace either callback.
+
+Full executable, runtime and policy verification still runs before opening a
+process, starting a thread or turn, invoking a governed host tool, returning its
+result, and accepting the final component response. Direct sessions also run
+full backend and tool checks before emitting or settling a terminal turn;
+Structured Ask checks its scoped tools again before extracting final text. Context/credential checks
+remain in the host preparation, normalization and persistence paths. A changed
+binary cannot authorize the next protected operation. Stream revocation stays
+immediate; this is not a time-based or filesystem-metadata digest cache.

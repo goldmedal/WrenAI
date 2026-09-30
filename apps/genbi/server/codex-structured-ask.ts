@@ -55,7 +55,7 @@ export function createCodexStructuredAdapter(provisioner: CodexStructuredProvisi
         emitter.emit({ kind: "run.start", mode: "B", agentId: options.agentId ?? "answer_query" });
         await driver.startThread(); scope.assertCurrent();
         const result = await driver.runTurn(options.question, { ...(scope.signal ? { signal: scope.signal } : {}), ...(options.chatTimeoutMs !== undefined ? { timeoutMs: options.chatTimeoutMs } : {}) });
-        scope.assertCurrent();
+        scope.assertCurrent(); prepared.input.tools.assertCurrent();
         if (result.status !== "completed") throw new StructuredRuntimeError("failed");
         const finalText = result.items.filter((item) => item.type === "agentMessage").map((item) => item.text).join("\n");
         if (!finalText.trim() || Buffer.byteLength(finalText) > 1_048_576) throw new StructuredRuntimeError("failed");

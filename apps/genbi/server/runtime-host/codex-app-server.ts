@@ -164,9 +164,12 @@ export class CodexAppServerBackend {
   }): { transport: RpcTransport; policy: CodexComponentPolicy } {
     const state = this.permits.get(permit);
     if (!state || state.consumed || state.released || this.stopped) throw new CodexBackendError("runtime_policy_unavailable");
-    const check = () => {
+    const checkLive = () => {
       input.signal.throwIfAborted(); input.assertScopeActive();
       if (this.stopped) throw new CodexBackendError("runtime_policy_unavailable");
+    };
+    const check = () => {
+      checkLive();
       const runtime = this.assertRecord(state);
       if (input.spec.executables.vendor?.digest !== state.vendor.digest || input.spec.executables.vendor?.executable !== state.vendor.executable) throw new CodexBackendError("codex_identity_uncertified");
       return buildCodexSessionPolicy(input.spec, runtime, input.wrenHome, true, input.model);
@@ -184,6 +187,7 @@ export class CodexAppServerBackend {
     if (input.signal.aborted) abort();
     return { transport, policy: { cwd: launch.cwd, codexHome: launch.codexHome, permissionProfile: launch.profile,
       model: input.model, accountEmail: input.accountEmail, configuration: launch.configuration,
+      assertLive: checkLive,
       assertCurrent() { if (JSON.stringify(check()) !== JSON.stringify(launch)) throw new CodexBackendError("runtime_policy_unavailable"); } } };
   }
   shutdown(): Promise<void> {

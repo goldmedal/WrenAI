@@ -68,6 +68,18 @@ describe("explicit structured runtime boundary", () => {
     expect(result).toMatchObject({ backend: "codex-app-server", finalText: "99 orders" }); expect(result.warnings.length).toBeGreaterThan(0);
     expect(f.dispose).toHaveBeenCalledOnce(); expect(f.tools.close).toHaveBeenCalledOnce(); expect(f.localRoute).not.toHaveBeenCalled();
   });
+  it("rejects a returned no-tool answer when final integrity validation fails", async () => {
+    const f = provisioner(); const onEvent = vi.fn();
+    const original = f.driver.runTurn.getMockImplementation()!;
+    f.driver.runTurn.mockImplementation(async () => {
+      const result = await original();
+      f.tools.assertCurrent.mockImplementation(() => { throw Error("integrity changed"); });
+      return result;
+    });
+    await expect(f.runtime.route({ ...request, onEvent }, scope())).rejects.toMatchObject({ code: "failed" });
+    expect(onEvent.mock.calls.some(([event]) => event.kind === "run.finish")).toBe(false);
+    expect(f.driver.close).toHaveBeenCalledOnce(); expect(f.tools.close).toHaveBeenCalledOnce();
+  });
   it("retains materialization and reports cleanup failure, including at shutdown", async () => {
     const f = provisioner(); f.driver.close.mockRejectedValue(Error("private path"));
     await expect(f.runtime.route(request, scope())).rejects.toMatchObject({ code: "cleanup" });
