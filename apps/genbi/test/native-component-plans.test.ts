@@ -49,6 +49,8 @@ describe("native fixed-root admission", () => {
     let current: typeof receipt.identity | undefined = receipt.identity;
     let children = 0;
     let persisted = 0;
+    const stepNames = new Map(Object.values(plans.roots).flatMap((root) => Object.values(root.components).flatMap((node) => node.steps.map((step) => [step.prompt, step.name] as const))));
+    const childGrants: Record<string, boolean> = {};
     const host: RunnerHost = {
       async prepare(node) { return { isCurrent: () => current !== undefined, async close() {},
         tools: [...new Map(node.steps.flatMap((step) => step.tools).map((tool) => [tool.name, tool])).values()].map((tool) => ({ ...tool, async execute() { return { rows: [{ n: 1 }] }; } })),
@@ -58,7 +60,7 @@ describe("native fixed-root admission", () => {
         if (step.tools.answer) {
           expect(Object.keys(step.tools)).toEqual(["answer"]);
           await step.tools.answer({ request: "first" }); await step.tools.answer({ request: "second" });
-        } else if (step.request !== "overview") { children++; expect(step.tools.query_read_only).toBeDefined(); }
+        } else if (step.request !== "overview") { children++; childGrants[stepNames.get(step.prompt)!] = step.tools.query_read_only !== undefined; }
         return { value: "synthetic" };
       }, async persistRoot() { persisted++; },
     };
@@ -68,6 +70,10 @@ describe("native fixed-root admission", () => {
     await expect(admission.call(tool, { request: "overview", step: "child" }, "forged")).rejects.toThrow();
     expect(await admission.call(tool, { request: "overview" }, 1)).toMatchObject({ status: "ok" });
     expect(children).toBeGreaterThan(1); expect(persisted).toBe(1);
+    expect(childGrants).toMatchObject({ resolve_intent: false, generate_sql: true });
+    const answer = Object.values(plans.roots).map((root) => root.components["answer_query"]).find((node) => node !== undefined)!;
+    expect(answer.steps.map((step) => [step.name, step.tools.map((tool) => tool.name).includes("query_read_only")])).toEqual([
+      ["resolve_intent", false], ["generate_sql", true], ["repair_sql", true]]);
     await expect(admission.call(tool, { request: "again" }, 1)).rejects.toThrow("replayed");
     current = undefined;
     expect(() => admission.list()).toThrow("expired");

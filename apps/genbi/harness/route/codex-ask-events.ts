@@ -3,7 +3,7 @@ import type { CodexAskComponent, CodexManifestModels } from "./codex-local-manif
 
 const COMPONENT_STEPS = {
   answer_query: [
-    { name: "resolve_intent", tier: "cheap", tool: "get_context" },
+    { name: "resolve_intent", tier: "cheap", tool: null },
     { name: "generate_sql", tier: "strong", tool: "run_sql" },
     { name: "repair_sql", tier: "strong", tool: "run_sql" },
   ],
@@ -197,6 +197,7 @@ export class CodexAskEventMapper {
           reference.agentRole !== expectedRole(step.name) ||
           reference.server !== "wren" ||
           !reference.itemId ||
+          step.tool === null ||
           reference.tool !== step.tool
         ) {
           throw new Error("warble-codex-local Ask artifact attribution did not match the allowed Wren MCP surface");
