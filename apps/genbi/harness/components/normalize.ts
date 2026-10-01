@@ -155,8 +155,9 @@ function sanitizedReason(value: unknown, fallback: string): string {
  * accepted only when its `definition` cites a query this run executed with a
  * table-shaped result: by `query_id` (the id the host attached to that tool
  * result), else by `sql`. Its columns, rows and SQL are then the observed ones.
- * The model contributes `summary`, and on the SQL path the lineage strings of
- * `definition`; every value comes from the tool. Entries the model marked
+ * The model contributes `summary` and, when the tool proved no definition, its
+ * claimed `source_tables` (plus `filters` on the SQL path); every value comes
+ * from the tool. Entries the model marked
  * `unanswerable` (or `refused`) pass through with a bounded reason.
  */
 function normalizeBatchTerminal(entries: readonly unknown[], observations: readonly ComponentEvidence["tools"][number][]): ComponentInvocationResult {
@@ -188,14 +189,15 @@ function normalizeBatchTerminal(entries: readonly unknown[], observations: reado
       value.push({ slot_id: item.slot_id, status: "unanswerable", reason: "no executed query backs this answer" });
       continue;
     }
-    // Provenance is the observed query's. The model's lineage strings are kept only on the SQL
-    // path when the tool proved none; an entry citing an id contributes no lineage at all.
+    // Provenance is the observed query's: its SQL always, and its tool-proven definition when
+    // present. Otherwise the model's claimed source tables are kept, so a composing parent can
+    // still build a definition block. Claimed filters are kept on the SQL path only: an entry
+    // citing an id carries none, and any it sends are ignored.
     const proven = definitionSchema.safeParse((observed.output as { definition?: unknown }).definition);
-    const lineage = queryId === undefined ? claimed : undefined;
     const definition = proven.success && proven.data.sql === sql ? proven.data : {
       sql,
-      source_tables: stringList.safeParse(lineage?.source_tables).success ? lineage!.source_tables as string[] : [],
-      filters: stringList.safeParse(lineage?.filters).success ? lineage!.filters as string[] : [],
+      source_tables: stringList.safeParse(claimed?.source_tables).success ? claimed!.source_tables as string[] : [],
+      ...(queryId === undefined ? { filters: stringList.safeParse(claimed?.filters).success ? claimed!.filters as string[] : [] } : {}),
     };
     answered += 1;
     value.push({ slot_id: item.slot_id, columns: actual.data.columns, rows: actual.data.rows, verified: true,

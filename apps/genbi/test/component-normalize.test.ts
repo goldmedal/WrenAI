@@ -168,10 +168,16 @@ describe("a terminal cites an executed query by the id the host attached to its 
       { slot_id: "all", columns: ["n"], rows: [{ n: 99 }], verified: true, summary: "99 orders", definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } },
     ] }, provenance: { verified: true } });
   });
-  it("ignores the model's lineage on an id-cited entry and takes the SQL from the observation", () => {
+  const definitionOf = (result: ReturnType<typeof runBatch>) => result.status === "ok" && result.output.kind === "value" ? (result.output.value as { definition?: unknown }[])[0]?.definition : undefined;
+  it("an id-cited entry over a tool output with no lineage keeps the claimed source tables, takes the SQL from the observation and carries no filters", () => {
     const bare = [{ step: "generate_sql", tool: "query", input: { sql: STRAY }, output: { columns: ["n"], rows: [{ n: 67 }], query_id: "q1" } }];
-    const result = runBatch([{ slot_id: "s", definition: { query_id: "q1", sql: "SELECT invented", source_tables: ["private"], filters: ["status = 'x'"] } }], bare as typeof ran);
-    expect(result).toMatchObject({ status: "ok", output: { value: [{ slot_id: "s", rows: [{ n: 67 }], definition: { sql: STRAY, source_tables: [], filters: [] } }] } });
+    const result = runBatch([{ slot_id: "s", definition: { query_id: "q1", sql: "SELECT invented", source_tables: ["orders"], filters: ["status = 'x'"] } }], bare as typeof ran);
+    expect(result).toMatchObject({ status: "ok", output: { value: [{ slot_id: "s", rows: [{ n: 67 }] }] } });
+    expect(definitionOf(result)).toEqual({ sql: STRAY, source_tables: ["orders"] });
+  });
+  it("an id-cited entry over a tool-proven definition takes the proven lineage, not the claimed one", () => {
+    const result = runBatch([{ slot_id: "s", definition: { query_id: "q2", source_tables: ["private"], filters: ["invented"] } }]);
+    expect(definitionOf(result)).toEqual({ sql: STRAY, source_tables: ["orders"], filters: [] });
   });
   it("an id no executed query carries is unanswerable, even when its SQL matches one that ran; unknown SQL stays unanswerable", () => {
     const result = runBatch([

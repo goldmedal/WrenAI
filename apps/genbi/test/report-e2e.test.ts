@@ -176,7 +176,7 @@ function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: 
       }
       // A terminal that re-types a quoted predicate without escaping it: the JSON breaks inside `filters`.
       if (options.brokenTerminal) {
-        intended = entries.map((entry) => { const { cites, definition: _definition, ...rest } = entry as Record<string, unknown>; return cites === undefined ? rest : { ...rest, definition: { query_id: cites } }; });
+        intended = entries.map((entry) => { const { cites, definition: _definition, ...rest } = entry as Record<string, unknown>; return cites === undefined ? rest : { ...rest, definition: { query_id: cites, source_tables: (_definition as { source_tables: string[] }).source_tables } }; });
         return record("generate_sql", JSON.stringify(entries).replace('"completed orders only"', '"status = "completed""'));
       }
       return record("generate_sql", JSON.stringify(entries.map((entry) => { const { cites: _cites, ...rest } = entry as Record<string, unknown>; return rest; })));
@@ -361,8 +361,9 @@ describe("M1: the annual revenue report end to end, offline", () => {
         ["kpi_card", "total_revenue"], ["kpi_card", "order_count"], ["kpi_card", "avg_order_value"], ["chart", "revenue_by_quarter"], ["chart", "revenue_by_month"],
         ["table", "top_customers"], ["narrative", "growth_story"], ["unavailable", "largest_orders"], ["unavailable", "refund_rate"]]);
       expect(data[0]).toMatchObject({ value: 1284500 });
-      // Provenance comes from the executed query the id names; an id-cited entry carries no model lineage.
-      expect(envelope.blocks.find((block) => block.type === "definition" && block.slot_id === "top_customers")).toEqual({ type: "definition", sql: SQL.top_customers, source_tables: [], filters: [], slot_id: "top_customers" });
+      // The SQL comes from the executed query the id names. This fake tool proves no lineage, so the claimed
+      // source tables are kept for the definition block, and an id-cited entry contributes no filters.
+      expect(envelope.blocks.find((block) => block.type === "definition" && block.slot_id === "top_customers")).toEqual({ type: "definition", sql: SQL.top_customers, source_tables: ["orders", "customers"], filters: [], slot_id: "top_customers" });
       expect(envelope.verified).toBe(true);
       expect(normalizeComponentResult(JSON.stringify(envelope), contract).value.status).toBe("ok");
     } finally { await rm(project, { recursive: true, force: true }); }
