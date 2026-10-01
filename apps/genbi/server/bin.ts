@@ -134,6 +134,8 @@ import type { CliFlags } from "../harness/cli-args.js";
 import { createApp } from "./app.js";
 import { recoverBootstrapProjectBinding } from "./bootstrap-project-binding.js";
 import { createHarnessProfileSources } from "./harness-profile-sources.js";
+import { ProfileRegistry } from "./profile-registry.js";
+import { getWarbleIdentity } from "../harness/compile/warble-identity.js";
 import { compileProfile, compileRawProfile } from "../harness/compile/index.js";
 import { resolveWarbleBinary } from "../harness/compile/resolve-binary.js";
 import { toAuthChoiceFromRuntimeSettings } from "./auth-choice.js";
@@ -274,6 +276,19 @@ async function main(): Promise<void> {
   // Initialization creates the fixed private namespaces once at startup.
   const nativeMaterializationState = initializeNativeSessionStateBase(dbPath);
   const store = new Store(dbPath);
+  // Conversation profiles a session may start inside: the shipped ones under this package's
+  // `profiles/` plus any the operator adds under the workspace. Registration compiles each one, so
+  // it runs in the background; the first `/api/profiles` request awaits the same promise.
+  const profileRegistry = new ProfileRegistry({
+    store,
+    builtinProfilesDir: path.dirname(harnessProfileSources.analysis),
+    userProfilesDir: path.join(workspaceRoot, "profiles"),
+    compileRaw: (source) => compileRawProfile({ profileSource: source, mode: "native", ...warbleBinOption }),
+    warbleIdentity: async () => (resolvedWarbleBin !== undefined ? getWarbleIdentity(resolvedWarbleBin) : "warble:unresolved"),
+  });
+  void profileRegistry.ensureReady().catch((error: unknown) => {
+    process.stderr.write(`warning: profile registry failed to initialize: ${error instanceof Error ? error.message : String(error)}\n`);
+  });
   const getCodexModels = () => codexModelsForRuntime(store.getRuntimeSettings());
   const getRuntimeTierNames = () =>
     compileUnboundProfileTierNames({
@@ -651,6 +666,7 @@ async function main(): Promise<void> {
     structuredRuntime,
     nativeSessions,
     nativeArtifacts,
+    profileRegistry,
     route,
     baseRouteOptions,
     describeBundle: (options) => {

@@ -893,3 +893,46 @@ export type SseFrame =
   | { readonly event: "event"; readonly data: SessionEvent }
   | { readonly event: "error"; readonly data: { readonly message: string } }
   | { readonly event: "done"; readonly data: Record<string, never> };
+
+// ---------------------------------------------------------------------------
+// Warble profile registry (`/api/profiles`). A browser selects a conversation
+// profile by `id`; it never names a directory or a launch tuple. `selectable`
+// is the one bit a picker needs: conversation role AND admitted.
+// ---------------------------------------------------------------------------
+
+export interface WarbleProfileDto {
+  readonly id: string;
+  readonly kind: "builtin" | "user";
+  readonly role: "conversation" | "system";
+  readonly selectable: boolean;
+  readonly admission: {
+    readonly status: "admitted" | "unavailable";
+    /** Every failed admission rule, joined; absent when admitted. System profiles state their role here. */
+    readonly reason?: string;
+    readonly checkedAt: string;
+  };
+  /** How a session enters the profile — decided at admission, not by the caller. */
+  readonly entry?: { readonly kind: "scope" | "agent"; readonly verb?: string };
+  readonly irVersion?: string;
+  readonly components: readonly {
+    readonly id: string;
+    readonly type: string;
+    readonly nativeEligible: boolean;
+    readonly hasDescription: boolean;
+    readonly tiers: readonly string[];
+    readonly capabilities: readonly string[];
+  }[];
+  /** Where the registry keeps its copy; user profiles only. */
+  readonly sourceDir?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface WarbleProfileListDto {
+  readonly profiles: readonly WarbleProfileDto[];
+}
+
+/** `POST /api/profiles`: an absolute directory path on the BFF's machine holding a `profile.yml`. */
+export interface AddWarbleProfileRequest {
+  readonly sourcePath: string;
+}

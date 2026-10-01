@@ -117,6 +117,71 @@ says so plainly if it finds none. Setting them pins the choice for boot, worth
 doing only when more than one is installed. Either way it is just the pre-Setup
 default: once Setup saves an explicit runtime, that takes over.
 
+## Conversation profiles (`/api/profiles`)
+
+The BFF keeps a server-owned registry of the Warble profiles a conversation can
+start inside. The shipped profiles under this package's `profiles/` are
+registered at boot; an operator can add their own. Two axes stay separate:
+
+- **System purposes** — `setup` (`genbi-setup`) and `context_enrichment`
+  (`genbi-enrich-context`) keep their fixed profiles. The BFF orchestrates them
+  itself, so they are listed with `role: "system"` and are never selectable.
+- **Conversation profiles** — `role: "conversation"`. An analysis session starts
+  inside one of these. `genbi-default` is the default and the reference: its
+  compiled IR defines the host ceiling every other conversation profile is
+  admitted against.
+
+A browser only ever names a registry **id**; the directory, the compiled IR and
+the entry form are the server's. `GET /api/profiles` lists every profile with
+its `admission` verdict and `selectable` bit:
+
+```bash
+curl -s http://127.0.0.1:4787/api/profiles | jq '.profiles[] | {id, role, selectable, admission, entry}'
+```
+
+### Admission
+
+A conversation profile is offered only when all of these hold; a failed rule is
+recorded as the profile's `admission.reason` and the profile stays listed as
+`unavailable` rather than disappearing:
+
+1. it compiles with the pinned `warble`, and its `profile:` id is unique and
+   not a shipped id;
+2. every mounted component is `type: analytical`, `trigger: one_shot`,
+   `outcome: none` — the same scope the in-process runner enforces;
+3. every `required_capabilities` entry is one `genbi-default` already requires
+   (the ceiling is derived from that profile's compiled IR, not hand-listed);
+4. every step tier is `cheap` or `strong`, the tiers the saved Runtime
+   configuration binds;
+5. the entry form follows from eligibility: two or more native-eligible
+   components, each with an authored `description`, enter at the profile
+   scope; exactly one is pinned to that component; none refuses.
+
+The verdict is recomputed when the profile's bytes or the `warble` binary
+change. Of the shipped profiles, `genbi-report` is admitted (pinned to
+`plan_report`; `answer_batch` is callee-only) and `genbi-monitor` is refused
+(assertive, scheduled). Whether an admitted profile can actually be launched as a
+native session is the session layer's check, not the registry's.
+
+### Adding a profile
+
+`POST /api/profiles` takes an absolute directory path on the BFF's machine that
+holds a `profile.yml` — the same shape the Setup wizard's adopt flow accepts for
+a project. The server validates the path (absolute, a real directory, no
+symbolic links inside, outside the registry's own directories), copies it to
+`<WREN_HARNESS_WORKSPACE_ROOT>/profiles/<id>/`, and admits the copy. The original
+is never read again; edit the copy and restart the BFF to re-admit.
+
+```bash
+curl -s -X POST http://127.0.0.1:4787/api/profiles \
+  -H 'content-type: application/json' \
+  -d '{"sourcePath": "/absolute/path/to/my-profile"}'
+```
+
+`DELETE /api/profiles/<id>` removes a user profile and its copy. A shipped
+profile cannot be removed, and neither can a profile any native session has run
+inside — that history stays truthful.
+
 ## Zone-aware tier binding (hybrid privacy split)
 
 In-process runs can bind each model tier to a deployment **zone**, `private` or

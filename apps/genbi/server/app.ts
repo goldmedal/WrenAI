@@ -8,6 +8,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { upgradeWebSocket } from "@hono/node-server";
 import { conversationSocket } from "./conversation-socket.js";
@@ -31,6 +32,7 @@ import { nativeSessionLaunchErrorCode, nativeSessionLaunchFailure, nativeSession
 import type { NativePurpose, NativeSessionResumeAvailability } from "./native-sessions.js";
 import { NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME, NATIVE_MCP_TOOL_NAME, NATIVE_PERSIST_ANSWER_CONTRACT, NATIVE_SAVE_DASHBOARD_CONTRACT, NativeArtifactError } from "./native-artifacts.js";
 import { sameNativeRuntimeBinding } from "./native-dispatch-registry.js";
+import { ProfileRegistryError, toWarbleProfileDto } from "./profile-registry.js";
 import { detectAdapterEnv } from "./env-detect.js";
 import { redactPublicSetupText, redactSetupText, sanitizePublicSetupWorklog } from "./fold.js";
 import { assertHarnessBundlePurpose, buildHarnessDto } from "./harness.js";
@@ -78,6 +80,7 @@ import type {
   SubscriptionProvider,
   SubscriptionLoginStatus,
   ToolStep,
+  WarbleProfileListDto,
 } from "./wire-types.js";
 
 /** Only explicit persisted settings can supersede the boot route or require repair. */
@@ -1501,6 +1504,56 @@ export function createApp(deps: TurnDeps) {
       const mapped = contextShowErrorResponse(err);
       if (mapped) return c.json({ error: mapped.message }, mapped.status);
       throw err;
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Warble profile registry
+  // ---------------------------------------------------------------------
+  //
+  // Conversation profiles are selected from a server-held registry by id. The
+  // registry owns the directory, runs admission and resolves the launch tuple;
+  // a browser never submits a path for a session to run inside. Adding a
+  // profile takes a directory path on this machine, the same shape the adopt
+  // flow accepts for a project, and the registry copies and checks it.
+
+  const profileRegistryFailure = (c: Context, error: unknown) => {
+    if (error instanceof ProfileRegistryError) return c.json({ error: error.message }, error.status);
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+  };
+
+  app.get("/api/profiles", async (c) => {
+    if (!deps.profileRegistry) return c.json({ error: "the profile registry is not configured on this BFF instance" }, 503);
+    try {
+      const rows = await deps.profileRegistry.list();
+      const response: WarbleProfileListDto = { profiles: rows.map(toWarbleProfileDto) };
+      return c.json(response);
+    } catch (error) {
+      return profileRegistryFailure(c, error);
+    }
+  });
+
+  app.post("/api/profiles", async (c) => {
+    if (!deps.profileRegistry) return c.json({ error: "the profile registry is not configured on this BFF instance" }, 503);
+    const body = await c.req.json().catch(() => undefined) as unknown;
+    if (typeof body !== "object" || body === null || Array.isArray(body) || !Object.keys(body).every((key) => key === "sourcePath")) {
+      return c.json({ error: "profile registration request is invalid: expected { sourcePath }" }, 400);
+    }
+    try {
+      const row = await deps.profileRegistry.add((body as { sourcePath?: unknown }).sourcePath);
+      return c.json({ profile: toWarbleProfileDto(row) }, 201);
+    } catch (error) {
+      return profileRegistryFailure(c, error);
+    }
+  });
+
+  app.delete("/api/profiles/:id", async (c) => {
+    if (!deps.profileRegistry) return c.json({ error: "the profile registry is not configured on this BFF instance" }, 503);
+    try {
+      await deps.profileRegistry.remove(c.req.param("id"));
+      return c.body(null, 204);
+    } catch (error) {
+      return profileRegistryFailure(c, error);
     }
   });
 
