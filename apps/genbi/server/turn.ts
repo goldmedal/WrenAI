@@ -132,7 +132,7 @@ export interface TurnDeps {
    * dependency resolves the corresponding server-owned profile source. It is
    * intentionally distinct from native-session IR/launch wiring.
    */
-  readonly describeHarnessBundle?: (purpose: NativePurpose, options: Omit<RouteOptions, "question" | "onEvent">) => Promise<Bundle>;
+  readonly describeHarnessBundle?: (purpose: NativePurpose, options: Omit<RouteOptions, "question" | "onEvent">, profileSource?: string) => Promise<Bundle>;
   /**
    * Compiles the canonical post-bind profile without rebinding its context and
    * returns its declared tier names. Unlike `describeBundle`, this seam is

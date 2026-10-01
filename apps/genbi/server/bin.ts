@@ -693,8 +693,8 @@ async function main(): Promise<void> {
           : {}),
       });
     },
-    describeHarnessBundle: (purpose, options) => {
-      const profileSource = harnessProfileSources[purpose];
+    describeHarnessBundle: (purpose, options, selectedProfileSource) => {
+      const profileSource = selectedProfileSource ?? harnessProfileSources[purpose];
       const common = {
         ...options,
         profileSource,

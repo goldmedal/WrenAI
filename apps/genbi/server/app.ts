@@ -1578,14 +1578,37 @@ export function createApp(deps: TurnDeps) {
       return c.json({ error: "harness purpose must be exactly one of: setup, analysis, context_enrichment" }, 400);
     }
     const purpose = purposes[0] as NativePurpose;
+    // An optional registry id selects which conversation profile the analysis purpose describes.
+    // The server resolves it; the browser never names a directory.
+    const profiles = c.req.queries("profile") ?? [];
+    if (profiles.length > 1) return c.json({ error: "harness profile must be given at most once" }, 400);
+    const requestedProfile = profiles[0];
+    if (requestedProfile !== undefined) {
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(requestedProfile)) return c.json({ error: "harness profile is invalid" }, 400);
+      if (purpose !== "analysis") return c.json({ error: "harness profile is only selectable for analysis" }, 400);
+    }
+    const selectedProfile = requestedProfile !== undefined && requestedProfile !== DEFAULT_CONVERSATION_PROFILE ? requestedProfile : undefined;
     // Setup describes the raw bootstrap profile, before a project exists. The
     // other two profiles consume a bound project's context and stay gated.
     if (purpose !== "setup" && !isProjectBound(deps)) return c.json({ error: PROJECT_NOT_BOUND_MESSAGE }, 409);
     if (!deps.describeHarnessBundle) return c.json({ error: "harness introspection is not configured" }, 500);
+    let selectedSource: string | undefined;
+    if (selectedProfile !== undefined) {
+      if (!deps.profileRegistry) return c.json({ error: "the profile registry is not configured on this BFF instance" }, 503);
+      try {
+        selectedSource = (await deps.profileRegistry.resolveConversationProfileSource(selectedProfile)).sourceDir;
+      } catch (error) {
+        return profileRegistryFailure(c, error);
+      }
+    }
     try {
       const routeOptions = effectiveRouteOptions(deps, { allowUnbound: purpose === "setup" });
-      const bundle = await deps.describeHarnessBundle(purpose, routeOptions);
-      assertHarnessBundlePurpose(bundle, purpose);
+      // Keep the two-argument call for the fixed profiles so existing describers and their tests see
+      // exactly the shape they always did; only a selection adds the third argument.
+      const bundle = selectedSource !== undefined
+        ? await deps.describeHarnessBundle(purpose, routeOptions, selectedSource)
+        : await deps.describeHarnessBundle(purpose, routeOptions);
+      assertHarnessBundlePurpose(bundle, purpose, selectedProfile);
       const setupRuntimeCorrection = purpose === "setup" ? persistedRuntimeCorrection(deps) : undefined;
       const setupReadiness = purpose === "setup"
         ? setupRuntimeCorrection !== undefined
@@ -1602,7 +1625,7 @@ export function createApp(deps: TurnDeps) {
       const nativeReadiness = purpose === "setup"
         ? await deps.nativeSessions?.readiness().catch(() => undefined)
         : await deps.nativeSessions?.readiness();
-      return c.json(buildHarnessDto(bundle, deps.store, routeOptions, purpose, nativeReadiness, setupReadiness));
+      return c.json(buildHarnessDto(bundle, deps.store, routeOptions, purpose, nativeReadiness, setupReadiness, selectedProfile));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ error: message }, 500);

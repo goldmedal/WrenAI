@@ -35,7 +35,7 @@ import { describeConnection, resolveConnectionSource } from "./conn-config.js";
 import { bundleFormatVersion, deriveAdapterSpec, findLockedGatedCheck } from "../harness/index.js";
 import type { AdapterSpec, Agent, Bundle, Capability, Guardrail, RouteOptions, Step } from "../harness/index.js";
 import type { Store } from "./db.js";
-import { assertHarnessPurposeProfile, NATIVE_DISPATCH_REGISTRY } from "./native-dispatch-registry.js";
+import { assertHarnessPurposeProfile, HARNESS_PROFILE_IDENTITY_ERROR, NATIVE_DISPATCH_REGISTRY } from "./native-dispatch-registry.js";
 import type { NativePurpose } from "./native-dispatch-registry.js";
 import type { NativeSessionReadiness } from "./native-sessions.js";
 import { collectBundleTierNames as collectCompiledBundleTierNames, effectiveTierModel } from "./runtime-binding.js";
@@ -407,7 +407,13 @@ export function collectBundleTierNames(bundle: Bundle): string[] {
  * Keep the compiled bundle's declared profile tied to the BFF-selected
  * purpose before exposing it through the read-only Harness DTO.
  */
-export function assertHarnessBundlePurpose(bundle: Bundle, purpose: NativePurpose): void {
+export function assertHarnessBundlePurpose(bundle: Bundle, purpose: NativePurpose, selectedProfile?: string): void {
+  // A selected conversation profile is described by its registry id; the compiled bundle must
+  // carry exactly that id. Without a selection the purpose's fixed profile applies as before.
+  if (selectedProfile !== undefined && purpose === "analysis") {
+    if (bundle.profile !== selectedProfile) throw new Error(HARNESS_PROFILE_IDENTITY_ERROR);
+    return;
+  }
   assertHarnessPurposeProfile(purpose, bundle.profile);
 }
 
@@ -454,8 +460,25 @@ function setupRunnerTarget(authChoice: RouteOptions["authChoice"]): Pick<Extract
   }
 }
 
-function buildHarnessPurpose(purpose: NativePurpose, baseRouteOptions: BaseRouteOptions, nativeReadiness?: NativeSessionReadiness, setupReadiness?: HarnessSetupReadiness): HarnessPurpose {
+function buildHarnessPurpose(purpose: NativePurpose, baseRouteOptions: BaseRouteOptions, nativeReadiness?: NativeSessionReadiness, setupReadiness?: HarnessSetupReadiness, selectedProfile?: string): HarnessPurpose {
   const definition = NATIVE_DISPATCH_REGISTRY[purpose];
+  // A selected conversation profile is reported with its own id and per-profile readiness.
+  if (selectedProfile !== undefined && purpose === "analysis" && selectedProfile !== definition.profile) {
+    // Only the per-profile entry speaks for a selected profile. Falling back to the purpose-level
+    // row would report the default's availability under another profile's name and could hide a
+    // vendor refusal that applies to that profile alone.
+    const readiness = nativeReadiness?.profiles?.[selectedProfile];
+    const available = readiness?.available ?? false;
+    return {
+      purpose,
+      profile: selectedProfile,
+      scopeKind: definition.scopeKind,
+      executionKind: "native_session",
+      ...(readiness?.target ? { target: readiness.target, targetLabel: readiness.targetLabel as "Claude CLI" | "Codex CLI" } : {}),
+      available,
+      ...(!available ? { reason: readiness?.reason ?? NATIVE_PURPOSE_UNAVAILABLE_REASON } : {}),
+    };
+  }
   if (purpose === "setup") {
     const available = setupReadiness?.available ?? false;
     return {
@@ -477,9 +500,9 @@ function buildHarnessPurpose(purpose: NativePurpose, baseRouteOptions: BaseRoute
   };
 }
 
-export function buildHarnessDto(bundle: Bundle, store: Store, baseRouteOptions: BaseRouteOptions, purpose: NativePurpose = "analysis", nativeReadiness?: NativeSessionReadiness, setupReadiness?: HarnessSetupReadiness): HarnessDto {
+export function buildHarnessDto(bundle: Bundle, store: Store, baseRouteOptions: BaseRouteOptions, purpose: NativePurpose = "analysis", nativeReadiness?: NativeSessionReadiness, setupReadiness?: HarnessSetupReadiness, selectedProfile?: string): HarnessDto {
   const resolver = buildRealTierResolver(baseRouteOptions, store);
-  const purposeInfo = buildHarnessPurpose(purpose, baseRouteOptions, nativeReadiness, setupReadiness);
+  const purposeInfo = buildHarnessPurpose(purpose, baseRouteOptions, nativeReadiness, setupReadiness, selectedProfile);
   return {
     purpose: purposeInfo,
     profile: buildProfile(bundle, baseRouteOptions, store, purpose),

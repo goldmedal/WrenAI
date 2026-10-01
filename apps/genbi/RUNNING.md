@@ -193,6 +193,16 @@ and the others report that reason in readiness. The session row records the
 profile in `dispatchProfile`, and `GET /api/native-sessions/readiness` adds a
 `profiles` map with per-profile `available` / `reason` / `entryKind`.
 
+In the UI, the **New session** menu on the Sessions page shows a *Conversation
+profile* picker whenever the BFF reports per-profile readiness; a profile the
+registry refused is listed disabled with its reason, and the Codex entry choice
+only appears beside the default profile. The **Harness** page's sidebar lists
+the two system purposes and every conversation profile from the registry, with
+an *Add profile* form that takes the same directory path `POST /api/profiles`
+does; `GET /api/harness?purpose=analysis&profile=<id>` describes a selected
+profile's compiled bundle. Without a BFF the page shows a fixture registry and
+says so.
+
 ### Adding a profile
 
 `POST /api/profiles` takes an absolute directory path on the BFF's machine that

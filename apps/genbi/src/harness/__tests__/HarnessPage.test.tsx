@@ -12,14 +12,30 @@ beforeEach(() => {
 });
 
 describe('Harness page (fixture mode)', () => {
-  it('lists exactly the three selectable product purposes in the sidebar', () => {
+  it('lists the two system purposes and every fixture conversation profile, refused ones disabled with their reason', () => {
     renderWithProviders(<AppRoutes />, { route: '/harness' });
 
     const sidebar = screen.getByRole('navigation', { name: 'Profiles' });
     expect(within(sidebar).getByRole('button', { name: /Setup/ })).toBeEnabled();
     expect(within(sidebar).getByRole('button', { name: /Analyze data/ })).toBeEnabled();
     expect(within(sidebar).getByRole('button', { name: /Context enrichment/ })).toBeEnabled();
-    expect(within(sidebar).getAllByRole('button')).toHaveLength(3);
+    expect(within(sidebar).getByRole('button', { name: /team-kpis/ })).toBeEnabled();
+    expect(within(sidebar).getByRole('button', { name: /genbi-report/ })).toBeDisabled();
+    expect(within(sidebar).getByText(/composition is not dispatchable/)).toBeInTheDocument();
+    expect(within(sidebar).getAllByRole('button')).toHaveLength(5);
+    // Fixture mode says so, and the registration form is inert.
+    const addProfile = screen.getByRole('region', { name: 'Add profile' });
+    expect(within(addProfile).getByText('Fixture')).toBeInTheDocument();
+    expect(within(addProfile).getByRole('textbox', { name: /Profile directory/ })).toBeDisabled();
+    expect(within(addProfile).getByRole('button', { name: 'Register' })).toBeDisabled();
+  });
+
+  it('shows a fixture conversation profile under its own id when selected', () => {
+    renderWithProviders(<AppRoutes />, { route: '/harness' });
+    fireEvent.click(screen.getByRole('button', { name: /team-kpis/ }));
+    const panel = screen.getByText('Execution path').closest('.ant-card') as HTMLElement;
+    expect(panel).toHaveTextContent('team-kpis');
+    expect(screen.getByText('Answer Query')).toBeInTheDocument();
   });
 
   it('keeps the selected purpose execution path and components in sync', () => {

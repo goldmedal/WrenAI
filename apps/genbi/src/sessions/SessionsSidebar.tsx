@@ -1,4 +1,4 @@
-import { Button, Popover, Radio, Space, Typography } from 'antd';
+import { Button, Popover, Radio, Select, Space, Typography } from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -7,7 +7,7 @@ import { isBffEnabled } from '@/bff/env';
 import { useSessionStore } from '@/session/useSessionStore';
 import { relativeActivity, purposeLabels, statusLabels, vendorLabels } from './sessionLabels';
 import { structuredAskPath } from './structuredAsk';
-import { useNativeSessions } from './useNativeSessions';
+import { DEFAULT_CONVERSATION_PROFILE, useNativeSessions } from './useNativeSessions';
 import './sessions.css';
 
 /** Setup stays in the typed onboarding wizard; native Sessions are post-setup tools. */
@@ -23,13 +23,23 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
   const [open, setOpen] = useState(false);
   const [purpose, setPurpose] = useState<NativeSessionPurpose>('analysis');
   const [entryVerb, setEntryVerb] = useState<'answer_query' | 'generate_dashboard'>('answer_query');
+  const [profile, setProfile] = useState<string>(DEFAULT_CONVERSATION_PROFILE);
   const [error, setError] = useState<string>();
   const [creating, setCreating] = useState(false);
   const [refreshingExisting, setRefreshingExisting] = useState(false);
   const purposeMap = readiness?.purposes ?? (readiness as unknown as Record<NativeSessionPurpose, NativeSessionReadiness['purposes'][NativeSessionPurpose]> | undefined);
   const purposeReadiness = purposeMap?.[purpose];
-  const available = Boolean(purposeReadiness?.available);
-  const selectEntry = purpose === 'analysis' && purposeReadiness?.target === 'codex:interactive';
+  // The registry's per-profile readiness drives the picker; without it only the default exists.
+  const profileOptions = purpose === 'analysis' && readiness?.profiles ? Object.values(readiness.profiles) : [];
+  const showProfilePicker = profileOptions.length > 0;
+  // Never fall back to an arbitrary profile: a choice that vanished from readiness reverts to the
+  // default, and if even the default is missing nothing is selected and Start stays disabled.
+  const selectedProfile = showProfilePicker ? (profileOptions.find((option) => option.id === profile) ?? profileOptions.find((option) => option.id === DEFAULT_CONVERSATION_PROFILE)) : undefined;
+  const customProfile = selectedProfile !== undefined && selectedProfile.id !== DEFAULT_CONVERSATION_PROFILE;
+  const effectiveReadiness = selectedProfile ?? (showProfilePicker ? undefined : purposeReadiness);
+  const available = Boolean(effectiveReadiness?.available);
+  // A selected profile's entry form was decided at admission; only the default takes an entry choice.
+  const selectEntry = purpose === 'analysis' && purposeReadiness?.target === 'codex:interactive' && !customProfile;
   // Do not render a cached detached row as reopenable while the authoritative
   // BFF list is being refreshed. This is a one-shot popover-open check, not a
   // poll; an idle TTL must be able to remove the action immediately.
@@ -41,11 +51,11 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
       ? 'Native terminal sessions require a local BFF connection.'
       : readiness === undefined
         ? 'Checking native terminal availability.'
-        : purposeReadiness?.reason;
+        : effectiveReadiness?.reason;
     if (reason) { setError(reason); return; }
     setCreating(true); setError(undefined);
     try {
-      const session = await createSession(purpose, undefined, 'sessions-new', selectEntry ? entryVerb : undefined);
+      const session = await createSession(purpose, undefined, 'sessions-new', selectEntry ? entryVerb : undefined, customProfile ? selectedProfile.id : undefined);
       setOpen(false); navigate(`/sessions/${session.id}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'A native session could not be started.');
@@ -85,6 +95,30 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
           {newSessionPurposes.map((item) => <Radio key={item} value={item}>{purposeLabels[item]}</Radio>)}
         </Space>
       </Radio.Group>
+      {showProfilePicker ? <label className="sessions-new-profile">
+        <Typography.Text strong>Conversation profile</Typography.Text>
+        <Select<string>
+          aria-label="Conversation profile"
+          value={selectedProfile?.id}
+          onChange={(value) => setProfile(value)}
+          disabled={creating}
+          virtual={false}
+          options={profileOptions.map((option) => ({
+            value: option.id,
+            label: option.id === DEFAULT_CONVERSATION_PROFILE ? `${option.id} (default)` : option.id,
+            disabled: !option.available,
+            title: option.available ? undefined : option.reason,
+          }))}
+          optionRender={(option) => {
+            const item = profileOptions.find((candidate) => candidate.id === option.value);
+            return <span className="sessions-new-profile-option" data-available={item?.available ? 'true' : 'false'}>
+              <span>{option.label}</span>
+              {item && !item.available ? <Typography.Text type="secondary" className="sessions-new-profile-reason">{item.reason ?? 'Not selectable'}</Typography.Text> : null}
+            </span>;
+          }}
+        />
+        {customProfile ? <Typography.Text type="secondary">Enters at {selectedProfile.entryKind === 'agent' ? `the ${selectedProfile.entryVerb ?? 'pinned'} component` : 'the profile scope'}; the entry was decided when the profile was admitted.</Typography.Text> : null}
+      </label> : null}
       {selectEntry ? <fieldset disabled={creating}>
         <legend>Start with</legend>
         <Radio.Group name="native-session-entry" value={entryVerb} onChange={(event) => setEntryVerb(event.target.value)} aria-label="Session entry">
@@ -92,8 +126,8 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
         </Radio.Group>
         <Typography.Paragraph type="secondary">This session keeps the selected entry. Start another session to change it.</Typography.Paragraph>
       </fieldset> : null}
-      <Typography.Text type="secondary">Runtime target: {purposeReadiness?.targetLabel ?? 'not configured'} · {purposeReadiness?.profile ?? 'no dispatch profile'}</Typography.Text>
-      {purposeReadiness?.reason ? <Typography.Text type="secondary">{purposeReadiness.reason}</Typography.Text> : null}
+      <Typography.Text type="secondary">Runtime target: {effectiveReadiness?.targetLabel ?? 'not configured'} · {effectiveReadiness?.profile ?? 'no dispatch profile'}</Typography.Text>
+      {effectiveReadiness?.reason ? <Typography.Text type="secondary" data-testid="native-session-reason">{effectiveReadiness.reason}</Typography.Text> : null}
       {existing.length ? <section className="sessions-new-existing" aria-label="Open existing native sessions">
         <Typography.Text strong>Open existing</Typography.Text>
         {existing.map((session) => {
@@ -162,7 +196,7 @@ export function SessionsSidebar() {
         <span className="sessions-sidebar-id" title={session.id} aria-label={`Session ID ${session.id}`}>{session.id.slice(-8)}</span>
       </span>
       <span className="sessions-sidebar-meta">
-        <span>Native terminal</span><span>{vendorLabels[session.vendor]}</span><span>{statusLabels[session.status]}</span><span>{relativeActivity(session.updatedAt)}</span>
+        <span>Native terminal</span>{session.dispatchProfile && session.dispatchProfile !== DEFAULT_CONVERSATION_PROFILE && session.purpose === 'analysis' ? <span title="Conversation profile">{session.dispatchProfile}</span> : null}<span>{vendorLabels[session.vendor]}</span><span>{statusLabels[session.status]}</span><span>{relativeActivity(session.updatedAt)}</span>
       </span>
     </button>)}
   </section>;

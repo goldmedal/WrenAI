@@ -862,7 +862,8 @@ export interface HarnessDto {
  */
 interface HarnessPurposeBase {
   readonly purpose: "setup" | "analysis" | "context_enrichment";
-  readonly profile: "genbi-setup" | "genbi-default" | "genbi-enrich-context";
+  /** A system purpose's fixed profile, or the registry id of the selected conversation profile. */
+  readonly profile: string;
   readonly scopeKind: "bootstrap" | "bound_project";
   readonly available: boolean;
   readonly reason?: string;

@@ -260,12 +260,12 @@ export function getNativeSession(id: string): Promise<{ session: NativeSession }
   return request(`/api/native-sessions/${encodeURIComponent(id)}`);
 }
 
-export function createNativeSession(purpose: NativeSessionPurpose, launch: { intent: 'start_separate'; idempotencyKey: string; entryVerb?: 'answer_query' | 'generate_dashboard' }, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
+export function createNativeSession(purpose: NativeSessionPurpose, launch: { intent: 'start_separate'; idempotencyKey: string; entryVerb?: 'answer_query' | 'generate_dashboard'; profile?: string }, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
 export function createNativeSession(purpose: NativeSessionPurpose, launch: { intent: 'resume'; sessionId: string; idempotencyKey: string }, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
-export function createNativeSession(purpose: NativeSessionPurpose, launch: { intent: 'open_existing'; sessionId?: string }, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
+export function createNativeSession(purpose: NativeSessionPurpose, launch: { intent: 'open_existing'; sessionId?: string; profile?: string }, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
 export function createNativeSession(purpose: NativeSessionPurpose, vendor: NativeSessionVendor, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
 export function createNativeSession(purpose: NativeSessionPurpose, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
-export function createNativeSession(purpose: NativeSessionPurpose, launchOrVendorOrSignal?: { intent: NativeSessionLaunchIntent; idempotencyKey?: string; sessionId?: string; entryVerb?: 'answer_query' | 'generate_dashboard' } | NativeSessionVendor | AbortSignal, signal?: AbortSignal): Promise<NativeSessionLaunchResult> {
+export function createNativeSession(purpose: NativeSessionPurpose, launchOrVendorOrSignal?: { intent: NativeSessionLaunchIntent; idempotencyKey?: string; sessionId?: string; entryVerb?: 'answer_query' | 'generate_dashboard'; profile?: string } | NativeSessionVendor | AbortSignal, signal?: AbortSignal): Promise<NativeSessionLaunchResult> {
   const requestSignal = launchOrVendorOrSignal instanceof AbortSignal ? launchOrVendorOrSignal : signal;
   // Legacy vendor arguments are intentionally ignored: Runtime owns the
   // provider/target, and the public request payload must not override it.
@@ -847,6 +847,39 @@ export function postSetupReset(): Promise<{ ok: boolean; steps: SetupStep[]; run
 }
 
 // ---------------------------------------------------------------------------
+// Warble profile registry (`/api/profiles`) — mirrored 1:1 from the BFF's wire types.
+// ---------------------------------------------------------------------------
+
+export interface WarbleProfile {
+  id: string;
+  kind: 'builtin' | 'user';
+  role: 'conversation' | 'system';
+  /** Conversation role AND admitted: the one bit a picker needs. */
+  selectable: boolean;
+  admission: { status: 'admitted' | 'unavailable'; reason?: string; checkedAt: string };
+  entry?: { kind: 'scope' | 'agent'; verb?: string };
+  irVersion?: string;
+  components: { id: string; type: string; nativeEligible: boolean; hasDescription: boolean; tiers: string[]; capabilities: string[] }[];
+  /** Where the BFF keeps its copy; user profiles only. */
+  sourceDir?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function listProfiles(): Promise<{ profiles: WarbleProfile[] }> {
+  return request('/api/profiles');
+}
+
+/** Registers a profile from an absolute directory path on the BFF's machine. */
+export function addProfile(sourcePath: string): Promise<{ profile: WarbleProfile }> {
+  return request('/api/profiles', { method: 'POST', body: JSON.stringify({ sourcePath }) });
+}
+
+export async function deleteProfile(id: string): Promise<void> {
+  await request<void>(`/api/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ---------------------------------------------------------------------------
 // Harness page
 // ---------------------------------------------------------------------------
 
@@ -1005,8 +1038,9 @@ function toOrchestratorAgentProfileRow(dto: HarnessDto, components: Component[])
   };
 }
 
-export function getHarness(purpose: HarnessView['purpose']['purpose']): Promise<HarnessView> {
-  return request<HarnessDto>(`/api/harness?purpose=${encodeURIComponent(purpose)}`).then((dto) => {
+export function getHarness(purpose: HarnessView['purpose']['purpose'], profile?: string): Promise<HarnessView> {
+  const query = `purpose=${encodeURIComponent(purpose)}${profile !== undefined ? `&profile=${encodeURIComponent(profile)}` : ''}`;
+  return request<HarnessDto>(`/api/harness?${query}`).then((dto) => {
     const components = dto.components.map(fromComponentDto);
     return {
       purpose: dto.purpose,
