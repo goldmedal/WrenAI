@@ -9,12 +9,17 @@ vi.mock("../server/runtime-host/codex-process.js", () => ({ spawnCodexTransport:
 vi.mock("../server/runtime-host/codex-compatibility.js", async (importOriginal) => ({ ...(await importOriginal<any>()), CODEX_CERTIFIED_ROWS: mocks.rows }));
 import { CodexAppServerBackend } from "../server/runtime-host/codex-app-server.js";
 import { ManagedWrenRuntimeError } from "../server/managed-wren-runtime.js";
-import { CODEX_REQUIRED_CONTRACTS } from "../server/runtime-host/codex-compatibility.js";
+import { CODEX_REQUIRED_CONTRACTS, installedCodexDependencies } from "../server/runtime-host/codex-compatibility.js";
+import { sanitizeRuntimeReadiness } from "../server/runtime-host/policy.js";
 import type { RpcTransport } from "../server/runtime-host/codex-rpc.js";
 const runtime = { manifest_digest: "a".repeat(64), closure_digest: "b".repeat(64), generation_root: "/generation" };
 const vendor = { name: "vendor", executable: "/codex", identity: `sha256:${"c".repeat(64)}`, digest: `sha256:${"c".repeat(64)}` };
 const policy = { cwd: "/scope", codexHome: "/login", profile: "genbi-scoped", args: ["app-server"], environment: {}, commandEnvironment: {}, configuration: {} };
-const row = { executionScope: { models: ["gpt-5.5"], entries: ["answer_query"] }, state: "certified_row", platform: "darwin-arm64", version: "0.156.1", executableSha256: "c".repeat(64), source: "https://example.invalid/codex", protocolSha256: "d".repeat(64), contracts: [...CODEX_REQUIRED_CONTRACTS], evidence: { deterministicProbesSha256: "a".repeat(64), packedAcceptanceSha256: "b".repeat(64), releaseApprovalSha256: "c".repeat(64) } };
+const row = { executionScope: { models: ["gpt-5.5"], entries: ["answer_query"] }, state: "certified_row", platform: "darwin-arm64", version: "0.156.1", executableSha256: "c".repeat(64), source: "https://example.invalid/codex", protocolSha256: "d".repeat(64), contracts: [...CODEX_REQUIRED_CONTRACTS], evidence: { deterministicProbesSha256: "a".repeat(64), packedAcceptanceSha256: "b".repeat(64), releaseApprovalSha256: "c".repeat(64) }, dependencies: liveDependencies() };
+function liveDependencies() {
+  const live = installedCodexDependencies();
+  return { warble: live["@warble/cli"], ir: live["@warble/ir-spec"], "context-loader": live["@wrenai/context-loader"] };
+}
 class Peer implements RpcTransport {
   handlers!: Parameters<RpcTransport["listen"]>[0];
   close = vi.fn(async () => {});
@@ -45,6 +50,15 @@ describe("Codex backend grants", () => {
     mocks.rows.splice(0); const value = backend();
     expect((await value.probe()).readiness).toMatchObject({ code: "codex_identity_uncertified" });
     expect(() => value.prepareLaunch()).toThrow(); expect(mocks.version).not.toHaveBeenCalled(); expect(mocks.spawn).not.toHaveBeenCalled();
+  });
+  it("denies a certified row whose installed components drifted before any launch effect", async () => {
+    mocks.rows.splice(0, mocks.rows.length, { ...row, dependencies: { ...row.dependencies, ir: "0.0.1" } }); const value = backend();
+    const probed = await value.probe();
+    expect(probed.readiness).toMatchObject({ state: "incompatible", code: "codex_dependencies_drifted" });
+    expect(probed.diagnostic.drift).toEqual([`@warble/ir-spec: certified 0.0.1, installed ${row.dependencies.ir}`]);
+    expect(JSON.stringify(sanitizeRuntimeReadiness("codex-app-server", probed.readiness))).not.toContain("certified 0.0.1");
+    expect(() => value.prepareLaunch()).toThrow(expect.objectContaining({ code: "codex_dependencies_drifted" }));
+    expect(value.retainedManifestDigests()).toEqual([]); expect(mocks.spawn).not.toHaveBeenCalled(); expect(mocks.policy).not.toHaveBeenCalled();
   });
   it.each(["linux", "win32"])("rejects platform %s before all effects", async (platform) => {
     mocks.platform = platform; expect((await backend().probe()).readiness).toMatchObject({ code: "runtime_platform_unsupported" }); expect(mocks.resolve).not.toHaveBeenCalled();

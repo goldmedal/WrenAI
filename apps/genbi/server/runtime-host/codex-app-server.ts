@@ -3,7 +3,7 @@ import { arch, platform } from "node:os";
 import { ManagedWrenRuntimeError, resolveManagedWrenRuntime, type ManagedWrenRuntimeRecord } from "../managed-wren-runtime.js";
 import { attestNativeExecutable, assertNativeExecutableIdentity, type NativeExecutableIdentity, type NativeRuntimeSpec } from "../native-runtime-spec.js";
 import type { CodexWrenHome } from "../native-wren-home.js";
-import { CODEX_CERTIFIED_ROWS, codexCertificationSchema, evaluateCodexIdentity } from "./codex-compatibility.js";
+import { CODEX_CERTIFIED_ROWS, codexCertificationSchema, evaluateCodexIdentity, type CodexIdentityDiagnostic } from "./codex-compatibility.js";
 import { buildCodexSessionPolicy } from "./codex-policy.js";
 import { spawnCodexTransport } from "./codex-process.js";
 import { CodexSession } from "./codex-session.js";
@@ -18,7 +18,12 @@ import type { CodexSessionTools } from "./codex-direct-tools.js";
 
 type Reason = RuntimeBackendReasonCode<"codex-app-server">;
 export class CodexBackendError extends Error {
-  constructor(readonly code: Reason) { super(runtimeNotReady("codex-app-server", "unavailable", code).message); }
+  /** Host-only drift detail for `codex_dependencies_drifted`; never part of the readiness text. */
+  readonly drift?: readonly string[];
+  constructor(readonly code: Reason, drift?: readonly string[]) {
+    super(runtimeNotReady("codex-app-server", "unavailable", code).message);
+    if (drift) this.drift = drift;
+  }
 }
 export interface CodexBackendOptions {
   /** Captured at BFF composition, not discovered from command/session input. */
@@ -75,14 +80,16 @@ export class CodexAppServerBackend {
     const result = evaluateCodexIdentity({ platform: "darwin-arm64", versionOutput,
       executableSha256: vendor.digest.slice(7), source: this.options.source,
       protocolSha256: row.data.protocolSha256, contracts: row.data.contracts }, CODEX_CERTIFIED_ROWS);
-    if (result.readiness.state !== "ready") throw new CodexBackendError(result.readiness.code);
+    if (result.readiness.state !== "ready") throw new CodexBackendError(result.readiness.code, result.diagnostic.drift);
     return { runtime, vendor, result };
   }
-  async probe(): Promise<RuntimeBackendProbeResult<"codex-app-server">> {
+  async probe(): Promise<RuntimeBackendProbeResult<"codex-app-server"> & { readonly diagnostic: CodexIdentityDiagnostic }> {
     try { return this.inspect().result; }
     catch (error) {
       const code = error instanceof CodexBackendError ? error.code : "runtime_probe_failed";
-      return { readiness: runtimeNotReady("codex-app-server", code.startsWith("codex_wren_") ? "unprovisioned" : "incompatible", code), diagnostic: { phase: code.startsWith("codex_wren_") ? "provisioning" : "identity" } };
+      const drift = error instanceof CodexBackendError ? error.drift : undefined;
+      return { readiness: runtimeNotReady("codex-app-server", code.startsWith("codex_wren_") ? "unprovisioned" : "incompatible", code),
+        diagnostic: { phase: code.startsWith("codex_wren_") ? "provisioning" : "identity", ...(drift ? { drift } : {}) } };
     }
   }
   /** Call BEFORE durable rows or workspace materialization in Phase 5. */

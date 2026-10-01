@@ -33,7 +33,12 @@ required before certification.
 
 `evaluateCodexIdentity` compares the exact baseline version, executable digest,
 source, protocol digest, required contracts, and evidence records. The optional
-row argument is a pure release-validation/test seam. A successful fixture
+row argument is a pure release-validation/test seam. A matching row is still
+denied with `codex_dependencies_drifted` when the installed Warble, IR or
+context-loader packages differ from the versions recorded with its evidence. Explicit Warble or
+context-loader binary overrides are invisible to that comparison and are outside
+the certified row by definition; denying them is a follow-up decision because it
+would block Codex native in development checkouts. A successful fixture
 comparison cannot mutate the packaged registry or certify an unknown executable.
 The backend hashes the selected native executable before running its bounded
 version query. The reviewed row binds that executable to its generated schema

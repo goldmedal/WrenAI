@@ -184,6 +184,25 @@ describe('Sessions workbench', () => {
     expect(await screen.findByText('Runtime host: The Claude sandbox runtime has not been provisioned by this GenBI release.')).toBeInTheDocument();
   });
 
+  it('renders the Codex dependency-drift refusal from the selected RuntimeHost readiness', async () => {
+    const drifted = { state: 'incompatible' as const, code: 'codex_dependencies_drifted', message: 'Codex native is certified for other Warble, IR or context-loader versions than this install uses; re-certify Codex on the installed versions to enable it.' };
+    client.list.mockResolvedValue({ sessions: [] });
+    client.readiness.mockResolvedValue({
+      ...ready,
+      runtimeHost: {
+        selected: 'codex-app-server' as const,
+        selectedReadiness: drifted,
+        backends: {
+          local: { state: 'ready' as const, version: 'development-local', capabilities: [] },
+          'codex-app-server': drifted,
+          'claude-sandbox-runtime': { state: 'unprovisioned' as const, code: 'claude_sandbox_runtime_unprovisioned', message: 'The Claude sandbox runtime has not been provisioned by this GenBI release.' },
+        },
+      },
+    });
+    renderWithProviders(<Surface />, { route: '/sessions' });
+    expect(await screen.findByText(`Runtime host: ${drifted.message}`)).toBeInTheDocument();
+  });
+
   it('coalesces duplicate new-session clicks, retains an ambiguous action for retry, and refreshes it after success', async () => {
     let deliver!: (value: { session: ReturnType<typeof native>; capability: string }) => void;
     const inFlight = new Promise<{ session: ReturnType<typeof native>; capability: string }>((resolve) => { deliver = resolve; });

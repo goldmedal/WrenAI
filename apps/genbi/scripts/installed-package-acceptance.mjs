@@ -502,11 +502,16 @@ async function verifyInstalledCodexBackend(input) {
   const runtimeRoot = path.join(installRoot, "must-not-be-created");
   const code = `
     import assert from 'node:assert/strict';
-    import { existsSync } from 'node:fs';
+    import { existsSync, readFileSync } from 'node:fs';
     import { CodexAppServerBackend } from ${JSON.stringify(moduleUrl("codex-app-server"))};
     import { CodexConversation } from ${JSON.stringify(moduleUrl("codex-conversation"))};
-    import { CODEX_CERTIFIED_ROWS, evaluateCodexIdentity } from ${JSON.stringify(moduleUrl("codex-compatibility"))};
+    import { CODEX_CERTIFIED_ROWS, evaluateCodexIdentity, installedCodexDependencies } from ${JSON.stringify(moduleUrl("codex-compatibility"))};
     import { CodexSession } from ${JSON.stringify(moduleUrl("codex-session"))};
+    // The dependency-drift gate must read real installed manifests here, not the declared-pin fallback.
+    const declared = JSON.parse(readFileSync(${JSON.stringify(path.join(installedPackageRoot, "package.json"))}, 'utf8')).dependencies;
+    const manifests = installedCodexDependencies({ declared: () => undefined });
+    assert.deepEqual(Object.keys(manifests).sort(), ['@warble/claude-agent-sdk', '@warble/cli', '@warble/codex-local', '@warble/ir-spec', '@wrenai/context-loader']);
+    for (const [name, version] of Object.entries(manifests)) assert.equal(version, declared[name], name);
     for (const row of CODEX_CERTIFIED_ROWS) {
       assert.notEqual(evaluateCodexIdentity({ platform: row.platform, versionOutput: 'codex-cli ' + row.version,
         executableSha256: '0'.repeat(64), source: row.source, protocolSha256: row.protocolSha256,

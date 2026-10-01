@@ -49,6 +49,31 @@ passive component notifications check live authority; protected operations and
 terminal results perform full validation. Unknown executable identities and
 changed runtime bytes remain denied.
 
+## Dependency drift
+
+The registry row records the component versions this evidence was accepted
+with (Warble 0.15.2, IR 0.8.0, context-loader 0.1.1), and a test binds them to
+the `dependencies` of both hashed acceptance records. At runtime the gate reads
+the installed `@warble/cli`, `@warble/codex-local`, `@warble/claude-agent-sdk`,
+`@warble/ir-spec` and `@wrenai/context-loader` manifests (falling back to this
+package's declared pins only when a manifest cannot be resolved) and, after the
+exact identity, protocol and contract checks pass, denies the row with
+`codex_dependencies_drifted` if any of them differs from the record. Only Codex
+native is affected: readiness reports that reason and its fixed message, no
+launch permit is issued, and other runtimes keep working on the new versions.
+The gate cannot tell a prompt-only component release from a behavioural one, so
+every drift is denied. To clear it, re-run the acceptance flow above on the new
+versions and refresh the hashed records and the row (versions and digests)
+together; never edit these records to match a bump.
+
+The gate compares installed package versions only. Explicit binary overrides
+(`WREN_HARNESS_WARBLE_BIN`, `WREN_HARNESS_CONTEXT_LOADER_BIN`, an in-repo
+`core/wren-context-loader/target/*` build that outranks the package, or a
+PATH-tier `warble` when `@warble/cli` cannot be resolved) run code the gate does
+not see, so such configurations are outside the certified row by definition.
+Denying them is a separate follow-up decision, because it would block Codex
+native in development checkouts.
+
 ## Official remote terminal
 
 The `remote-tui-v1` transport has separate deterministic, installed candidate and

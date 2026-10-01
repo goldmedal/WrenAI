@@ -65,9 +65,9 @@ describe("Codex application composition", () => {
     expect(() => readCodexBootConfiguration({ GENBI_CODEX_RUNTIME: "auto" })).toThrow();
     expect(() => readCodexBootConfiguration({ GENBI_ALLOW_LOCAL_RUNTIME: "false" })).toThrow();
   });
-  it("projects the backend certification failure without allocating or compiling", async () => {
-    const f = fixture(); f.backend.probe.mockResolvedValue({ readiness: runtimeNotReady("codex-app-server", "incompatible", "codex_identity_uncertified"), diagnostic: { phase: "identity" } } as never);
-    expect((await f.composition.probe()).readiness).toMatchObject({ code: "codex_identity_uncertified" });
+  it.each(["codex_identity_uncertified", "codex_dependencies_drifted"] as const)("projects the backend certification failure %s without allocating or compiling", async (code) => {
+    const f = fixture(); f.backend.probe.mockResolvedValue({ readiness: runtimeNotReady("codex-app-server", "incompatible", code), diagnostic: { phase: "identity" } } as never);
+    expect((await f.composition.probe()).readiness).toMatchObject({ code });
     expect(compileProfile).not.toHaveBeenCalled(); expect(prepareCapturedCodexDirectTools).not.toHaveBeenCalled();
   });
   it("denies uncertified execution scope before readiness or any materialization", async () => {
