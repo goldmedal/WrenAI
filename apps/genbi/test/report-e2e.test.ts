@@ -123,8 +123,10 @@ const roles = { judge: "judge", render: "render" };
 interface Captured { readonly step: string; readonly tier: string; readonly modelId: string; readonly brief?: string; readonly prompt: string; readonly request: string; readonly input: unknown; readonly consumes: unknown; readonly output: string }
 
 /** The fake models, one behaviour per step, dispatched on what the host hands the step (tools, consumes). */
-function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: string; namingSummary?: boolean; usage?: Readonly<Record<string, StepUsage>> }) {
+function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: string; namingSummary?: boolean; brokenTerminal?: "repaired" | "still"; usage?: Readonly<Record<string, StepUsage>> }) {
   const calls: Captured[] = [];
+  // The entries generate_sql meant to write, kept so a repair can re-emit them by query id.
+  let intended: unknown[] = [];
   const askRequests: unknown[] = [];
   const askResults: unknown[] = [];
   vi.mocked(runAiComponentStep).mockImplementation(async (run: StepRun, model) => {
@@ -162,7 +164,7 @@ function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: 
           entries.push({ slot_id: slot.slot_id, status: "unanswerable", reason: `${error.errorClass}: order_metrics is a cube, not a model` });
           continue;
         }
-        const observed = await run.tools["query"]!({ sql }) as { columns: string[]; rows: unknown[] };
+        const observed = await run.tools["query"]!({ sql }) as { columns: string[]; rows: unknown[]; query_id: string };
         // The model's own copy of the rows is deliberately wrong for one slot: the observed rows must win.
         const rows = slot.slot_id === "total_revenue" ? [[999]] : observed.rows;
         // The callee's model may also write the customers it saw into its free text, not only into the rows.
@@ -170,19 +172,29 @@ function installFakeModels(options: { mutateNarration: boolean; toolErrorSlot?: 
         const summary = naming ? `The top five were ${(observed.rows as { customer: string; revenue: number }[]).map((row) => `${row.customer} (${row.revenue} USD)`).join(", ")}.`
           : `Answer for ${slot.slot_id}: ${slot.slot_id === "growth_story" ? "revenue rose every quarter of fiscal 2025, from 290,000 USD in Q1 to 362,000 USD in Q4; Q4 contributed the most at 28% of the year." : "see rows"}`;
         entries.push({ slot_id: slot.slot_id, columns: observed.columns, rows, summary, ...(naming ? { highlight: `${(observed.rows[0] as { customer: string }).customer} led the year` } : {}),
-          verified: true, definition: { sql, source_tables: sql.includes("customers") ? ["orders", "customers"] : ["orders"], filters: ["fiscal year 2025", "completed orders only"] } });
+          verified: true, definition: { sql, source_tables: sql.includes("customers") ? ["orders", "customers"] : ["orders"], filters: ["fiscal year 2025", "completed orders only"] }, cites: observed.query_id });
       }
-      return record("generate_sql", JSON.stringify(entries));
+      // A terminal that re-types a quoted predicate without escaping it: the JSON breaks inside `filters`.
+      if (options.brokenTerminal) {
+        intended = entries.map((entry) => { const { cites, definition: _definition, ...rest } = entry as Record<string, unknown>; return cites === undefined ? rest : { ...rest, definition: { query_id: cites } }; });
+        return record("generate_sql", JSON.stringify(entries).replace('"completed orders only"', '"status = "completed""'));
+      }
+      return record("generate_sql", JSON.stringify(entries.map((entry) => { const { cites: _cites, ...rest } = entry as Record<string, unknown>; return rest; })));
     }
-    if (Object.hasOwn(run.consumes, "batch_result")) return record("repair_sql", "[]");
+    if (Object.hasOwn(run.consumes, "batch_result")) {
+      if (options.brokenTerminal === "repaired") return record("repair_sql", JSON.stringify(intended));
+      if (options.brokenTerminal === "still") return record("repair_sql", `Repaired:\n${JSON.stringify(intended).replace('"slot_id":"order_count"', '"slot_id":"order_count""')}`);
+      return record("repair_sql", "[]");
+    }
     return record("resolve_intent", JSON.stringify(SLOTS.map((slot) => ({ slot_id: slot.slot_id, compute: slot.question, expected_shape: slot.expected_shape }))));
   });
   return { calls, askRequests, askResults };
 }
 
-async function runReport(project: string, options: { mutateNarration?: boolean; toolErrorSlot?: string; namingSummary?: boolean; usage?: Record<string, StepUsage>; zoneRoles?: Record<string, string>; tierBinding?: Record<string, AdapterSpec> } = {}) {
+async function runReport(project: string, options: { mutateNarration?: boolean; toolErrorSlot?: string; namingSummary?: boolean; brokenTerminal?: "repaired" | "still"; usage?: Record<string, StepUsage>; zoneRoles?: Record<string, string>; tierBinding?: Record<string, AdapterSpec> } = {}) {
   const { plan, ir } = await loadReportPlan(project);
   const fakes = installFakeModels({ mutateNarration: options.mutateNarration ?? false, ...(options.toolErrorSlot ? { toolErrorSlot: options.toolErrorSlot } : {}),
+    ...(options.brokenTerminal ? { brokenTerminal: options.brokenTerminal } : {}),
     ...(options.namingSummary ? { namingSummary: true } : {}), ...(options.usage ? { usage: options.usage } : {}) });
   vi.mocked(openWrenComponentAccess).mockResolvedValue({
     async query(input) { if (input.sql === CUBE_AS_TABLE) throw new GovernedWrenError("model_not_found"); const table = TABLES[input.sql]; if (!table) throw new Error(`unexpected SQL: ${input.sql}`); return structuredClone(table); },
@@ -328,6 +340,48 @@ describe("M1: the annual revenue report end to end, offline", () => {
         "total_revenue", "order_count", "revenue_by_quarter", "revenue_by_month", "top_customers", "growth_story"]);
       expect(JSON.stringify(envelope)).not.toMatch(/order_metrics|model_not_found|129\.34/);
       expect(envelope.verified).toBe(true);
+      expect(normalizeComponentResult(JSON.stringify(envelope), contract).value.status).toBe("ok");
+    } finally { await rm(project, { recursive: true, force: true }); }
+  });
+
+  it("an unparseable generate_sql terminal runs repair_sql once with the raw text and the parse error, and a repair citing queries by id fills the report", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "genbi-report-repair-"));
+    try {
+      const { result, events, calls, contract } = await runReport(project, { brokenTerminal: "repaired" });
+      expect(result.kind).toBe("answer");
+      if (result.kind !== "answer") throw new Error("unreachable");
+      const childSteps = events.filter((event): event is Extract<AgentEvent, { kind: "step.start" }> => event.kind === "step.start" && event.depth === 1);
+      expect(childSteps.map((event) => event.name)).toEqual(["resolve_intent", "generate_sql", "repair_sql"]);
+      const repair = calls.find((call) => call.step === "repair_sql")!;
+      const generated = calls.find((call) => call.step === "generate_sql")!.output;
+      expect((repair.consumes as { batch_result: unknown }).batch_result).toEqual({ status: "error", code: "step_failed", reason: expect.stringMatching(/^terminal_unparseable: /), text: generated });
+      const envelope = result.envelope as { blocks: Record<string, unknown>[]; verified: boolean };
+      const data = envelope.blocks.filter((block) => block.type !== "definition");
+      expect(data.map((block) => [block.type, block.slot_id])).toEqual([
+        ["kpi_card", "total_revenue"], ["kpi_card", "order_count"], ["kpi_card", "avg_order_value"], ["chart", "revenue_by_quarter"], ["chart", "revenue_by_month"],
+        ["table", "top_customers"], ["narrative", "growth_story"], ["unavailable", "largest_orders"], ["unavailable", "refund_rate"]]);
+      expect(data[0]).toMatchObject({ value: 1284500 });
+      // Provenance comes from the executed query the id names; an id-cited entry carries no model lineage.
+      expect(envelope.blocks.find((block) => block.type === "definition" && block.slot_id === "top_customers")).toEqual({ type: "definition", sql: SQL.top_customers, source_tables: [], filters: [], slot_id: "top_customers" });
+      expect(envelope.verified).toBe(true);
+      expect(normalizeComponentResult(JSON.stringify(envelope), contract).value.status).toBe("ok");
+    } finally { await rm(project, { recursive: true, force: true }); }
+  });
+
+  it("a repair whose terminal still does not parse leaves every cell unavailable instead of failing the child", async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "genbi-report-unparseable-"));
+    try {
+      const { result, events, askResults, contract } = await runReport(project, { brokenTerminal: "still" });
+      expect(result.kind).toBe("answer");
+      if (result.kind !== "answer") throw new Error("unreachable");
+      const childSteps = events.filter((event): event is Extract<AgentEvent, { kind: "step.start" }> => event.kind === "step.start" && event.depth === 1);
+      expect(childSteps.map((event) => event.name)).toEqual(["resolve_intent", "generate_sql", "repair_sql"]);
+      const disclosed = askResults[0] as { status: string; output: { value: { answers: { slot_id: string; status: string; reason_category?: string }[] } } };
+      expect(disclosed.status).toBe("ok");
+      expect(disclosed.output.value.answers.map((answer) => [answer.slot_id, answer.status, answer.reason_category])).toEqual(SLOTS.map((slot) => [slot.slot_id, "refused", "unanswerable"]));
+      expect(JSON.stringify(disclosed)).not.toContain("terminal_unparseable");
+      const envelope = result.envelope as { blocks: Record<string, unknown>[] };
+      expect(envelope.blocks.map((block) => [block.type, block.slot_id])).toEqual(SLOTS.map((slot) => ["unavailable", slot.slot_id]));
       expect(normalizeComponentResult(JSON.stringify(envelope), contract).value.status).toBe("ok");
     } finally { await rm(project, { recursive: true, force: true }); }
   });

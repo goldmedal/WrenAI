@@ -2,11 +2,16 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { normalizeComponentRequest, type ComponentInvocationResult } from "@warble/claude-agent-sdk";
 import { readSlots, type EgressDecision, type EgressProvenance } from "./egress.js";
+import { parseTerminalJson } from "./terminal-json.js";
 import { reportedUsage, type StepUsage } from "./usage.js";
 
 export type { StepUsage } from "./usage.js";
 
 export interface ComponentTool { readonly name: string; readonly source: string }
+/** A grant that executes SQL: its successful results carry a host-assigned `query_id`. */
+export function isQueryGrant(grant: ComponentTool): boolean {
+  return grant.source === "host:sql_execution:read_only" || (grant.source === "native" && grant.name === "query");
+}
 export interface ComponentStep {
   readonly name: string;
   readonly tier: string;
@@ -179,6 +184,16 @@ function isPerSlotRequest(request: { readonly request: string; readonly input: R
   const read = readSlots(request);
   return !("error" in read) && !read.implicit;
 }
+/**
+ * A per-slot child whose terminal never parsed, after its repair step or with none declared:
+ * every declared slot is unanswerable, so the caller renders unavailable cells instead of
+ * receiving no envelope. Nothing is grounded, so there is nothing for normalization to verify.
+ */
+function unanswerableBatch(request: { readonly request: string; readonly input: Readonly<Record<string, unknown>> }): ComponentInvocationResult {
+  const read = readSlots(request);
+  if ("error" in read) throw new ExecutionFailure("callee_failed");
+  return { status: "ok", output: { kind: "value", value: read.slots.map((slot) => ({ slot_id: slot.slot_id, status: "unanswerable", reason: "terminal_unparseable" })) } };
+}
 function unique(values: readonly string[]): boolean {
   return values.every((value) => /^[A-Za-z0-9_-]+$/.test(value) && !["__proto__", "constructor", "prototype"].includes(value))
     && new Set(values).size === values.length;
@@ -322,6 +337,11 @@ export class ComponentRunner {
     const egress: EgressProvenance[] = [];
     let childSteps = 0;
     let failed: string | undefined;
+    // Ordinal of successful query results in this invocation, across its steps: `q1`, `q2`, ...
+    let executedQueries = 0;
+    // The last terminal step's text did not parse and no repair step remains to run for it.
+    let unparseable = false;
+    const lastPrimary = component.steps.indexOf(component.steps.filter((candidate) => !candidate.repairOf).at(-1)!);
     try {
       for (const step of component.steps) {
         if (step.repairOf && step.repairOf !== failed) continue;
@@ -368,8 +388,13 @@ export class ComponentRunner {
               assertActive();
               if (!accepting) throw new ExecutionFailure("cancelled");
               const saved = freeze(copy(input, COMPONENT_LIMITS.requestBytes));
-              const output = copy(await trackTool(grant.name, () => this.wait(tool.execute(saved, this.controller.signal))), COMPONENT_LIMITS.resultBytes);
+              const result = copy(await trackTool(grant.name, () => this.wait(tool.execute(saved, this.controller.signal))), COMPONENT_LIMITS.resultBytes);
               assertActive();
+              // The id is assigned here, once, so the evidence and the model's copy carry the same
+              // one; a tool's own `query_id` field is overwritten. The terminal cites it instead of
+              // re-typing SQL, and normalization resolves it against this evidence.
+              const output = isQueryGrant(grant) && result !== null && typeof result === "object" && !Array.isArray(result)
+                ? { ...(result as Record<string, unknown>), query_id: `q${++executedQueries}` } : result;
               tools.push(freeze({ step: step.name, tool: grant.name, input: saved, output }));
               return copy(output, COMPONENT_LIMITS.resultBytes);
             })();
@@ -423,11 +448,12 @@ export class ComponentRunner {
             return pending;
           };
         }
+        const terminal = component.steps.indexOf(step) >= lastPrimary;
         this.host.onEvent?.({ ...event, kind: "step.start", step: step.name });
         try {
           const pending = this.host.runStep({
             tier: step.tier, request: request.value.request,
-            terminal: component.steps.indexOf(step) >= component.steps.indexOf(component.steps.filter((candidate) => !candidate.repairOf).at(-1)!),
+            terminal,
             input: freeze(copy(request.value.input, COMPONENT_LIMITS.requestBytes)),
             ...(component.brief !== undefined ? { brief: component.brief } : {}),
             prompt: step.prompt, consumes: freeze(copy(consumes, COMPONENT_LIMITS.resultBytes)),
@@ -446,13 +472,25 @@ export class ComponentRunner {
           accepting = false;
           // A transport cannot return while unobserved child calls still run.
           await this.wait(Promise.all(queued));
-          const stepFailed = response.failed === true || (toolErrored && !perSlot);
-          if (stepFailed) {
+          const toolFailed = response.failed === true || (toolErrored && !perSlot);
+          // A per-slot terminal must parse (the one tolerant definition normalization also uses).
+          // When it does not and a repair step is declared for this step, the step fails so the
+          // repair runs once; the repair receives the raw text alongside the parse error.
+          const parsed = !toolFailed && perSlot && terminal && typeof response.value === "string" ? parseTerminalJson(response.value) : undefined;
+          const unparsed = parsed && !parsed.ok ? `terminal_unparseable: ${parsed.error}` : undefined;
+          const repairable = component.steps.some((candidate) => candidate.repairOf === step.name);
+          const stepFailed = toolFailed || (unparsed !== undefined && repairable);
+          unparseable = false;
+          if (toolFailed) {
             products[step.produces] = { status: "error", code: "step_failed" };
+            failed = step.name;
+          } else if (stepFailed) {
+            products[step.produces] = freeze(copy({ status: "error", code: "step_failed", reason: unparsed, text: response.value }, COMPONENT_LIMITS.resultBytes));
             failed = step.name;
           } else {
             products[step.produces] = freeze(copy(response.value, COMPONENT_LIMITS.resultBytes));
             failed = undefined;
+            unparseable = unparsed !== undefined;
           }
           this.host.onEvent?.({ ...event, kind: "step.finish", step: step.name, status: stepFailed ? "error" : "ok" });
         } catch (error) {
@@ -461,7 +499,8 @@ export class ComponentRunner {
         } finally { active = false; }
       }
       if (failed) throw new ExecutionFailure("callee_failed");
-      const result = copy(await this.wait(binding.normalize(freeze({ steps: products, tools, children, egress }), this.controller.signal)), COMPONENT_LIMITS.resultBytes);
+      const result = unparseable ? unanswerableBatch(request.value)
+        : copy(await this.wait(binding.normalize(freeze({ steps: products, tools, children, egress }), this.controller.signal)), COMPONENT_LIMITS.resultBytes);
       if (!normalizedResult.safeParse(result).success) throw new ExecutionFailure("invalid_result");
       this.host.onEvent?.({ ...event, kind: "call.finish", status: result.status === "ok" ? "ok" : "error" });
       return result;

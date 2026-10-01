@@ -151,3 +151,45 @@ describe("the answering query is the one the terminal value names, not the last 
         provenance: { verified: true, definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } } });
   });
 });
+
+describe("a terminal cites an executed query by the id the host attached to its result", () => {
+  const withId = (call: ReturnType<typeof observed>, id: string) => ({ ...call, output: { ...call.output, query_id: id } });
+  const ran = [withId(observed(CORRECT, 99), "q1"), withId(observed(STRAY, 67), "q2")];
+  const batch: ComponentPlan = { id: "answer_batch", declaration: { required_capabilities: ["sql_execution:read_only"], effect: { render_blocks: [] } },
+    steps: [{ name: "generate_sql", tier: "strong", prompt: "", consumes: [], produces: "batch_result", tools: [{ name: "query", source: "native" }], calls: [] }] };
+  const runBatch = (entries: unknown[], tools = ran) => normalizeComponentEvidence(batch, { steps: { batch_result: JSON.stringify(entries) }, tools, children: [] });
+  it("grounds each entry on the observation carrying that id, with provenance from that query", () => {
+    const result = runBatch([
+      { slot_id: "stray", summary: "67 completed", definition: { query_id: "q2" } },
+      { slot_id: "all", summary: "99 orders", definition: { query_id: "q1" } },
+    ]);
+    expect(result).toEqual({ status: "ok", output: { kind: "value", value: [
+      { slot_id: "stray", columns: ["n"], rows: [{ n: 67 }], verified: true, summary: "67 completed", definition: { sql: STRAY, source_tables: ["orders"], filters: [] } },
+      { slot_id: "all", columns: ["n"], rows: [{ n: 99 }], verified: true, summary: "99 orders", definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } },
+    ] }, provenance: { verified: true } });
+  });
+  it("ignores the model's lineage on an id-cited entry and takes the SQL from the observation", () => {
+    const bare = [{ step: "generate_sql", tool: "query", input: { sql: STRAY }, output: { columns: ["n"], rows: [{ n: 67 }], query_id: "q1" } }];
+    const result = runBatch([{ slot_id: "s", definition: { query_id: "q1", sql: "SELECT invented", source_tables: ["private"], filters: ["status = 'x'"] } }], bare as typeof ran);
+    expect(result).toMatchObject({ status: "ok", output: { value: [{ slot_id: "s", rows: [{ n: 67 }], definition: { sql: STRAY, source_tables: [], filters: [] } }] } });
+  });
+  it("an id no executed query carries is unanswerable, even when its SQL matches one that ran; unknown SQL stays unanswerable", () => {
+    const result = runBatch([
+      { slot_id: "missing", definition: { query_id: "q9" } },
+      { slot_id: "missing_with_sql", definition: { query_id: "q9", sql: CORRECT } },
+      { slot_id: "never_ran", definition: { sql: "SELECT COUNT(*) AS n FROM customers" } },
+      { slot_id: "by_sql", definition: { sql: CORRECT } },
+    ]);
+    if (result.status !== "ok" || result.output.kind !== "value") throw new Error("unreachable");
+    expect(result.output.value).toEqual([
+      { slot_id: "missing", status: "unanswerable", reason: "no executed query backs this answer" },
+      { slot_id: "missing_with_sql", status: "unanswerable", reason: "no executed query backs this answer" },
+      { slot_id: "never_ran", status: "unanswerable", reason: "no executed query backs this answer" },
+      { slot_id: "by_sql", columns: ["n"], rows: [{ n: 99 }], verified: true, summary: "Query completed.", definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } },
+    ]);
+  });
+  it("the single-answer path selects the cited query, and refuses an id that never ran", () => {
+    expect(answer({ summary: "99 orders", definition: { query_id: "q1" } }, ran)).toMatchObject({ status: "ok", output: { value: { rows: [{ n: 99 }], definition: { sql: CORRECT } } } });
+    expect(answer({ definition: { query_id: "q9", sql: STRAY } }, ran).status).toBe("refused");
+  });
+});

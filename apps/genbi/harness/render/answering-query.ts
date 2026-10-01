@@ -3,14 +3,29 @@
  * queries (an exploratory count, then the real one, then a stray check), so
  * "the last successful table" is not a safe choice: a chatty model produces a
  * grounded but wrong answer. The model names the query it answered with in the
- * terminal value's `definition.sql` (the Hub prompts require the exact SQL it
- * ran); the host then selects the observed table with that SQL, and never the
- * model's own copy of the rows.
+ * terminal value's `definition`: by the `query_id` the host attached to the
+ * tool result, or by the exact SQL it ran; the host then selects that observed
+ * table, and never the model's own copy of the rows.
  */
 
 /** Whitespace- and terminator-insensitive identity for one SQL text. */
 export function sqlKey(sql: string): string {
   return sql.replace(/\s+/g, " ").replace(/;\s*$/, "").trim();
+}
+
+/**
+ * The host-assigned query id (`q<N>`) a terminal value cites as its answer, if any. An id is
+ * preferred over SQL: the model names the executed query instead of re-typing it.
+ */
+export function namedAnswerQueryId(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const definition = record.definition;
+  if (typeof definition === "object" && definition !== null && !Array.isArray(definition)) {
+    const id = (definition as Record<string, unknown>).query_id;
+    if (typeof id === "string" && id.length > 0) return id;
+  }
+  return typeof record.query_id === "string" && record.query_id.length > 0 ? record.query_id : undefined;
 }
 
 /** The SQL a terminal value names as its answer, if it names exactly one. */
@@ -32,10 +47,13 @@ export function namedAnswerSql(value: unknown): string | undefined {
  * Unnamed: the last candidate, the historical rule, kept only for values that
  * do not name a query at all.
  */
-export function selectAnsweringCandidate<T extends { readonly sql?: string | undefined }>(
+export function selectAnsweringCandidate<T extends { readonly sql?: string | undefined; readonly queryId?: string | undefined }>(
   candidates: readonly T[],
   terminalValue: unknown,
 ): T | undefined {
+  // Cited by id: that candidate or none, never a fallback to the SQL text or the last table.
+  const id = namedAnswerQueryId(terminalValue);
+  if (id !== undefined) return candidates.find((candidate) => candidate.queryId === id);
   const named = namedAnswerSql(terminalValue);
   if (named === undefined) return candidates.at(-1);
   const key = sqlKey(named);
