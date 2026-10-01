@@ -28,7 +28,7 @@ function plan(options: { repair?: boolean } = {}): ExecutionPlan {
       ...(options.repair === false ? [] : [{ name: "repair_sql", tier: "strong", prompt: "repair", consumes: ["batch_result"], produces: "repaired_batch", tools, calls: [], repairOf: "generate_sql" }]),
     ] } } };
 }
-function host(strong: MockLanguageModelV4): { host: RunnerHost; executed: string[]; evidence: ComponentEvidence[] } {
+function host(strong: MockLanguageModelV4, extra: Readonly<Record<string, unknown>> = {}): { host: RunnerHost; executed: string[]; evidence: ComponentEvidence[] } {
   const executed: string[] = [];
   const evidence: ComponentEvidence[] = [];
   const cheap = new MockLanguageModelV4({ doGenerate: async () => text("one intent per slot") });
@@ -37,7 +37,7 @@ function host(strong: MockLanguageModelV4): { host: RunnerHost; executed: string
       async execute(input) {
         const sql = (input as { sql: string }).sql; executed.push(sql);
         if (!(sql in ROWS)) throw new GovernedWrenError("model_not_found");
-        return { columns: ["n"], rows: [{ n: ROWS[sql] }], definition: { sql, source_tables: [], filters: [] } };
+        return { columns: ["n"], rows: [{ n: ROWS[sql] }], definition: { sql, source_tables: [], filters: [] }, ...extra };
       } }],
     isCurrent: () => true, async close() {},
     async normalize(observed) { evidence.push(observed); return normalizeComponentEvidence(plan().components.answer_batch!, observed); },
@@ -123,6 +123,14 @@ describe("executed queries are cited by the id the host attaches to each result"
       { slot_id: "b", status: "unanswerable", reason: "no executed query backs this answer" },
       { slot_id: "c", columns: ["n"], rows: [{ n: 100 }], summary: "c by id", verified: true, definition: { sql: SQL.c, source_tables: [], filters: [] } },
     ] }, provenance: { verified: true } });
+  });
+  it("a tool result that already carries a query_id gets the host id, in evidence and at the model", async () => {
+    const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.a, "a"), text([{ slot_id: "a", definition: { query_id: "q1" } }])] });
+    const f = host(strong, { query_id: "q9" });
+    const result = await new ComponentRunner(plan(), f.host).run("answer_batch", { request: "fill the report", input: { slots } });
+    expect(receivedQueryIds(strong.doGenerateCalls[1]!.prompt)).toEqual([["a", "q1"]]);
+    expect(f.evidence[0]!.tools.map((call) => (call.output as { query_id?: unknown }).query_id)).toEqual(["q1"]);
+    expect(result).toMatchObject({ status: "ok", output: { value: [{ slot_id: "a", rows: [{ n: 1672 }] }] } });
   });
   it("a failed query takes no id: ids count successful results only", async () => {
     const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.b, "b"), query(SQL.c, "c"), text([{ slot_id: "c", definition: { query_id: "q1" } }])] });

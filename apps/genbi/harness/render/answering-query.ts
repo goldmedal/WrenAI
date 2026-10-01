@@ -51,9 +51,11 @@ export function selectAnsweringCandidate<T extends { readonly sql?: string | und
   candidates: readonly T[],
   terminalValue: unknown,
 ): T | undefined {
-  // Cited by id: that candidate or none, never a fallback to the SQL text or the last table.
+  // Cited by id among candidates that carry host ids: that candidate or none, never a fallback
+  // to the SQL text or the last table. Candidates with no ids at all (the session loop's seeds)
+  // cannot resolve an id, so the citation falls through to the SQL and last-table rules.
   const id = namedAnswerQueryId(terminalValue);
-  if (id !== undefined) return candidates.find((candidate) => candidate.queryId === id);
+  if (id !== undefined && candidates.some((candidate) => candidate.queryId !== undefined)) return candidates.find((candidate) => candidate.queryId === id);
   const named = namedAnswerSql(terminalValue);
   if (named === undefined) return candidates.at(-1);
   const key = sqlKey(named);

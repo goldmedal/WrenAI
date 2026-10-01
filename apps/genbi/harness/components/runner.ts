@@ -388,15 +388,16 @@ export class ComponentRunner {
               assertActive();
               if (!accepting) throw new ExecutionFailure("cancelled");
               const saved = freeze(copy(input, COMPONENT_LIMITS.requestBytes));
-              const result = copy(await trackTool(grant.name, () => this.wait(tool.execute(saved, this.controller.signal))), COMPONENT_LIMITS.resultBytes);
+              const result: unknown = await trackTool(grant.name, () => this.wait(tool.execute(saved, this.controller.signal)));
               assertActive();
               // The id is assigned here, once, so the evidence and the model's copy carry the same
               // one; a tool's own `query_id` field is overwritten. The terminal cites it instead of
-              // re-typing SQL, and normalization resolves it against this evidence.
-              const output = isQueryGrant(grant) && result !== null && typeof result === "object" && !Array.isArray(result)
-                ? { ...(result as Record<string, unknown>), query_id: `q${++executedQueries}` } : result;
-              tools.push(freeze({ step: step.name, tool: grant.name, input: saved, output }));
-              return copy(output, COMPONENT_LIMITS.resultBytes);
+              // re-typing SQL, and normalization resolves it against this evidence. The size guard
+              // runs once, on the result as recorded, before anything is recorded.
+              const output = copy(isQueryGrant(grant) && result !== null && typeof result === "object" && !Array.isArray(result)
+                ? { ...(result as Record<string, unknown>), query_id: `q${++executedQueries}` } : result, COMPONENT_LIMITS.resultBytes);
+              tools.push(freeze({ step: step.name, tool: grant.name, input: saved, output: structuredClone(output) }));
+              return output;
             })();
             // The model sees the rejection as a tool error and may recover within the step. For
             // the host, a failed tool call fails the *step* (so a declared repair step can run and
