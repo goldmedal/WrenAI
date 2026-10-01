@@ -157,19 +157,22 @@ recorded as the profile's `admission.reason` and the profile stays listed as
    components, each with an authored `description`, enter at the profile
    scope; exactly one is pinned to that component; none refuses.
 
-6. a pinned entry component must not compose another component (a
-   `component_calls` alias such as `plan_report`'s `ask → answer_batch`): the
-   native CLI targets resolve a composition only through a trusted host handler
-   that a native session does not install, so the dispatcher refuses such a
-   launch outright. Inside a scope-entry profile a composing component is only
-   materialized unavailable, which is how `genbi-default`'s dashboard composer
-   ships today.
-
 The verdict is recomputed when the profile's bytes, the `warble` binary or
-the BFF's own rule set change. Of the shipped profiles, `genbi-report` is refused for composing and
-`genbi-monitor` for being assertive and scheduled; both stay listed with their
-reason. The two-stage report still runs in-process (see below), where the host
-is the composition handler.
+the BFF's own rule set change. Of the shipped profiles, `genbi-report` is
+admitted pinned to `plan_report` (`answer_batch` is callee-only) and
+`genbi-monitor` is refused for being assertive and scheduled; a refused profile
+stays listed with its reason.
+
+Admission describes the profile; it does not decide whether a native session
+can start. Each component summary records the composition edges its steps
+authorize (`plan_report`'s `ask → answer_batch`, `genbi-default`'s
+`generate_dashboard` `answer → answer_query`). The native CLI targets refuse
+**any** composing profile — the default included — unless the BFF provides a
+trusted component host for exactly the composed entries, and this package does
+not provision that host until the native composition runtime is certified (see
+"Component execution contracts" in the README). Until then native readiness
+reports every conversation profile unavailable with that reason, and the
+two-stage report runs in-process, where the harness is the composition handler.
 
 ### Starting a session inside a profile
 

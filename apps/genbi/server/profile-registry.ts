@@ -21,10 +21,14 @@
  *      an authored `description`, enter at the profile scope; exactly one is pinned; none refuses;
  *   6. the verdict is recomputed whenever the profile's bytes, the warble binary or this host's
  *      rule set change, and a profile that stops passing becomes unavailable rather than
- *      disappearing;
- *   7. a pinned entry component must not compose another component: the native CLI targets have
- *      no trusted invocation handler in a native session, so such a launch is refused outright
- *      (a composing component inside a scope-entry profile is merely materialized unavailable).
+ *      disappearing.
+ *
+ * Composition is recorded, not judged. A component whose steps authorize a component-call alias
+ * needs a trusted native component host at dispatch; the native CLI targets refuse ANY profile
+ * that composes when no host is provided — the shipped analysis profile included, whose dashboard
+ * composer is what makes native analysis unavailable until that host is provisioned. Whether the
+ * host exists is a runtime fact that native readiness reports per profile; admission only says
+ * what the profile is. Each component summary therefore carries its `composes` edges.
  *
  * Tool names (Read, Bash, Write) are a dispatcher materialization and are not in the IR, which is
  * why rule 3 is expressed over capabilities: that is the layer the compiler can vouch for.
@@ -63,11 +67,13 @@ export const HOST_TIERS: ReadonlySet<string> = new Set(["cheap", "strong"]);
 const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 /**
- * Bump when an admission rule is added or tightened. A stored verdict computed under an older rule
- * set is stale even when the profile bytes and the warble binary are unchanged — the rules are the
- * third input to the verdict. 1: rules 1–6. 2: rule 7, a pinned entry must not compose.
+ * Bump when an admission rule is added, tightened or withdrawn. A stored verdict computed under an
+ * older rule set is stale even when the profile bytes and the warble binary are unchanged — the
+ * rules are the third input to the verdict. 1: rules 1–6. 2: a pinned entry must not compose.
+ * 3: that rule withdrawn (the dispatcher refuses every composing profile without a host, so it
+ * never separated anything); composition is recorded on the component summary instead.
  */
-export const ADMISSION_RULES_VERSION = 2;
+export const ADMISSION_RULES_VERSION = 3;
 const MAX_REASON_LENGTH = 1200;
 const COMPILE_RETRY_DELAY_MS = 250;
 
@@ -94,6 +100,8 @@ export interface AdmissionComponentSummary {
   readonly capabilities: readonly string[];
   readonly hasDescription: boolean;
   readonly nativeEligible: boolean;
+  /** `alias → component` edges this component's steps authorize; non-empty means it composes. */
+  readonly composes: readonly string[];
 }
 
 export interface AdmissionVerdict {
@@ -194,6 +202,7 @@ function summarizeComponent(component: Json): AdmissionComponentSummary {
     // Mirrors what the dispatcher accepts as a native entry: a one-shot skill with no outcome that
     // a session may start directly. `entrypoint: false` marks a callee-only component.
     nativeEligible: hostScoped && realizationKind === "skill" && entrypoint,
+    composes: composedAliases(component),
   };
 }
 
@@ -259,21 +268,7 @@ export function admitCompiledProfile(ir: unknown, options: { readonly expectedId
   if (eligible.length === 0) {
     reasons.push("profile has no native-eligible component (a one-shot skill with no outcome that a session may start)");
   } else if (eligible.length === 1) {
-    // Rule 7 — native dispatchability of a pinned entry. A step that authorizes a component-call
-    // alias composes another component at run time; the native CLI targets resolve that only
-    // through a trusted host handler a native session does not install. Inside a scope-entry
-    // profile such a component is materialized unavailable and the session still starts (the
-    // shipped analysis profile's dashboard composer is one). Pinned as THE entry, the dispatcher
-    // refuses the whole launch instead (observed 2026-10-01, warble 0.15.2, `plan_report` →
-    // `answer_batch` on claude-code:interactive: "no trusted invocation handler is installed").
-    const pinned = eligible[0]!;
-    const pinnedJson = components.find((c) => stringAt(c, "id") === pinned.id);
-    const aliases = pinnedJson ? composedAliases(pinnedJson) : [];
-    if (aliases.length > 0) {
-      reasons.push(`component "${pinned.id}" would be the pinned entry but composes other components (${aliases.join(", ")}); composition is not dispatchable to the native CLI targets in this version`);
-    } else {
-      entry = { kind: "agent", verb: pinned.id };
-    }
+    entry = { kind: "agent", verb: eligible[0]!.id };
   } else {
     const undescribed = eligible.filter((c) => !c.hasDescription).map((c) => c.id);
     if (undescribed.length > 0) {

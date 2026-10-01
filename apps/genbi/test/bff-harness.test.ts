@@ -293,7 +293,7 @@ describe("GET /api/harness with a registry-selected conversation profile", () =>
   }
   const rows = {
     "team-kpis": { role: "conversation" as const, admitted: true, sourceDir: "/workspace/profiles/team-kpis" },
-    "genbi-report": { role: "conversation" as const, admitted: false, reason: 'component "plan_report" would be the pinned entry but composes other components', sourceDir: "/pkg/profiles/genbi-report" },
+    "genbi-monitor": { role: "conversation" as const, admitted: false, reason: 'component "monitor_freshness" is outside the host\'s execution scope', sourceDir: "/pkg/profiles/genbi-monitor" },
     "genbi-setup": { role: "system" as const, admitted: true, sourceDir: "/pkg/profiles/genbi-setup" },
   };
 
@@ -328,9 +328,9 @@ describe("GET /api/harness with a registry-selected conversation profile", () =>
   it("answers 409 with the registry's reason for an unavailable or system profile and 404 for an unknown one, without describing anything", async () => {
     const describeHarnessBundle = vi.fn(async () => loadBundle(buildSyntheticBundle({ profile: "team-kpis" })));
     const app = createApp({ store: new Store(":memory:"), route: noRoute(), baseRouteOptions: BASE_ROUTE_OPTIONS, describeHarnessBundle, profileRegistry: registryFor(rows) });
-    const unavailable = await app.request("/api/harness?purpose=analysis&profile=genbi-report");
+    const unavailable = await app.request("/api/harness?purpose=analysis&profile=genbi-monitor");
     expect(unavailable.status).toBe(409);
-    expect(await unavailable.json()).toEqual({ error: expect.stringMatching(/composes other components/) });
+    expect(await unavailable.json()).toEqual({ error: expect.stringMatching(/outside the host's execution scope/) });
     const system = await app.request("/api/harness?purpose=analysis&profile=genbi-setup");
     expect(system.status).toBe(409);
     expect(await system.json()).toEqual({ error: expect.stringMatching(/system purpose profile/) });

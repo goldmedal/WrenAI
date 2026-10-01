@@ -21,7 +21,7 @@ const root = mkdtempSync(path.join(tmpdir(), "genbi-profile-registry-live-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe("ProfileRegistry over the real warble", () => {
-  it("admits genbi-default (scope), refuses genbi-report (composition) and genbi-monitor (assertive), lists the two system profiles", async () => {
+  it("admits genbi-default (scope) and genbi-report (pinned to plan_report), refuses genbi-monitor (assertive), lists the two system profiles", async () => {
     const warbleBin = await resolveWarbleBinary();
     const registry = new ProfileRegistry({
       store: new Store(":memory:"),
@@ -35,8 +35,8 @@ describe("ProfileRegistry over the real warble", () => {
 
     expect(byId["genbi-default"]).toMatchObject({ role: "conversation", admissionStatus: "admitted", entryKind: "scope", admissionReason: null });
     expect(byId["genbi-default"]!.irVersion).toMatch(/^\d+\.\d+/);
-    expect(byId["genbi-report"]).toMatchObject({ role: "conversation", admissionStatus: "unavailable", entryKind: null });
-    expect(byId["genbi-report"]!.admissionReason).toMatch(/plan_report.*composes other components \(ask → answer_batch\)/);
+    expect(byId["genbi-report"]).toMatchObject({ role: "conversation", admissionStatus: "admitted", entryKind: "agent", entryVerb: "plan_report" });
+    expect((JSON.parse(byId["genbi-report"]!.componentsJson) as { id: string; composes: string[] }[]).find((c) => c.id === "plan_report")?.composes).toEqual(["ask → answer_batch"]);
     expect(byId["genbi-monitor"]).toMatchObject({ role: "conversation", admissionStatus: "unavailable", entryKind: null });
     expect(byId["genbi-monitor"]!.admissionReason).toMatch(/monitor_freshness.*assertive/);
     expect(byId["genbi-setup"]).toMatchObject({ role: "system", admissionStatus: "admitted" });

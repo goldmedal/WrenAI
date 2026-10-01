@@ -31,7 +31,7 @@ const ready = {
     'genbi-default': { id: 'genbi-default', scopeKind: 'bound_project', profile: 'genbi-default', target: 'claude-code:interactive', targetLabel: 'Claude CLI', available: true, entryKind: 'scope' },
     'team-kpis': { id: 'team-kpis', scopeKind: 'bound_project', profile: 'team-kpis', target: 'claude-code:interactive', targetLabel: 'Claude CLI', available: true, entryKind: 'scope' },
     'genbi-survey': { id: 'genbi-survey', scopeKind: 'bound_project', profile: 'genbi-survey', target: 'claude-code:interactive', targetLabel: 'Claude CLI', available: true, entryKind: 'agent', entryVerb: 'explore_model' },
-    'genbi-report': { id: 'genbi-report', scopeKind: 'bound_project', profile: 'genbi-report', target: 'claude-code:interactive', targetLabel: 'Claude CLI', available: false, reason: 'component "plan_report" would be the pinned entry but composes other components' },
+    'genbi-monitor': { id: 'genbi-monitor', scopeKind: 'bound_project', profile: 'genbi-monitor', target: 'claude-code:interactive', targetLabel: 'Claude CLI', available: false, reason: 'component "monitor_freshness" is outside the host\'s execution scope' },
   },
 } as const;
 
@@ -71,9 +71,9 @@ describe('New session — conversation profile picker', () => {
     const user = await openMenu();
     await user.click(screen.getByRole('combobox', { name: 'Conversation profile' }));
     const listbox = await screen.findByRole('listbox');
-    const reportOption = within(listbox).getByText('genbi-report').closest('[role="option"]') as HTMLElement;
-    expect(reportOption).toHaveAttribute('aria-disabled', 'true');
-    expect(within(reportOption).getByText(/composes other components/)).toBeInTheDocument();
+    const monitorOption = within(listbox).getByText('genbi-monitor').closest('[role="option"]') as HTMLElement;
+    expect(monitorOption).toHaveAttribute('aria-disabled', 'true');
+    expect(within(monitorOption).getByText(/outside the host's execution scope/)).toBeInTheDocument();
     await user.click(within(listbox).getByText('team-kpis'));
     expect(screen.getByText(/Enters at the profile scope/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Start separate native terminal' }));

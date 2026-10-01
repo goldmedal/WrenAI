@@ -21,7 +21,7 @@ const registry = [
   { id: 'genbi-setup', kind: 'builtin', role: 'system', selectable: false, admission: { status: 'admitted', reason: 'system purpose profile', checkedAt: stamp }, ...base },
   { id: 'genbi-enrich-context', kind: 'builtin', role: 'system', selectable: false, admission: { status: 'admitted', reason: 'system purpose profile', checkedAt: stamp }, ...base },
   { id: 'genbi-default', kind: 'builtin', role: 'conversation', selectable: true, admission: { status: 'admitted', checkedAt: stamp }, entry: { kind: 'scope' }, ...base },
-  { id: 'genbi-report', kind: 'builtin', role: 'conversation', selectable: false, admission: { status: 'unavailable', reason: 'composition is not dispatchable to the native CLI targets in this version', checkedAt: stamp }, ...base },
+  { id: 'genbi-monitor', kind: 'builtin', role: 'conversation', selectable: false, admission: { status: 'unavailable', reason: 'component "monitor_freshness" is outside the host\'s execution scope', checkedAt: stamp }, ...base },
   { id: 'team-kpis', kind: 'user', role: 'conversation', selectable: true, admission: { status: 'admitted', checkedAt: stamp }, entry: { kind: 'agent', verb: 'explore_model' }, sourceDir: '/workspace/profiles/team-kpis', ...base },
 ] as const;
 
@@ -38,10 +38,10 @@ describe('Harness sidebar — registry-driven profiles (live mode)', () => {
     const sidebar = await screen.findByRole('navigation', { name: 'Profiles' });
     await waitFor(() => expect(within(sidebar).getByRole('button', { name: /team-kpis/ })).toBeInTheDocument());
     expect(within(sidebar).getAllByRole('button').map((button) => button.textContent)).toEqual([
-      expect.stringMatching(/^Setup/), expect.stringMatching(/^Context enrichment/), expect.stringMatching(/^Analyze data/), expect.stringMatching(/^genbi-report/), expect.stringMatching(/^team-kpis/),
+      expect.stringMatching(/^Setup/), expect.stringMatching(/^Context enrichment/), expect.stringMatching(/^Analyze data/), expect.stringMatching(/^genbi-monitor/), expect.stringMatching(/^team-kpis/),
     ]);
-    expect(within(sidebar).getByRole('button', { name: /genbi-report/ })).toBeDisabled();
-    expect(within(sidebar).getByText(/composition is not dispatchable/)).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: /genbi-monitor/ })).toBeDisabled();
+    expect(within(sidebar).getByText(/outside the host's execution scope/)).toBeInTheDocument();
     expect(within(sidebar).getByText(/user · enters at explore_model/)).toBeInTheDocument();
   });
 

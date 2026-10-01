@@ -20,9 +20,11 @@ describe('Harness page (fixture mode)', () => {
     expect(within(sidebar).getByRole('button', { name: /Analyze data/ })).toBeEnabled();
     expect(within(sidebar).getByRole('button', { name: /Context enrichment/ })).toBeEnabled();
     expect(within(sidebar).getByRole('button', { name: /team-kpis/ })).toBeEnabled();
-    expect(within(sidebar).getByRole('button', { name: /genbi-report/ })).toBeDisabled();
-    expect(within(sidebar).getByText(/composition is not dispatchable/)).toBeInTheDocument();
-    expect(within(sidebar).getAllByRole('button')).toHaveLength(5);
+    expect(within(sidebar).getByRole('button', { name: /genbi-report/ })).toBeEnabled();
+    expect(within(sidebar).getByText(/enters at plan_report/)).toBeInTheDocument();
+    expect(within(sidebar).getByRole('button', { name: /genbi-monitor/ })).toBeDisabled();
+    expect(within(sidebar).getByText(/outside the host's execution scope/)).toBeInTheDocument();
+    expect(within(sidebar).getAllByRole('button')).toHaveLength(6);
     // Fixture mode says so, and the registration form is inert.
     const addProfile = screen.getByRole('region', { name: 'Add profile' });
     expect(within(addProfile).getByText('Fixture')).toBeInTheDocument();
