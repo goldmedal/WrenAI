@@ -381,6 +381,7 @@ export function toWarbleProfileDto(row: WarbleProfileRow): WarbleProfileDto {
       hasDescription: c.hasDescription,
       tiers: c.tiers,
       capabilities: c.capabilities,
+      composes: Array.isArray(c.composes) ? c.composes : [],
     })),
     ...(row.kind === "user" ? { sourceDir: row.sourceDir } : {}),
     createdAt: row.createdAt,

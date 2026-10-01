@@ -854,12 +854,12 @@ export interface WarbleProfile {
   id: string;
   kind: 'builtin' | 'user';
   role: 'conversation' | 'system';
-  /** Conversation role AND admitted: the one bit a picker needs. */
+  /** The registry's verdict: conversation role AND admitted. Whether a session can start now is readiness's answer. */
   selectable: boolean;
   admission: { status: 'admitted' | 'unavailable'; reason?: string; checkedAt: string };
   entry?: { kind: 'scope' | 'agent'; verb?: string };
   irVersion?: string;
-  components: { id: string; type: string; nativeEligible: boolean; hasDescription: boolean; tiers: string[]; capabilities: string[] }[];
+  components: { id: string; type: string; nativeEligible: boolean; hasDescription: boolean; tiers: string[]; capabilities: string[]; composes: string[] }[];
   /** Where the BFF keeps its copy; user profiles only. */
   sourceDir?: string;
   createdAt: string;

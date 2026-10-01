@@ -100,6 +100,23 @@ describe('New session — conversation profile picker', () => {
     expect(client.create.mock.calls[1]?.[1]).toEqual({ intent: 'start_separate', idempotencyKey: expect.any(String) });
   });
 
+  it('disables every option and Start when the runtime itself is unavailable, showing that reason for the default', async () => {
+    const runtimeReason = 'Native component execution has not been provisioned for this profile.';
+    const down = { ...analysis, available: false, reason: runtimeReason } as const;
+    client.readiness.mockResolvedValue({
+      ...ready,
+      purposes: { ...ready.purposes, analysis: down },
+      profiles: Object.fromEntries(Object.entries(ready.profiles).map(([id, entry]) => [id, { ...entry, available: false, reason: id === 'genbi-monitor' ? ready.profiles['genbi-monitor'].reason : runtimeReason }])),
+    });
+    const user = await openMenu();
+    expect(screen.getByTestId('native-session-reason')).toHaveTextContent(runtimeReason);
+    expect(screen.getByRole('button', { name: 'Start separate native terminal' })).toBeDisabled();
+    await user.click(screen.getByRole('combobox', { name: 'Conversation profile' }));
+    const listbox = await screen.findByRole('listbox');
+    for (const option of within(listbox).getAllByRole('option')) expect(option).toHaveAttribute('aria-disabled', 'true');
+    expect(client.create).not.toHaveBeenCalled();
+  });
+
   it('shows the selected profile on running sessions in the list and omits it for the default', async () => {
     client.list.mockResolvedValue({ sessions: [session('run-a'), session('run-b', 'team-kpis')] });
     renderWithProviders(<SessionsSidebar />, { route: '/sessions' });

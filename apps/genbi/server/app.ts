@@ -1560,8 +1560,10 @@ export function createApp(deps: TurnDeps) {
 
   app.delete("/api/profiles/:id", async (c) => {
     if (!deps.profileRegistry) return c.json({ error: "the profile registry is not configured on this BFF instance" }, 503);
+    const id = c.req.param("id");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) return c.json({ error: "profile id is invalid" }, 400);
     try {
-      await deps.profileRegistry.remove(c.req.param("id"));
+      await deps.profileRegistry.remove(id);
       return c.body(null, 204);
     } catch (error) {
       return profileRegistryFailure(c, error);

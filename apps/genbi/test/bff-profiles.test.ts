@@ -68,6 +68,8 @@ describe("/api/profiles", () => {
     expect(Object.keys(byId).sort()).toEqual(["genbi-default", "genbi-enrich-context", "genbi-monitor", "genbi-report", "genbi-setup"]);
     expect(byId["genbi-default"]).toMatchObject({ kind: "builtin", role: "conversation", selectable: true, admission: { status: "admitted" }, entry: { kind: "scope" } });
     expect(byId["genbi-default"]!.components.map((c) => c.id)).toEqual(["explore_model", "answer_query", "generate_dashboard", "explain_change"]);
+    expect(byId["genbi-default"]!.components.find((c) => c.id === "generate_dashboard")?.composes).toEqual(["answer → answer_query"]);
+    expect(byId["genbi-report"]!.components.find((c) => c.id === "plan_report")?.composes).toEqual(["ask → answer_batch"]);
     expect(byId["genbi-report"]).toMatchObject({ selectable: true, entry: { kind: "agent", verb: "plan_report" } });
     expect(byId["genbi-monitor"]).toMatchObject({ selectable: false, admission: { status: "unavailable", reason: expect.stringMatching(/assertive/) } });
     expect(byId["genbi-setup"]).toMatchObject({ role: "system", selectable: false, admission: { status: "admitted", reason: expect.stringMatching(/system purpose/) } });
@@ -113,6 +115,7 @@ describe("/api/profiles", () => {
 
     expect((await app.request("/api/profiles/genbi-default", { method: "DELETE" })).status).toBe(409);
     expect((await app.request("/api/profiles/never-registered", { method: "DELETE" })).status).toBe(404);
+    expect((await app.request("/api/profiles/Bad%20Id", { method: "DELETE" })).status).toBe(400);
 
     const deleted = await app.request("/api/profiles/temporary", { method: "DELETE" });
     expect(deleted.status).toBe(204);

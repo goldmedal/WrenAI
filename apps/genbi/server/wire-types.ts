@@ -898,7 +898,8 @@ export type SseFrame =
 // ---------------------------------------------------------------------------
 // Warble profile registry (`/api/profiles`). A browser selects a conversation
 // profile by `id`; it never names a directory or a launch tuple. `selectable`
-// is the one bit a picker needs: conversation role AND admitted.
+// is the registry's verdict (conversation role AND admitted); whether a native
+// session can start right now is native readiness's answer, per profile.
 // ---------------------------------------------------------------------------
 
 export interface WarbleProfileDto {
@@ -922,6 +923,8 @@ export interface WarbleProfileDto {
     readonly hasDescription: boolean;
     readonly tiers: readonly string[];
     readonly capabilities: readonly string[];
+    /** `alias → component` edges this component's steps authorize; non-empty means it composes. */
+    readonly composes: readonly string[];
   }[];
   /** Where the registry keeps its copy; user profiles only. */
   readonly sourceDir?: string;

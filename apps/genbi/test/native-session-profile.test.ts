@@ -57,7 +57,7 @@ const PROFILES: Record<string, NativeProfileSelection> = {
   "genbi-report": { id: "genbi-report", sourceDir: "/registry/genbi-report", entry: { kind: "agent", verb: "plan_report" } },
 };
 
-function buildService(options: { provider: "claude" | "codex"; resolver?: boolean; unavailable?: Record<string, string> }) {
+function buildService(options: { provider: "claude" | "codex"; resolver?: boolean; unavailable?: Record<string, string>; analysisUnavailable?: boolean }) {
   const { dir, binding, irPath } = projectFixture();
   const stateParent = scratch("state");
   const state = initializeNativeSessionStateBase(path.join(stateParent, "bff.sqlite"));
@@ -103,6 +103,7 @@ function buildService(options: { provider: "claude" | "codex"; resolver?: boolea
         { id: "genbi-monitor", selectable: false, reason: "component \"monitor_freshness\" is outside the host's execution scope" },
       ],
     }),
+    ...(options.analysisUnavailable ? { producerAvailable: () => false } : {}),
   });
   let currentProfile = "genbi-default";
   const launch = async (profile?: string, idempotencyKey = `key-${Math.random()}`) => {
@@ -220,6 +221,17 @@ describe("analysis sessions inside a selected conversation profile", () => {
     await expect(service.resume({ id: resumed.row.id, idempotencyKey: "00000000-0000-4000-8000-000000000302" })).rejects.toThrow(/outside the host ceiling: filesystem_write/);
     expect(record.entries).toHaveLength(2);
     expect(store.listNativeSessions().filter((row) => row.status === "running")).toEqual([]);
+    await service.shutdown();
+  });
+
+  it("keeps a refused profile's own reason ahead of a runtime reason, so a picker can tell permanent from transient", async () => {
+    const { service } = buildService({ provider: "claude", analysisUnavailable: true });
+    const readiness = await service.readiness();
+    expect(readiness.purposes.analysis.available).toBe(false);
+    const runtimeReason = readiness.purposes.analysis.reason!;
+    expect(readiness.profiles!["genbi-default"]).toMatchObject({ available: false, reason: runtimeReason });
+    expect(readiness.profiles!["team-kpis"]).toMatchObject({ available: false, reason: runtimeReason });
+    expect(readiness.profiles!["genbi-monitor"]).toMatchObject({ available: false, reason: expect.stringMatching(/outside the host's execution scope/) });
     await service.shutdown();
   });
 

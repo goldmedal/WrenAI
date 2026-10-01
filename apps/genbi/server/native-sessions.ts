@@ -1630,8 +1630,10 @@ export class NativeSessionService {
     const result: Record<string, NativeProfileReadiness> = {};
     for (const summary of summaries) {
       const custom = summary.id !== DEFAULT_CONVERSATION_PROFILE;
-      const reason = analysis.reason
-        ?? (!summary.selectable ? summary.reason ?? "this profile is unavailable" : undefined)
+      // A profile the registry refused is refused for good; say that before any runtime reason,
+      // which may come and go, so a picker can tell the two apart.
+      const reason = (!summary.selectable ? summary.reason ?? "this profile is unavailable" : undefined)
+        ?? analysis.reason
         ?? (custom && provider !== undefined && provider !== "claude" ? CODEX_CUSTOM_PROFILE_UNAVAILABLE : undefined);
       result[summary.id] = {
         id: summary.id,
