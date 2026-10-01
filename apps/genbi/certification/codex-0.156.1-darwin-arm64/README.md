@@ -66,6 +66,14 @@ every drift is denied. To clear it, re-run the acceptance flow above on the new
 versions and refresh the hashed records and the row (versions and digests)
 together; never edit these records to match a bump.
 
+The gate compares installed package versions only. Explicit binary overrides
+(`WREN_HARNESS_WARBLE_BIN`, `WREN_HARNESS_CONTEXT_LOADER_BIN`, an in-repo
+`core/wren-context-loader/target/*` build that outranks the package, or a
+PATH-tier `warble` when `@warble/cli` cannot be resolved) run code the gate does
+not see, so such configurations are outside the certified row by definition.
+Denying them is a separate follow-up decision, because it would block Codex
+native in development checkouts.
+
 ## Official remote terminal
 
 The `remote-tui-v1` transport has separate deterministic, installed candidate and

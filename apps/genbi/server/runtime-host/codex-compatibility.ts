@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { runtimeNotReady, runtimeReady } from "./policy.js";
-import type { RuntimeBackendProbeResult } from "./types.js";
+import type { RuntimeBackendDiagnostic, RuntimeBackendReadiness } from "./types.js";
 
 export const CODEX_BASELINE_VERSION = "0.156.1";
 export const CODEX_REQUIRED_CONTRACTS = [
@@ -74,29 +74,43 @@ function packageRoot(): string {
   const parent = path.resolve(server, "..");
   return path.basename(parent) === "dist-server" ? path.resolve(parent, "..") : parent;
 }
-function versionOf(file: string, field?: CodexDependencyPackage): string | undefined {
+function declaredPin(name: CodexDependencyPackage): string | undefined {
   try {
-    const manifest = JSON.parse(readFileSync(file, "utf8")) as { version?: unknown; dependencies?: Record<string, unknown> };
-    const value = field ? manifest.dependencies?.[field] : manifest.version;
+    const value = (JSON.parse(readFileSync(path.join(packageRoot(), "package.json"), "utf8")) as { dependencies?: Record<string, unknown> }).dependencies?.[name];
     return typeof value === "string" ? value : undefined;
   } catch { return undefined; }
+}
+
+export interface CodexDependencyReaders {
+  /** Manifest path, or undefined only when Node cannot resolve the package at all. */
+  readonly resolve?: (name: CodexDependencyPackage) => string | undefined;
+  readonly read?: (file: string) => string;
+  readonly declared?: (name: CodexDependencyPackage) => string | undefined;
 }
 
 /**
  * The installed package manifests are authoritative: what Node resolves is what runs, and a
  * consumer's overrides can make it differ from this package's declared pin. Every npm package
  * ships its own package.json and all of these resolve `<name>/package.json`, so a packed install
- * can read them. This package's declared exact pin is the fallback only when a manifest cannot be
- * resolved; a dependency found in neither stays undefined and therefore counts as drifted.
+ * can read them. This package's declared exact pin is the fallback only when a package cannot be
+ * resolved at all; a resolved manifest that cannot be read or carries no version is "unreadable"
+ * and therefore drifts, as does a dependency found in neither place.
  */
-export function installedCodexDependencies(
-  readInstalled: (name: CodexDependencyPackage) => string | undefined = (name) => {
-    try { return versionOf(createRequire(import.meta.url).resolve(`${name}/package.json`)); } catch { return undefined; }
-  },
-  readDeclared: (name: CodexDependencyPackage) => string | undefined = (name) => versionOf(path.join(packageRoot(), "package.json"), name),
-): CodexInstalledDependencies {
+export function installedCodexDependencies({
+  resolve = (name) => { try { return createRequire(import.meta.url).resolve(`${name}/package.json`); } catch { return undefined; } },
+  read = (file) => readFileSync(file, "utf8"),
+  declared = declaredPin,
+}: CodexDependencyReaders = {}): CodexInstalledDependencies {
+  const installedVersion = (name: CodexDependencyPackage): string | undefined => {
+    const manifest = resolve(name);
+    if (manifest === undefined) return declared(name);
+    try {
+      const version = (JSON.parse(read(manifest)) as { version?: unknown }).version;
+      return typeof version === "string" ? version : "unreadable";
+    } catch { return "unreadable"; }
+  };
   return Object.fromEntries((Object.keys(CODEX_DEPENDENCY_PACKAGES) as CodexDependencyPackage[])
-    .map((name) => [name, readInstalled(name) ?? readDeclared(name)]));
+    .map((name) => [name, installedVersion(name)]));
 }
 
 /** Each entry names one drifted package as `name: certified X, installed Y`. */
@@ -106,10 +120,9 @@ export function codexDependencyDrift(certified: CodexCertification["dependencies
     .map(([name, key]) => `${name}: certified ${certified[key]}, installed ${installed[name] ?? "unresolved"}`);
 }
 
-export type CodexIdentityVerdict = RuntimeBackendProbeResult<"codex-app-server"> & {
-  /** Host-only detail for `codex_dependencies_drifted`; readiness text stays the fixed reason message. */
-  readonly drift?: readonly string[];
-};
+/** Host-only diagnostic; `drift` details `codex_dependencies_drifted` and never enters readiness text. */
+export type CodexIdentityDiagnostic = RuntimeBackendDiagnostic & { readonly drift?: readonly string[] };
+export type CodexIdentityVerdict = { readonly readiness: RuntimeBackendReadiness<"codex-app-server">; readonly diagnostic: CodexIdentityDiagnostic };
 
 export interface CodexObservedIdentity {
   readonly platform: string;
@@ -144,7 +157,10 @@ export function evaluateCodexIdentity(
   // The row's evidence was accepted with exact component versions; a matching binary running
   // other components is not what was certified, so it stays denied until re-certification.
   const drift = codexDependencyDrift(row.dependencies, installed);
-  if (drift.length > 0) return { ...deny("codex_dependencies_drifted", "identity"), drift };
+  if (drift.length > 0) {
+    const denied = deny("codex_dependencies_drifted", "identity");
+    return { ...denied, diagnostic: { ...denied.diagnostic, drift } };
+  }
   return {
     readiness: runtimeReady(row.version, ["app_server_rpc", "sandbox_policy", "filesystem_isolation", "network_isolation", "pty", "terminal_resize", "terminal_terminate"]),
     diagnostic: { phase: "capability", observedVersion: row.version },

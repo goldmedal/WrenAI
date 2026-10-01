@@ -31,7 +31,7 @@ describe("Codex exact certification", () => {
   });
   it("admits a certified row only while every installed component matches its record", () => {
     expect(evaluateCodexIdentity(observed, [row], installed)).toMatchObject({ readiness: { state: "ready" } });
-    expect(evaluateCodexIdentity(observed, [row], installed)).not.toHaveProperty("drift");
+    expect(evaluateCodexIdentity(observed, [row], installed).diagnostic).not.toHaveProperty("drift");
   });
   it.each([
     [{ "@warble/cli": "1.2.4" }, ["@warble/cli: certified 1.2.3, installed 1.2.4"]],
@@ -45,21 +45,45 @@ describe("Codex exact certification", () => {
   ])("denies a drifted install %o even though identity, protocol and evidence verify", (change, drift) => {
     const result = evaluateCodexIdentity(observed, [row], { ...installed, ...change });
     expect(result.readiness).toMatchObject({ state: "incompatible", code: "codex_dependencies_drifted" });
-    expect(result.drift).toEqual(drift);
+    expect(result.diagnostic.drift).toEqual(drift);
     expect(result.readiness).toEqual(runtimeNotReady("codex-app-server", "incompatible", "codex_dependencies_drifted"));
   });
   it("keeps the drift reason and its fixed text through the browser-safe readiness projection", () => {
     const denied = evaluateCodexIdentity(observed, [row], { ...installed, "@warble/ir-spec": "4.6.0" });
-    expect(sanitizeRuntimeReadiness("codex-app-server", denied.readiness)).toEqual(denied.readiness);
+    const projected = sanitizeRuntimeReadiness("codex-app-server", denied.readiness);
+    expect(projected).toEqual(denied.readiness);
     expect(denied.readiness).toMatchObject({ message: expect.stringContaining("re-certify") });
+    expect(denied.diagnostic.drift).toEqual(["@warble/ir-spec: certified 4.5.6, installed 4.6.0"]);
+    expect(JSON.stringify(projected)).not.toContain("installed 4.6.0");
+    expect(JSON.stringify(projected)).not.toContain("@warble/ir-spec");
   });
   it("prefers installed manifests and falls back to the declared pin only when a manifest is unresolvable", () => {
     const declared = (name: string) => `declared-${name}`;
-    expect(installedCodexDependencies((name) => name === "@warble/ir-spec" ? undefined : "9.9.9", declared)).toEqual({
+    const resolve = (name: string) => name === "@warble/ir-spec" ? undefined : `/manifests/${name}`;
+    expect(installedCodexDependencies({ resolve, read: () => JSON.stringify({ version: "9.9.9" }), declared })).toEqual({
       "@warble/cli": "9.9.9", "@warble/codex-local": "9.9.9", "@warble/claude-agent-sdk": "9.9.9",
       "@warble/ir-spec": "declared-@warble/ir-spec", "@wrenai/context-loader": "9.9.9",
     });
-    expect(installedCodexDependencies(() => undefined, () => undefined)).toEqual({});
+    expect(installedCodexDependencies({ resolve: () => undefined, declared: () => undefined })).toEqual({});
+  });
+  it.each([
+    ["throws", () => { throw new Error("EIO"); }],
+    ["is truncated", () => "{\"name\": \"@warble/cli\", \"vers"],
+    ["has no version", () => "{}"],
+  ])("never falls back to a matching pin when a resolved manifest %s", (_label, broken) => {
+    const read = (file: string) => file === "/manifests/@warble/cli" ? broken() : JSON.stringify({ version: file.includes("ir-spec") ? "4.5.6" : file.includes("context-loader") ? "7.8.9" : "1.2.3" });
+    const live = installedCodexDependencies({ resolve: (name) => `/manifests/${name}`, read, declared: () => "1.2.3" });
+    expect(live["@warble/cli"]).toBe("unreadable");
+    const result = evaluateCodexIdentity(observed, [row], live);
+    expect(result.readiness).toMatchObject({ code: "codex_dependencies_drifted" });
+    expect(result.diagnostic.drift).toEqual(["@warble/cli: certified 1.2.3, installed unreadable"]);
+  });
+  it("reads every installed manifest without the declared-pin fallback", () => {
+    // Same check the packed-install acceptance makes, so a dead manifest reader fails here too.
+    const declared = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).dependencies;
+    const manifests = installedCodexDependencies({ declared: () => undefined });
+    expect(Object.keys(manifests).sort()).toEqual(["@warble/claude-agent-sdk", "@warble/cli", "@warble/codex-local", "@warble/ir-spec", "@wrenai/context-loader"]);
+    for (const [name, version] of Object.entries(manifests)) expect(version, name).toBe(declared[name]);
   });
   it("gives the live install the verdict its declared pins and the certified record imply", () => {
     // Pins the gate's behaviour across a dependency bump instead of failing CI on one:
@@ -78,7 +102,7 @@ describe("Codex exact certification", () => {
       executableSha256: certified.executableSha256, source: certified.source, protocolSha256: certified.protocolSha256,
       contracts: certified.contracts });
     if (expected.length === 0) expect(result).toMatchObject({ readiness: { state: "ready" } });
-    else expect(result).toMatchObject({ readiness: { code: "codex_dependencies_drifted" }, drift: expected });
+    else expect(result).toMatchObject({ readiness: { code: "codex_dependencies_drifted" }, diagnostic: { drift: expected } });
   });
   it("requires separate terminal evidence in addition to driver certification", () => {
     const check = (value: unknown, model = "gpt-5.5", entry = "answer_query") => isCodexTerminalCertified(row.source, row.executableSha256, [model], entry, [value]);

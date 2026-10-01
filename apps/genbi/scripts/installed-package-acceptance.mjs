@@ -509,7 +509,7 @@ async function verifyInstalledCodexBackend(input) {
     import { CodexSession } from ${JSON.stringify(moduleUrl("codex-session"))};
     // The dependency-drift gate must read real installed manifests here, not the declared-pin fallback.
     const declared = JSON.parse(readFileSync(${JSON.stringify(path.join(installedPackageRoot, "package.json"))}, 'utf8')).dependencies;
-    const manifests = installedCodexDependencies(undefined, () => undefined);
+    const manifests = installedCodexDependencies({ declared: () => undefined });
     assert.deepEqual(Object.keys(manifests).sort(), ['@warble/claude-agent-sdk', '@warble/cli', '@warble/codex-local', '@warble/ir-spec', '@wrenai/context-loader']);
     for (const [name, version] of Object.entries(manifests)) assert.equal(version, declared[name], name);
     for (const row of CODEX_CERTIFIED_ROWS) {

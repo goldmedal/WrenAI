@@ -10,6 +10,7 @@ vi.mock("../server/runtime-host/codex-compatibility.js", async (importOriginal) 
 import { CodexAppServerBackend } from "../server/runtime-host/codex-app-server.js";
 import { ManagedWrenRuntimeError } from "../server/managed-wren-runtime.js";
 import { CODEX_REQUIRED_CONTRACTS, installedCodexDependencies } from "../server/runtime-host/codex-compatibility.js";
+import { sanitizeRuntimeReadiness } from "../server/runtime-host/policy.js";
 import type { RpcTransport } from "../server/runtime-host/codex-rpc.js";
 const runtime = { manifest_digest: "a".repeat(64), closure_digest: "b".repeat(64), generation_root: "/generation" };
 const vendor = { name: "vendor", executable: "/codex", identity: `sha256:${"c".repeat(64)}`, digest: `sha256:${"c".repeat(64)}` };
@@ -52,7 +53,10 @@ describe("Codex backend grants", () => {
   });
   it("denies a certified row whose installed components drifted before any launch effect", async () => {
     mocks.rows.splice(0, mocks.rows.length, { ...row, dependencies: { ...row.dependencies, ir: "0.0.1" } }); const value = backend();
-    expect((await value.probe()).readiness).toMatchObject({ state: "incompatible", code: "codex_dependencies_drifted" });
+    const probed = await value.probe();
+    expect(probed.readiness).toMatchObject({ state: "incompatible", code: "codex_dependencies_drifted" });
+    expect(probed.diagnostic.drift).toEqual([`@warble/ir-spec: certified 0.0.1, installed ${row.dependencies.ir}`]);
+    expect(JSON.stringify(sanitizeRuntimeReadiness("codex-app-server", probed.readiness))).not.toContain("certified 0.0.1");
     expect(() => value.prepareLaunch()).toThrow(expect.objectContaining({ code: "codex_dependencies_drifted" }));
     expect(value.retainedManifestDigests()).toEqual([]); expect(mocks.spawn).not.toHaveBeenCalled(); expect(mocks.policy).not.toHaveBeenCalled();
   });
