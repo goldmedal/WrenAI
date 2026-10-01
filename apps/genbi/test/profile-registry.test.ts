@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "../server/db.js";
 import {
+  ADMISSION_RULES_VERSION,
   BUILTIN_PROFILE_ROLES,
   ProfileRegistry,
   ProfileRegistryError,
@@ -110,11 +111,25 @@ describe("admitCompiledProfile over the shipped goldens", () => {
     expect(verdict.irVersion).toBeDefined();
   });
 
-  it("admits genbi-report pinned to plan_report: answer_batch is callee-only, so exactly one component is eligible", () => {
+  it("refuses genbi-report: its only eligible component would be the pinned entry and it composes, which the native targets refuse — nothing else is wrong with it", () => {
     const verdict = admitCompiledProfile(golden("genbi-report"), { expectedId: "genbi-report", ceiling });
+    expect(verdict.status).toBe("unavailable");
+    expect(verdict.reasons).toEqual([expect.stringMatching(/plan_report.*pinned entry but composes other components \(ask → answer_batch\); composition is not dispatchable/)]);
+    expect(verdict.components.find((c) => c.id === "answer_batch")).toMatchObject({ entrypoint: false, nativeEligible: false });
+  });
+
+  it("rule 7 is about the pinned entry only: genbi-default's dashboard composer is admitted inside a scope-entry profile", () => {
+    const composer = components(golden("genbi-default")).find((c) => c["id"] === "generate_dashboard")!;
+    expect((composer["llm_calls"] as Json[]).some((call) => Array.isArray(call["component_calls"]) && (call["component_calls"] as unknown[]).length > 0)).toBe(true);
+    expect(admitCompiledProfile(golden("genbi-default"), { expectedId: "genbi-default", ceiling }).status).toBe("admitted");
+  });
+
+  it("rule 7: a profile with the same shape but no composition edge is admitted pinned to its one eligible component", () => {
+    const ir = structuredClone(golden("genbi-report"));
+    for (const c of components(ir)) for (const call of c["llm_calls"] as Json[]) delete call["component_calls"];
+    const verdict = admitCompiledProfile(ir, { expectedId: "genbi-report", ceiling });
     expect(verdict.status).toBe("admitted");
     expect(verdict.entry).toEqual({ kind: "agent", verb: "plan_report" });
-    expect(verdict.components.find((c) => c.id === "answer_batch")).toMatchObject({ entrypoint: false, nativeEligible: false });
   });
 
   it("refuses genbi-monitor: an assertive scheduled assertion is outside the host's execution scope", () => {
@@ -253,7 +268,7 @@ describe("ProfileRegistry", () => {
 
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
     expect(byId["genbi-default"]).toMatchObject({ kind: "builtin", role: "conversation", admissionStatus: "admitted", entryKind: "scope", entryVerb: null });
-    expect(byId["genbi-report"]).toMatchObject({ role: "conversation", admissionStatus: "admitted", entryKind: "agent", entryVerb: "plan_report" });
+    expect(byId["genbi-report"]).toMatchObject({ role: "conversation", admissionStatus: "unavailable", entryKind: null, admissionReason: expect.stringMatching(/composition is not dispatchable/) });
     expect(byId["genbi-monitor"]).toMatchObject({ role: "conversation", admissionStatus: "unavailable", entryKind: null });
     expect(byId["genbi-monitor"]!.admissionReason).toMatch(/assertive/);
     expect(byId["genbi-setup"]).toMatchObject({ role: "system", admissionStatus: "admitted", admissionReason: expect.stringMatching(/system purpose/) });
@@ -304,7 +319,7 @@ describe("ProfileRegistry", () => {
       warbleIdentity: async () => "warble:test",
     });
     const rows = await registry.list();
-    expect(rows.find((r) => r.id === "genbi-report")).toMatchObject({ admissionStatus: "admitted", entryVerb: "plan_report" });
+    expect(rows.find((r) => r.id === "genbi-report")).toMatchObject({ admissionStatus: "unavailable", admissionReason: expect.stringMatching(/composition is not dispatchable/) });
     expect(reportCompiles).toBe(2);
   });
 
@@ -480,6 +495,21 @@ describe("ProfileRegistry", () => {
     mkdirSync(path.join(root, "workspace", "profiles", "leftover"));
     const leftover = writeUserProfile(path.join(root, "c"), "leftover", syntheticIr("leftover"));
     await expect(registry.add(leftover)).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/already exists/) });
+  });
+
+  it("re-admits an admitted user profile whose verdict was computed under an older rule set, even with unchanged bytes and binary", async () => {
+    const root = scratchDir("rules-version");
+    const store = new Store(":memory:");
+    const calls: string[] = [];
+    const row = await registryFor(root, store, { calls }).add(writeUserProfile(path.join(root, "authored"), "aged", syntheticIr("aged")));
+    expect(row.rulesVersion).toBe(ADMISSION_RULES_VERSION);
+    // Simulate a database written by a host whose rule set predates the current one.
+    store.upsertWarbleProfile({ ...row, rulesVersion: ADMISSION_RULES_VERSION - 1 });
+    const before = calls.filter((c) => c.endsWith("aged")).length;
+    const after = (await registryFor(root, store, { calls }).list()).find((r) => r.id === "aged")!;
+    expect(calls.filter((c) => c.endsWith("aged")).length).toBe(before + 1);
+    expect(after.rulesVersion).toBe(ADMISSION_RULES_VERSION);
+    expect(after.admissionStatus).toBe("admitted");
   });
 
   it("marks a user profile whose directory disappeared as unavailable instead of dropping it", async () => {

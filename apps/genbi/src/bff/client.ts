@@ -204,10 +204,24 @@ export interface RuntimeHostReadiness {
   backends: Readonly<Record<RuntimeBackendId, RuntimeBackendReadiness>>;
 }
 
+/** Analysis readiness narrowed to one conversation profile; present when the BFF has a profile registry. */
+export interface NativeProfileReadiness {
+  id: string;
+  scopeKind: 'bound_project';
+  profile: string;
+  target?: 'claude-code:interactive' | 'codex:interactive';
+  targetLabel?: 'Claude CLI' | 'Codex CLI';
+  available: boolean;
+  reason?: string;
+  entryKind?: 'scope' | 'agent';
+  entryVerb?: string;
+}
+
 export interface NativeSessionReadiness {
   runtime: import('@/setup/types').NativeRuntimeBinding;
   runtimeHost?: RuntimeHostReadiness;
   purposes: Record<NativeSessionPurpose, NativePurposeReadiness>;
+  profiles?: Record<string, NativeProfileReadiness>;
   /** Host-owned MCP health only; the credential is never sent to the browser. */
   mcp?: { server: 'GenBI MCP'; tool: 'save_dashboard'; destination: 'GenBI Artifacts'; available: boolean; reason?: string };
 }

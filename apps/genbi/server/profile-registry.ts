@@ -19,8 +19,12 @@
  *   4. every step tier is one the persisted runtime configuration can bind (`cheap`, `strong`);
  *   5. the entry form follows from eligibility: two or more native-eligible components, each with
  *      an authored `description`, enter at the profile scope; exactly one is pinned; none refuses;
- *   6. the verdict is recomputed whenever the profile's bytes or the warble binary change, and a
- *      profile that stops passing becomes unavailable rather than disappearing.
+ *   6. the verdict is recomputed whenever the profile's bytes, the warble binary or this host's
+ *      rule set change, and a profile that stops passing becomes unavailable rather than
+ *      disappearing;
+ *   7. a pinned entry component must not compose another component: the native CLI targets have
+ *      no trusted invocation handler in a native session, so such a launch is refused outright
+ *      (a composing component inside a scope-entry profile is merely materialized unavailable).
  *
  * Tool names (Read, Bash, Write) are a dispatcher materialization and are not in the IR, which is
  * why rule 3 is expressed over capabilities: that is the layer the compiler can vouch for.
@@ -57,6 +61,13 @@ export const CEILING_PROFILE_ID = "genbi-default";
 export const HOST_TIERS: ReadonlySet<string> = new Set(["cheap", "strong"]);
 
 const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+/**
+ * Bump when an admission rule is added or tightened. A stored verdict computed under an older rule
+ * set is stale even when the profile bytes and the warble binary are unchanged — the rules are the
+ * third input to the verdict. 1: rules 1–6. 2: rule 7, a pinned entry must not compose.
+ */
+export const ADMISSION_RULES_VERSION = 2;
 const MAX_REASON_LENGTH = 1200;
 const COMPILE_RETRY_DELAY_MS = 250;
 
@@ -130,6 +141,23 @@ function capabilityNames(component: Json): string[] {
     }
   }
   return names;
+}
+
+/** `alias → component` edges a component's steps authorize; non-empty means the profile composes. */
+function composedAliases(component: Json): string[] {
+  const calls = component["llm_calls"];
+  if (!Array.isArray(calls)) return [];
+  const edges: string[] = [];
+  for (const call of calls) {
+    if (!isRecord(call) || !Array.isArray(call["component_calls"])) continue;
+    for (const edge of call["component_calls"]) {
+      if (!isRecord(edge)) continue;
+      const alias = stringAt(edge, "alias") ?? "?";
+      const target = stringAt(edge, "component") ?? "?";
+      edges.push(`${alias} → ${target}`);
+    }
+  }
+  return edges;
 }
 
 function stepTiers(component: Json): string[] {
@@ -231,7 +259,21 @@ export function admitCompiledProfile(ir: unknown, options: { readonly expectedId
   if (eligible.length === 0) {
     reasons.push("profile has no native-eligible component (a one-shot skill with no outcome that a session may start)");
   } else if (eligible.length === 1) {
-    entry = { kind: "agent", verb: eligible[0]!.id };
+    // Rule 7 — native dispatchability of a pinned entry. A step that authorizes a component-call
+    // alias composes another component at run time; the native CLI targets resolve that only
+    // through a trusted host handler a native session does not install. Inside a scope-entry
+    // profile such a component is materialized unavailable and the session still starts (the
+    // shipped analysis profile's dashboard composer is one). Pinned as THE entry, the dispatcher
+    // refuses the whole launch instead (observed 2026-10-01, warble 0.15.2, `plan_report` →
+    // `answer_batch` on claude-code:interactive: "no trusted invocation handler is installed").
+    const pinned = eligible[0]!;
+    const pinnedJson = components.find((c) => stringAt(c, "id") === pinned.id);
+    const aliases = pinnedJson ? composedAliases(pinnedJson) : [];
+    if (aliases.length > 0) {
+      reasons.push(`component "${pinned.id}" would be the pinned entry but composes other components (${aliases.join(", ")}); composition is not dispatchable to the native CLI targets in this version`);
+    } else {
+      entry = { kind: "agent", verb: pinned.id };
+    }
   } else {
     const undescribed = eligible.filter((c) => !c.hasDescription).map((c) => c.id);
     if (undescribed.length > 0) {
@@ -403,6 +445,7 @@ export class ProfileRegistry {
           entryKind: null,
           entryVerb: null,
           admittedAt: null,
+          rulesVersion: ADMISSION_RULES_VERSION,
           updatedAt: this.now().toISOString(),
         });
       }
@@ -441,16 +484,18 @@ export class ProfileRegistry {
         entryKind: null,
         entryVerb: null,
         admittedAt: null,
+        rulesVersion: ADMISSION_RULES_VERSION,
         updatedAt: this.now().toISOString(),
       });
       return;
     }
     const [profileHash, warbleIdentity] = await Promise.all([hashDirectory(row.sourceDir), this.options.warbleIdentity()]);
-    // A stored verdict is reused only when it was a pass and nothing it depended on has moved. An
-    // `unavailable` row is always re-checked: its reason may have been the environment (a compile
-    // that collided, a ceiling that was down at that boot), and the only way to find out is to run
-    // admission again. A genuinely refused profile costs one compile per boot and stays refused.
-    if (row.admissionStatus === "admitted" && profileHash === row.profileHash && warbleIdentity === row.warbleIdentity && this.ceilingFailure === undefined) return;
+    // A stored verdict is reused only when it was a pass and nothing it depended on has moved: the
+    // profile bytes, the warble binary, and this host's rule set. An `unavailable` row is always
+    // re-checked: its reason may have been the environment (a compile that collided, a ceiling that
+    // was down at that boot), and the only way to find out is to run admission again. A genuinely
+    // refused profile costs one compile per boot and stays refused.
+    if (row.admissionStatus === "admitted" && row.rulesVersion === ADMISSION_RULES_VERSION && profileHash === row.profileHash && warbleIdentity === row.warbleIdentity && this.ceilingFailure === undefined) return;
     await this.admitAndStore({ id: row.id, kind: row.kind, role: row.role, sourceDir: row.sourceDir, createdAt: row.createdAt });
   }
 
@@ -475,6 +520,7 @@ export class ProfileRegistry {
       sourceDir: input.sourceDir,
       profileHash,
       warbleIdentity,
+      rulesVersion: ADMISSION_RULES_VERSION,
       createdAt: input.createdAt ?? now,
       updatedAt: now,
     };

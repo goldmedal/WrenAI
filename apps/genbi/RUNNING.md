@@ -157,11 +157,41 @@ recorded as the profile's `admission.reason` and the profile stays listed as
    components, each with an authored `description`, enter at the profile
    scope; exactly one is pinned to that component; none refuses.
 
-The verdict is recomputed when the profile's bytes or the `warble` binary
-change. Of the shipped profiles, `genbi-report` is admitted (pinned to
-`plan_report`; `answer_batch` is callee-only) and `genbi-monitor` is refused
-(assertive, scheduled). Whether an admitted profile can actually be launched as a
-native session is the session layer's check, not the registry's.
+6. a pinned entry component must not compose another component (a
+   `component_calls` alias such as `plan_report`'s `ask → answer_batch`): the
+   native CLI targets resolve a composition only through a trusted host handler
+   that a native session does not install, so the dispatcher refuses such a
+   launch outright. Inside a scope-entry profile a composing component is only
+   materialized unavailable, which is how `genbi-default`'s dashboard composer
+   ships today.
+
+The verdict is recomputed when the profile's bytes, the `warble` binary or
+the BFF's own rule set change. Of the shipped profiles, `genbi-report` is refused for composing and
+`genbi-monitor` for being assertive and scheduled; both stay listed with their
+reason. The two-stage report still runs in-process (see below), where the host
+is the composition handler.
+
+### Starting a session inside a profile
+
+`POST /api/native-sessions` takes an optional `profile` (a registry id) on a
+`start_separate`, or on an `open_existing` with no `sessionId`. It is accepted
+for `purpose: "analysis"` only; the system purposes keep their fixed profiles.
+Omitted, the session runs inside `genbi-default` exactly as before.
+
+```bash
+curl -s -X POST http://127.0.0.1:4787/api/native-sessions \
+  -H 'content-type: application/json' \
+  -d '{"purpose":"analysis","intent":"start_separate","idempotencyKey":"<uuid v4>","profile":"genbi-report"}'
+```
+
+The server resolves the id against the registry at launch: an unknown, system or
+unavailable profile answers `409` with the stored reason. A selected profile's
+entry form was decided at admission (scope entry, or pinned to its one eligible
+component), so `entryVerb` is accepted only beside `genbi-default`. Selected
+profiles run on the Claude CLI; on the Codex CLI only the default is available
+and the others report that reason in readiness. The session row records the
+profile in `dispatchProfile`, and `GET /api/native-sessions/readiness` adds a
+`profiles` map with per-profile `available` / `reason` / `entryKind`.
 
 ### Adding a profile
 

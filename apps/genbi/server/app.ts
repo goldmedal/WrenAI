@@ -33,6 +33,7 @@ import type { NativePurpose, NativeSessionResumeAvailability } from "./native-se
 import { NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME, NATIVE_MCP_TOOL_NAME, NATIVE_PERSIST_ANSWER_CONTRACT, NATIVE_SAVE_DASHBOARD_CONTRACT, NativeArtifactError } from "./native-artifacts.js";
 import { sameNativeRuntimeBinding } from "./native-dispatch-registry.js";
 import { ProfileRegistryError, toWarbleProfileDto } from "./profile-registry.js";
+import { DEFAULT_CONVERSATION_PROFILE } from "./native-sessions.js";
 import { detectAdapterEnv } from "./env-detect.js";
 import { redactPublicSetupText, redactSetupText, sanitizePublicSetupWorklog } from "./fold.js";
 import { assertHarnessBundlePurpose, buildHarnessDto } from "./harness.js";
@@ -1061,24 +1062,34 @@ export function createApp(deps: TurnDeps) {
   // Native Sessions use their own durable namespace. Ask's `/api/sessions`
   // remains structured conversation storage and is never overloaded with PTYs.
   app.post("/api/native-sessions", async (c) => {
-    const body = await c.req.json().catch(() => ({})) as { purpose?: unknown; intent?: unknown; idempotencyKey?: unknown; sessionId?: unknown; entryVerb?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { purpose?: unknown; intent?: unknown; idempotencyKey?: unknown; sessionId?: unknown; entryVerb?: unknown; profile?: unknown };
     if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "native session launch request is invalid" }, 400);
     const intent = body.intent === undefined ? "open_existing" : body.intent;
     const requiresAction = intent === "start_separate" || intent === "resume";
-    const allowedKeys = intent === "start_separate" ? ["purpose", "intent", "idempotencyKey", "entryVerb"] : intent === "resume" ? ["purpose", "intent", "sessionId", "idempotencyKey"] : ["purpose", "intent", "sessionId"];
+    // `profile` names a registry id for a NEW analysis session only: a start-separate, or an
+    // open-or-create with no sessionId. A resume or an explicit sessionId already carries its profile.
+    const allowedKeys = intent === "start_separate" ? ["purpose", "intent", "idempotencyKey", "entryVerb", "profile"] : intent === "resume" ? ["purpose", "intent", "sessionId", "idempotencyKey"] : ["purpose", "intent", "sessionId", "profile"];
     if (!NATIVE_PURPOSES.includes(body.purpose as NativePurpose) || (intent !== "open_existing" && intent !== "start_separate" && intent !== "resume") || !Object.keys(body).every((key) => allowedKeys.includes(key)) || (requiresAction && (typeof body.idempotencyKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.idempotencyKey))) || ((intent === "resume" && (typeof body.sessionId !== "string" || !/^native-session-[0-9a-f-]{36}$/i.test(body.sessionId))) || (intent === "open_existing" && body.sessionId !== undefined && (typeof body.sessionId !== "string" || !/^native-session-[0-9a-f-]{36}$/i.test(body.sessionId))))) return c.json({ error: "native session launch request is invalid" }, 400);
     if (body.entryVerb !== undefined && (body.purpose !== "analysis" || typeof body.entryVerb !== "string" || !["answer_query", "generate_dashboard"].includes(body.entryVerb))) return c.json({ error: "native session entry is invalid" }, 400);
+    if (body.profile !== undefined) {
+      if (typeof body.profile !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.profile)) return c.json({ error: "native session profile is invalid" }, 400);
+      if (body.purpose !== "analysis") return c.json({ error: "native session profile is only selectable for analysis" }, 400);
+      if (intent === "open_existing" && body.sessionId !== undefined) return c.json({ error: "native session profile cannot be changed on an existing session" }, 400);
+      // A selected profile's entry form was decided at admission; only the default takes an entry verb.
+      if (body.profile !== DEFAULT_CONVERSATION_PROFILE && body.entryVerb !== undefined) return c.json({ error: "native session entry is invalid" }, 400);
+    }
+    const profile = typeof body.profile === "string" ? { profile: body.profile } : {};
     if (!deps.nativeSessions) return c.json({ error: "native sessions are not configured" }, 503);
     const runtimeCorrection = persistedRuntimeCorrection(deps);
     if (runtimeCorrection) return c.json({ error: runtimeCorrection, code: "runtime_correction_required" }, 409);
     try {
       const created = intent === "start_separate"
-        ? await deps.nativeSessions.startSeparate({ purpose: body.purpose as NativePurpose, idempotencyKey: body.idempotencyKey as string, ...(body.entryVerb !== undefined ? { entryVerb: body.entryVerb as string } : {}) })
+        ? await deps.nativeSessions.startSeparate({ purpose: body.purpose as NativePurpose, idempotencyKey: body.idempotencyKey as string, ...(body.entryVerb !== undefined ? { entryVerb: body.entryVerb as string } : {}), ...profile })
         : intent === "resume"
           ? await deps.nativeSessions.resume({ id: body.sessionId as string, idempotencyKey: body.idempotencyKey as string })
         : typeof body.sessionId === "string"
           ? await deps.nativeSessions.openExisting({ purpose: body.purpose as NativePurpose, id: body.sessionId })
-          : await deps.nativeSessions.openOrCreate({ purpose: body.purpose as NativePurpose });
+          : await deps.nativeSessions.openOrCreate({ purpose: body.purpose as NativePurpose, ...profile });
       return c.json({ session: { ...created.row, lifecycle: nativeSessionLifecycle(created.row, nativeResumeAvailability(created.row)) }, ...(created.capability ? { capability: created.capability } : {}), ...(created.recoveryCapability ? { recoveryCapability: created.recoveryCapability } : {}) }, 201);
     } catch (error) {
       const code = nativeSessionLaunchErrorCode(error);

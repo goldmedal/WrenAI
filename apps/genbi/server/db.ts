@@ -131,6 +131,8 @@ export interface WarbleProfileRow {
   readonly entryVerb: string | null;
   readonly irVersion: string | null;
   readonly componentsJson: string;
+  /** The admission rule set the verdict was computed under; a newer set re-runs admission. */
+  readonly rulesVersion: number;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly admittedAt: string | null;
@@ -486,7 +488,7 @@ CREATE TABLE IF NOT EXISTS warble_profiles (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, source_dir TEXT NOT NULL,
   profile_hash TEXT NOT NULL, warble_identity TEXT NOT NULL,
   admission_status TEXT NOT NULL, admission_reason TEXT, entry_kind TEXT, entry_verb TEXT,
-  ir_version TEXT, components_json TEXT NOT NULL DEFAULT '[]',
+  ir_version TEXT, components_json TEXT NOT NULL DEFAULT '[]', rules_version INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, admitted_at TEXT
 );
 `;
@@ -849,6 +851,8 @@ export class Store {
     this.addColumnIfMissing("native_sessions", "dispatch_target", "TEXT");
     this.addColumnIfMissing("native_sessions", "runtime_generation", "INTEGER");
     this.addColumnIfMissing("artifacts", "source_answer_id", "TEXT");
+    // A database written before admission carried a rule-set version reads 0 and re-admits.
+    this.addColumnIfMissing("warble_profiles", "rules_version", "INTEGER NOT NULL DEFAULT 0");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS enrichment_approvals_nonce_unique ON enrichment_approvals(nonce) WHERE nonce <> ''");
   }
 
@@ -1074,17 +1078,18 @@ export class Store {
   upsertWarbleProfile(row: WarbleProfileRow): WarbleProfileRow {
     this.db.prepare(
       `INSERT INTO warble_profiles (id, kind, role, source_dir, profile_hash, warble_identity, admission_status, admission_reason,
-         entry_kind, entry_verb, ir_version, components_json, created_at, updated_at, admitted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         entry_kind, entry_verb, ir_version, components_json, rules_version, created_at, updated_at, admitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          kind = excluded.kind, role = excluded.role, source_dir = excluded.source_dir,
          profile_hash = excluded.profile_hash, warble_identity = excluded.warble_identity,
          admission_status = excluded.admission_status, admission_reason = excluded.admission_reason,
          entry_kind = excluded.entry_kind, entry_verb = excluded.entry_verb, ir_version = excluded.ir_version,
-         components_json = excluded.components_json, updated_at = excluded.updated_at, admitted_at = excluded.admitted_at`,
+         components_json = excluded.components_json, rules_version = excluded.rules_version,
+         updated_at = excluded.updated_at, admitted_at = excluded.admitted_at`,
     ).run(
       row.id, row.kind, row.role, row.sourceDir, row.profileHash, row.warbleIdentity, row.admissionStatus, row.admissionReason,
-      row.entryKind, row.entryVerb, row.irVersion, row.componentsJson, row.createdAt, row.updatedAt, row.admittedAt,
+      row.entryKind, row.entryVerb, row.irVersion, row.componentsJson, row.rulesVersion, row.createdAt, row.updatedAt, row.admittedAt,
     );
     return this.getWarbleProfile(row.id)!;
   }
@@ -2468,6 +2473,7 @@ function rowToWarbleProfile(row: Record<string, unknown>): WarbleProfileRow {
     entryVerb: strOrNull(row, "entry_verb"),
     irVersion: strOrNull(row, "ir_version"),
     componentsJson: str(row, "components_json"),
+    rulesVersion: row["rules_version"] === null || row["rules_version"] === undefined ? 0 : num(row, "rules_version"),
     createdAt: str(row, "created_at"),
     updatedAt: str(row, "updated_at"),
     admittedAt: strOrNull(row, "admitted_at"),

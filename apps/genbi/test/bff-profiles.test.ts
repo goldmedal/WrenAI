@@ -68,7 +68,7 @@ describe("/api/profiles", () => {
     expect(Object.keys(byId).sort()).toEqual(["genbi-default", "genbi-enrich-context", "genbi-monitor", "genbi-report", "genbi-setup"]);
     expect(byId["genbi-default"]).toMatchObject({ kind: "builtin", role: "conversation", selectable: true, admission: { status: "admitted" }, entry: { kind: "scope" } });
     expect(byId["genbi-default"]!.components.map((c) => c.id)).toEqual(["explore_model", "answer_query", "generate_dashboard", "explain_change"]);
-    expect(byId["genbi-report"]).toMatchObject({ selectable: true, entry: { kind: "agent", verb: "plan_report" } });
+    expect(byId["genbi-report"]).toMatchObject({ selectable: false, admission: { status: "unavailable", reason: expect.stringMatching(/composition is not dispatchable/) } });
     expect(byId["genbi-monitor"]).toMatchObject({ selectable: false, admission: { status: "unavailable", reason: expect.stringMatching(/assertive/) } });
     expect(byId["genbi-setup"]).toMatchObject({ role: "system", selectable: false, admission: { status: "admitted", reason: expect.stringMatching(/system purpose/) } });
     for (const profile of body.profiles) expect(profile).not.toHaveProperty("sourceDir");
