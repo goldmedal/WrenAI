@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { runWarble } from "../harness/compile/pipeline.js";
+import { resolveWarbleBinary } from "../harness/compile/resolve-binary.js";
 import { ComponentRunner, type ComponentBinding, type RunnerHost, type StepRun } from "../harness/components/runner.js";
 import { VERCEL_HOST_CONTRACT } from "../harness/components/plan.js";
 import { loadCompiledPlan, loadReportPlan, REPORT_IR_GOLDEN, REPORT_PROFILE } from "./report-fixtures.js";
@@ -91,5 +92,28 @@ describe("genbi-report profile: released Hub, committed golden, caller SQL denia
     expect(steps["resolve_intent"]).toEqual([]);
     expect(steps["generate_sql"]).toContain("query");
     expect(steps["repair_sql"]).toContain("query");
+  });
+});
+
+/**
+ * Every other committed profile against its committed IR golden, compiled the
+ * same way. A profile edit or a Warble bump that is not followed by a
+ * recompile fails here instead of leaving a golden that no longer matches its
+ * profile. Kept in this file so these compiles run sequentially with the one
+ * above: the pinned CLI re-extracts its Hub on every compile, and concurrent
+ * extractions from parallel test files collide.
+ */
+describe("committed profile goldens match the pinned warble's compile", () => {
+  it.each(["genbi-default", "genbi-enrich-context", "genbi-monitor", "genbi-setup"])("%s", async (profile) => {
+    const warbleBin = await resolveWarbleBinary();
+    const dir = path.join(REPORT_PROFILE, "..", profile);
+    const out = await mkdtemp(path.join(os.tmpdir(), `genbi-golden-${profile}-`));
+    try {
+      await runWarble(warbleBin, ["compile", dir, "-o", path.join(out, "ir.json")]);
+      const compiled = JSON.parse(await readFile(path.join(out, "ir.json"), "utf8"));
+      const golden = JSON.parse(await readFile(path.join(dir, "ir.golden.json"), "utf8"));
+      expect(compiled).toEqual(golden);
+      expect(golden.profile).toBe(profile);
+    } finally { await rm(out, { recursive: true, force: true }); }
   });
 });
