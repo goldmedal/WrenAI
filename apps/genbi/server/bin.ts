@@ -134,6 +134,8 @@ import type { CliFlags } from "../harness/cli-args.js";
 import { createApp } from "./app.js";
 import { recoverBootstrapProjectBinding } from "./bootstrap-project-binding.js";
 import { createHarnessProfileSources } from "./harness-profile-sources.js";
+import { ProfileRegistry } from "./profile-registry.js";
+import { getWarbleIdentity } from "../harness/compile/warble-identity.js";
 import { compileProfile, compileRawProfile } from "../harness/compile/index.js";
 import { resolveWarbleBinary } from "../harness/compile/resolve-binary.js";
 import { toAuthChoiceFromRuntimeSettings } from "./auth-choice.js";
@@ -274,6 +276,19 @@ async function main(): Promise<void> {
   // Initialization creates the fixed private namespaces once at startup.
   const nativeMaterializationState = initializeNativeSessionStateBase(dbPath);
   const store = new Store(dbPath);
+  // Conversation profiles a session may start inside: the shipped ones under this package's
+  // `profiles/` plus any the operator adds under the workspace. Registration compiles each one, so
+  // it runs in the background; the first `/api/profiles` request awaits the same promise.
+  const profileRegistry = new ProfileRegistry({
+    store,
+    builtinProfilesDir: path.dirname(harnessProfileSources.analysis),
+    userProfilesDir: path.join(workspaceRoot, "profiles"),
+    compileRaw: (source) => compileRawProfile({ profileSource: source, mode: "native", ...warbleBinOption }),
+    warbleIdentity: async () => (resolvedWarbleBin !== undefined ? getWarbleIdentity(resolvedWarbleBin) : "warble:unresolved"),
+  });
+  void profileRegistry.ensureReady().catch((error: unknown) => {
+    process.stderr.write(`warning: profile registry failed to initialize: ${error instanceof Error ? error.message : String(error)}\n`);
+  });
   const getCodexModels = () => codexModelsForRuntime(store.getRuntimeSettings());
   const getRuntimeTierNames = () =>
     compileUnboundProfileTierNames({
@@ -616,13 +631,28 @@ async function main(): Promise<void> {
     // Setup has no binding by definition, so it compiles the profile's authored
     // context with no user project composed in; its golden resolves nothing
     // either, which is why Setup never showed this symptom.
-    resolveDispatchIr: async (purpose, binding) => {
-      const profileSource = harnessProfileSources[purpose];
+    resolveDispatchIr: async (purpose, binding, selectedProfileSource) => {
+      // A selected conversation profile compiles from the registry's copy; everything else from the
+      // boot-time source for its purpose.
+      const profileSource = selectedProfileSource ?? harnessProfileSources[purpose];
       const compiled = purpose === "setup" || binding === undefined
         ? await compileRawProfile({ profileSource, mode: "native", ...warbleBinOption })
         : await compileProfile({ profileSource, userProject: binding.path, mode: "native", ...warbleBinOption });
       return compiled.irPath;
     },
+    resolveConversationProfile: async (id) => {
+      const { row, sourceDir } = await profileRegistry.resolveConversationProfileSource(id);
+      return { id: row.id, sourceDir, entry: row.entryKind === "agent" && row.entryVerb !== null ? { kind: "agent", verb: row.entryVerb } : { kind: "scope" } };
+    },
+    listConversationProfiles: async () => (await profileRegistry.list())
+      .filter((row) => row.role === "conversation")
+      .map((row) => ({
+        id: row.id,
+        selectable: row.admissionStatus === "admitted",
+        ...(row.admissionReason !== null ? { reason: row.admissionReason } : {}),
+        ...(row.entryKind !== null ? { entryKind: row.entryKind } : {}),
+        ...(row.entryVerb !== null ? { entryVerb: row.entryVerb } : {}),
+      })),
     // The service's option is a required string; when resolution failed the bare
     // name is what the preflight will report as unresolvable, with its reason.
     warbleBin: producerExecutable?.executable ?? "warble",
@@ -651,6 +681,7 @@ async function main(): Promise<void> {
     structuredRuntime,
     nativeSessions,
     nativeArtifacts,
+    profileRegistry,
     route,
     baseRouteOptions,
     describeBundle: (options) => {
@@ -662,8 +693,8 @@ async function main(): Promise<void> {
           : {}),
       });
     },
-    describeHarnessBundle: (purpose, options) => {
-      const profileSource = harnessProfileSources[purpose];
+    describeHarnessBundle: (purpose, options, selectedProfileSource) => {
+      const profileSource = selectedProfileSource ?? harnessProfileSources[purpose];
       const common = {
         ...options,
         profileSource,

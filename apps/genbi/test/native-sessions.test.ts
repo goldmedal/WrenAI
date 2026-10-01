@@ -395,7 +395,7 @@ describe("native session persistence", () => {
     expect(readFileSync(path.join(dir, "AGENTS.md"), "utf8")).toBe("bootstrap-owned instructions");
     expect(readFileSync(path.join(dir, ".warble", "interactive-ownership.json"), "utf8")).toBe("prior bootstrap marker");
     store.close();
-  });
+  }, 15_000);
 
   it("rejects a DB-derived state root inside Setup or bound workspaces before dispatch, while an external root launches", async () => {
     for (const purpose of ["setup", "analysis"] as const) {

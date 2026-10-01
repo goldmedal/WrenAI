@@ -13,7 +13,7 @@ interface NativeSessionsState {
   load: () => Promise<void>;
   refreshReadiness: () => Promise<NativeSessionReadiness | undefined>;
   refresh: (id: string) => Promise<NativeSession | undefined>;
-  createSession: (purpose: NativeSessionPurpose, returnSource: NativeSessionReturnSource | undefined, actionOwner: NativeSessionCreateOwner, entryVerb?: NonNullable<NativeSession["entryVerb"]>) => Promise<NativeSession>;
+  createSession: (purpose: NativeSessionPurpose, returnSource: NativeSessionReturnSource | undefined, actionOwner: NativeSessionCreateOwner, entryVerb?: NonNullable<NativeSession["entryVerb"]>, profile?: string) => Promise<NativeSession>;
   openSession: (purpose: NativeSessionPurpose, id: string, returnSource?: NativeSessionReturnSource) => Promise<NativeSession>;
   resumeSession: (source: NativeSession, returnSource?: NativeSessionReturnSource, signal?: AbortSignal) => Promise<NativeSession>;
   restartSession: (source: NativeSession, returnSource?: NativeSessionReturnSource, signal?: AbortSignal) => Promise<NativeSession>;
@@ -68,6 +68,9 @@ export type NativeSessionCreateOwner = 'sessions-new' | NativeSessionReturnSourc
 
 const createActions = new Map<string, CreateAction>();
 
+/** The analysis purpose's fixed profile; selecting it is the same as selecting nothing. */
+export const DEFAULT_CONVERSATION_PROFILE = 'genbi-default';
+
 function createActionKey(purpose: NativeSessionPurpose, owner: NativeSessionCreateOwner): string {
   return `${owner}:${purpose}`;
 }
@@ -96,6 +99,7 @@ function restartActionScope(session: NativeSession): string {
     session.projectRevision,
     session.runtimeGeneration ?? null,
     session.entryVerb ?? null,
+    session.dispatchProfile ?? null,
   ]);
 }
 
@@ -202,11 +206,13 @@ export const useNativeSessions = create<NativeSessionsState>((set, get) => ({
       return undefined;
     }
   },
-  createSession(purpose, returnSource, actionOwner, entryVerb) {
-    const actionKey = `${createActionKey(purpose, actionOwner)}:${entryVerb ?? "default"}`;
+  createSession(purpose, returnSource, actionOwner, entryVerb, profile) {
+    // The default profile is the absence of the field, so default requests stay byte-identical.
+    const selectedProfile = profile !== undefined && profile !== DEFAULT_CONVERSATION_PROFILE ? profile : undefined;
+    const actionKey = `${createActionKey(purpose, actionOwner)}:${entryVerb ?? "default"}:${selectedProfile ?? "default"}`;
     const action = createActionFor(actionKey);
     if (action.request) return action.request;
-    const request = createNativeSession(purpose, { intent: 'start_separate', idempotencyKey: action.idempotencyKey, ...(entryVerb ? { entryVerb } : {}) })
+    const request = createNativeSession(purpose, { intent: 'start_separate', idempotencyKey: action.idempotencyKey, ...(entryVerb ? { entryVerb } : {}), ...(selectedProfile ? { profile: selectedProfile } : {}) })
       .then(({ session, capability, recoveryCapability }) => {
         clearCreateAction(actionKey, action);
         if (capability) saveNativeSessionCapability(session.id, capability);
@@ -251,7 +257,9 @@ export const useNativeSessions = create<NativeSessionsState>((set, get) => ({
     // ambiguous response-loss retry idempotent at the BFF process seam.
     const action = restartActionFor(source);
     try {
-      const launch = { intent: 'start_separate' as const, idempotencyKey: action.idempotencyKey, ...(source.entryVerb ? { entryVerb: source.entryVerb } : {}) };
+      // A restart stays inside the profile the source ran in; the default is the absence of the field.
+      const restartProfile = source.purpose === 'analysis' && source.dispatchProfile && source.dispatchProfile !== DEFAULT_CONVERSATION_PROFILE ? source.dispatchProfile : undefined;
+      const launch = { intent: 'start_separate' as const, idempotencyKey: action.idempotencyKey, ...(source.entryVerb ? { entryVerb: source.entryVerb } : {}), ...(restartProfile ? { profile: restartProfile } : {}) };
       const { session, capability, recoveryCapability } = signal
         ? await createNativeSession(source.purpose, launch, signal)
         : await createNativeSession(source.purpose, launch);

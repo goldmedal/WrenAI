@@ -8,6 +8,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { upgradeWebSocket } from "@hono/node-server";
 import { conversationSocket } from "./conversation-socket.js";
@@ -31,6 +32,8 @@ import { nativeSessionLaunchErrorCode, nativeSessionLaunchFailure, nativeSession
 import type { NativePurpose, NativeSessionResumeAvailability } from "./native-sessions.js";
 import { NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME, NATIVE_MCP_TOOL_NAME, NATIVE_PERSIST_ANSWER_CONTRACT, NATIVE_SAVE_DASHBOARD_CONTRACT, NativeArtifactError } from "./native-artifacts.js";
 import { sameNativeRuntimeBinding } from "./native-dispatch-registry.js";
+import { ProfileRegistryError, toWarbleProfileDto } from "./profile-registry.js";
+import { DEFAULT_CONVERSATION_PROFILE } from "./native-sessions.js";
 import { detectAdapterEnv } from "./env-detect.js";
 import { redactPublicSetupText, redactSetupText, sanitizePublicSetupWorklog } from "./fold.js";
 import { assertHarnessBundlePurpose, buildHarnessDto } from "./harness.js";
@@ -78,6 +81,7 @@ import type {
   SubscriptionProvider,
   SubscriptionLoginStatus,
   ToolStep,
+  WarbleProfileListDto,
 } from "./wire-types.js";
 
 /** Only explicit persisted settings can supersede the boot route or require repair. */
@@ -1058,24 +1062,34 @@ export function createApp(deps: TurnDeps) {
   // Native Sessions use their own durable namespace. Ask's `/api/sessions`
   // remains structured conversation storage and is never overloaded with PTYs.
   app.post("/api/native-sessions", async (c) => {
-    const body = await c.req.json().catch(() => ({})) as { purpose?: unknown; intent?: unknown; idempotencyKey?: unknown; sessionId?: unknown; entryVerb?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { purpose?: unknown; intent?: unknown; idempotencyKey?: unknown; sessionId?: unknown; entryVerb?: unknown; profile?: unknown };
     if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "native session launch request is invalid" }, 400);
     const intent = body.intent === undefined ? "open_existing" : body.intent;
     const requiresAction = intent === "start_separate" || intent === "resume";
-    const allowedKeys = intent === "start_separate" ? ["purpose", "intent", "idempotencyKey", "entryVerb"] : intent === "resume" ? ["purpose", "intent", "sessionId", "idempotencyKey"] : ["purpose", "intent", "sessionId"];
+    // `profile` names a registry id for a NEW analysis session only: a start-separate, or an
+    // open-or-create with no sessionId. A resume or an explicit sessionId already carries its profile.
+    const allowedKeys = intent === "start_separate" ? ["purpose", "intent", "idempotencyKey", "entryVerb", "profile"] : intent === "resume" ? ["purpose", "intent", "sessionId", "idempotencyKey"] : ["purpose", "intent", "sessionId", "profile"];
     if (!NATIVE_PURPOSES.includes(body.purpose as NativePurpose) || (intent !== "open_existing" && intent !== "start_separate" && intent !== "resume") || !Object.keys(body).every((key) => allowedKeys.includes(key)) || (requiresAction && (typeof body.idempotencyKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.idempotencyKey))) || ((intent === "resume" && (typeof body.sessionId !== "string" || !/^native-session-[0-9a-f-]{36}$/i.test(body.sessionId))) || (intent === "open_existing" && body.sessionId !== undefined && (typeof body.sessionId !== "string" || !/^native-session-[0-9a-f-]{36}$/i.test(body.sessionId))))) return c.json({ error: "native session launch request is invalid" }, 400);
     if (body.entryVerb !== undefined && (body.purpose !== "analysis" || typeof body.entryVerb !== "string" || !["answer_query", "generate_dashboard"].includes(body.entryVerb))) return c.json({ error: "native session entry is invalid" }, 400);
+    if (body.profile !== undefined) {
+      if (typeof body.profile !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.profile)) return c.json({ error: "native session profile is invalid" }, 400);
+      if (body.purpose !== "analysis") return c.json({ error: "native session profile is only selectable for analysis" }, 400);
+      if (intent === "open_existing" && body.sessionId !== undefined) return c.json({ error: "native session profile cannot be changed on an existing session" }, 400);
+      // A selected profile's entry form was decided at admission; only the default takes an entry verb.
+      if (body.profile !== DEFAULT_CONVERSATION_PROFILE && body.entryVerb !== undefined) return c.json({ error: "native session entry is invalid" }, 400);
+    }
+    const profile = typeof body.profile === "string" ? { profile: body.profile } : {};
     if (!deps.nativeSessions) return c.json({ error: "native sessions are not configured" }, 503);
     const runtimeCorrection = persistedRuntimeCorrection(deps);
     if (runtimeCorrection) return c.json({ error: runtimeCorrection, code: "runtime_correction_required" }, 409);
     try {
       const created = intent === "start_separate"
-        ? await deps.nativeSessions.startSeparate({ purpose: body.purpose as NativePurpose, idempotencyKey: body.idempotencyKey as string, ...(body.entryVerb !== undefined ? { entryVerb: body.entryVerb as string } : {}) })
+        ? await deps.nativeSessions.startSeparate({ purpose: body.purpose as NativePurpose, idempotencyKey: body.idempotencyKey as string, ...(body.entryVerb !== undefined ? { entryVerb: body.entryVerb as string } : {}), ...profile })
         : intent === "resume"
           ? await deps.nativeSessions.resume({ id: body.sessionId as string, idempotencyKey: body.idempotencyKey as string })
         : typeof body.sessionId === "string"
           ? await deps.nativeSessions.openExisting({ purpose: body.purpose as NativePurpose, id: body.sessionId })
-          : await deps.nativeSessions.openOrCreate({ purpose: body.purpose as NativePurpose });
+          : await deps.nativeSessions.openOrCreate({ purpose: body.purpose as NativePurpose, ...profile });
       return c.json({ session: { ...created.row, lifecycle: nativeSessionLifecycle(created.row, nativeResumeAvailability(created.row)) }, ...(created.capability ? { capability: created.capability } : {}), ...(created.recoveryCapability ? { recoveryCapability: created.recoveryCapability } : {}) }, 201);
     } catch (error) {
       const code = nativeSessionLaunchErrorCode(error);
@@ -1505,6 +1519,58 @@ export function createApp(deps: TurnDeps) {
   });
 
   // ---------------------------------------------------------------------
+  // Warble profile registry
+  // ---------------------------------------------------------------------
+  //
+  // Conversation profiles are selected from a server-held registry by id. The
+  // registry owns the directory, runs admission and resolves the launch tuple;
+  // a browser never submits a path for a session to run inside. Adding a
+  // profile takes a directory path on this machine, the same shape the adopt
+  // flow accepts for a project, and the registry copies and checks it.
+
+  const profileRegistryFailure = (c: Context, error: unknown) => {
+    if (error instanceof ProfileRegistryError) return c.json({ error: error.message }, error.status);
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+  };
+
+  app.get("/api/profiles", async (c) => {
+    if (!deps.profileRegistry) return c.json({ error: "the profile registry is not configured on this BFF instance" }, 503);
+    try {
+      const rows = await deps.profileRegistry.list();
+      const response: WarbleProfileListDto = { profiles: rows.map(toWarbleProfileDto) };
+      return c.json(response);
+    } catch (error) {
+      return profileRegistryFailure(c, error);
+    }
+  });
+
+  app.post("/api/profiles", async (c) => {
+    if (!deps.profileRegistry) return c.json({ error: "the profile registry is not configured on this BFF instance" }, 503);
+    const body = await c.req.json().catch(() => undefined) as unknown;
+    if (typeof body !== "object" || body === null || Array.isArray(body) || !Object.keys(body).every((key) => key === "sourcePath")) {
+      return c.json({ error: "profile registration request is invalid: expected { sourcePath }" }, 400);
+    }
+    try {
+      const row = await deps.profileRegistry.add((body as { sourcePath?: unknown }).sourcePath);
+      return c.json({ profile: toWarbleProfileDto(row) }, 201);
+    } catch (error) {
+      return profileRegistryFailure(c, error);
+    }
+  });
+
+  app.delete("/api/profiles/:id", async (c) => {
+    if (!deps.profileRegistry) return c.json({ error: "the profile registry is not configured on this BFF instance" }, 503);
+    const id = c.req.param("id");
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) return c.json({ error: "profile id is invalid" }, 400);
+    try {
+      await deps.profileRegistry.remove(id);
+      return c.body(null, 204);
+    } catch (error) {
+      return profileRegistryFailure(c, error);
+    }
+  });
+
+  // ---------------------------------------------------------------------
   // Harness introspection
   // ---------------------------------------------------------------------
 
@@ -1514,14 +1580,37 @@ export function createApp(deps: TurnDeps) {
       return c.json({ error: "harness purpose must be exactly one of: setup, analysis, context_enrichment" }, 400);
     }
     const purpose = purposes[0] as NativePurpose;
+    // An optional registry id selects which conversation profile the analysis purpose describes.
+    // The server resolves it; the browser never names a directory.
+    const profiles = c.req.queries("profile") ?? [];
+    if (profiles.length > 1) return c.json({ error: "harness profile must be given at most once" }, 400);
+    const requestedProfile = profiles[0];
+    if (requestedProfile !== undefined) {
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(requestedProfile)) return c.json({ error: "harness profile is invalid" }, 400);
+      if (purpose !== "analysis") return c.json({ error: "harness profile is only selectable for analysis" }, 400);
+    }
+    const selectedProfile = requestedProfile !== undefined && requestedProfile !== DEFAULT_CONVERSATION_PROFILE ? requestedProfile : undefined;
     // Setup describes the raw bootstrap profile, before a project exists. The
     // other two profiles consume a bound project's context and stay gated.
     if (purpose !== "setup" && !isProjectBound(deps)) return c.json({ error: PROJECT_NOT_BOUND_MESSAGE }, 409);
     if (!deps.describeHarnessBundle) return c.json({ error: "harness introspection is not configured" }, 500);
+    let selectedSource: string | undefined;
+    if (selectedProfile !== undefined) {
+      if (!deps.profileRegistry) return c.json({ error: "the profile registry is not configured on this BFF instance" }, 503);
+      try {
+        selectedSource = (await deps.profileRegistry.resolveConversationProfileSource(selectedProfile)).sourceDir;
+      } catch (error) {
+        return profileRegistryFailure(c, error);
+      }
+    }
     try {
       const routeOptions = effectiveRouteOptions(deps, { allowUnbound: purpose === "setup" });
-      const bundle = await deps.describeHarnessBundle(purpose, routeOptions);
-      assertHarnessBundlePurpose(bundle, purpose);
+      // Keep the two-argument call for the fixed profiles so existing describers and their tests see
+      // exactly the shape they always did; only a selection adds the third argument.
+      const bundle = selectedSource !== undefined
+        ? await deps.describeHarnessBundle(purpose, routeOptions, selectedSource)
+        : await deps.describeHarnessBundle(purpose, routeOptions);
+      assertHarnessBundlePurpose(bundle, purpose, selectedProfile);
       const setupRuntimeCorrection = purpose === "setup" ? persistedRuntimeCorrection(deps) : undefined;
       const setupReadiness = purpose === "setup"
         ? setupRuntimeCorrection !== undefined
@@ -1538,7 +1627,7 @@ export function createApp(deps: TurnDeps) {
       const nativeReadiness = purpose === "setup"
         ? await deps.nativeSessions?.readiness().catch(() => undefined)
         : await deps.nativeSessions?.readiness();
-      return c.json(buildHarnessDto(bundle, deps.store, routeOptions, purpose, nativeReadiness, setupReadiness));
+      return c.json(buildHarnessDto(bundle, deps.store, routeOptions, purpose, nativeReadiness, setupReadiness, selectedProfile));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ error: message }, 500);

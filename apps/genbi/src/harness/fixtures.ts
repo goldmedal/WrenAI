@@ -1,4 +1,5 @@
 import { deriveRealizationLabel } from './realization';
+import type { WarbleProfile } from '@/bff/client';
 import type { AgentProfileRow, Component, ConnectionStatus, HarnessPurpose, HarnessPurposeInfo, HarnessView, ProfileInfo, RuntimeInfo } from './types';
 
 /**
@@ -439,3 +440,17 @@ export const fixtureHarnessViews: Record<HarnessPurpose, HarnessView> = {
 
 /** Backward-compatible analysis fixture for focused panel tests. */
 export const fixtureHarnessView: HarnessView = fixtureHarnessViews.analysis;
+
+/**
+ * The profile registry as the sidebar sees it when no BFF is configured. Mirrors the live wire
+ * shape (`WarbleProfile` in `@/bff/client`) so the sidebar renders identically in both modes; the
+ * sidebar itself labels this as fixture data.
+ */
+export const fixtureProfileRegistry: WarbleProfile[] = [
+  { id: 'genbi-setup', kind: 'builtin', role: 'system', selectable: false, admission: { status: 'admitted', reason: 'system purpose profile: dispatched by its host purpose, never selectable for a conversation', checkedAt: '2026-10-01T00:00:00.000Z' }, components: [], createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' },
+  { id: 'genbi-enrich-context', kind: 'builtin', role: 'system', selectable: false, admission: { status: 'admitted', reason: 'system purpose profile: dispatched by its host purpose, never selectable for a conversation', checkedAt: '2026-10-01T00:00:00.000Z' }, components: [], createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' },
+  { id: 'genbi-default', kind: 'builtin', role: 'conversation', selectable: true, admission: { status: 'admitted', checkedAt: '2026-10-01T00:00:00.000Z' }, entry: { kind: 'scope' }, irVersion: '0.8', components: [], createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' },
+  { id: 'genbi-report', kind: 'builtin', role: 'conversation', selectable: true, admission: { status: 'admitted', checkedAt: '2026-10-01T00:00:00.000Z' }, entry: { kind: 'agent', verb: 'plan_report' }, irVersion: '0.8', components: [], createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' },
+  { id: 'genbi-monitor', kind: 'builtin', role: 'conversation', selectable: false, admission: { status: 'unavailable', reason: 'component "monitor_freshness" is outside the host\'s execution scope: type="assertive", trigger="scheduled", outcome="assertion" (a conversation profile may only mount type="analytical", trigger="one_shot", outcome="none")', checkedAt: '2026-10-01T00:00:00.000Z' }, irVersion: '0.8', components: [], createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' },
+  { id: 'team-kpis', kind: 'user', role: 'conversation', selectable: true, admission: { status: 'admitted', checkedAt: '2026-10-01T00:00:00.000Z' }, entry: { kind: 'scope' }, irVersion: '0.8', components: [], sourceDir: '/workspace/profiles/team-kpis', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z' },
+];

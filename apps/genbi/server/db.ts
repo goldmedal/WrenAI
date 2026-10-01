@@ -109,6 +109,35 @@ export interface NativeSessionResumeAction {
   readonly resumedSessionId: string;
 }
 
+export type WarbleProfileKind = "builtin" | "user";
+export type WarbleProfileRole = "conversation" | "system";
+export type WarbleProfileAdmissionStatus = "admitted" | "unavailable";
+export type WarbleProfileEntryKind = "scope" | "agent";
+
+/**
+ * One registered Warble profile (see server/profile-registry.ts). `componentsJson` is the
+ * admission-time component summary, kept so the UI can explain a verdict without recompiling.
+ */
+export interface WarbleProfileRow {
+  readonly id: string;
+  readonly kind: WarbleProfileKind;
+  readonly role: WarbleProfileRole;
+  readonly sourceDir: string;
+  readonly profileHash: string;
+  readonly warbleIdentity: string;
+  readonly admissionStatus: WarbleProfileAdmissionStatus;
+  readonly admissionReason: string | null;
+  readonly entryKind: WarbleProfileEntryKind | null;
+  readonly entryVerb: string | null;
+  readonly irVersion: string | null;
+  readonly componentsJson: string;
+  /** The admission rule set the verdict was computed under; a newer set re-runs admission. */
+  readonly rulesVersion: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly admittedAt: string | null;
+}
+
 /**
  * Session-scoped, typed answer material retained for native follow-up tools.
  * `envelopeJson` is limited by the native-artifact contract to table and
@@ -452,6 +481,16 @@ CREATE TABLE IF NOT EXISTS native_structured_answers (
 );
 CREATE INDEX IF NOT EXISTS native_structured_answers_session_created_at
   ON native_structured_answers(native_session_id, created_at DESC);
+-- Warble profile registry: the shipped profiles plus any the operator added. A row's admission
+-- verdict is recomputed when the profile bytes or the warble binary change; rows are never
+-- deleted by admission, only marked unavailable.
+CREATE TABLE IF NOT EXISTS warble_profiles (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, source_dir TEXT NOT NULL,
+  profile_hash TEXT NOT NULL, warble_identity TEXT NOT NULL,
+  admission_status TEXT NOT NULL, admission_reason TEXT, entry_kind TEXT, entry_verb TEXT,
+  ir_version TEXT, components_json TEXT NOT NULL DEFAULT '[]', rules_version INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, admitted_at TEXT
+);
 `;
 
 export interface EnrichmentRunRow {
@@ -812,6 +851,8 @@ export class Store {
     this.addColumnIfMissing("native_sessions", "dispatch_target", "TEXT");
     this.addColumnIfMissing("native_sessions", "runtime_generation", "INTEGER");
     this.addColumnIfMissing("artifacts", "source_answer_id", "TEXT");
+    // A database written before admission carried a rule-set version reads 0 and re-admits.
+    this.addColumnIfMissing("warble_profiles", "rules_version", "INTEGER NOT NULL DEFAULT 0");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS enrichment_approvals_nonce_unique ON enrichment_approvals(nonce) WHERE nonce <> ''");
   }
 
@@ -1028,6 +1069,52 @@ export class Store {
        LIMIT 1`,
     ).get(nativeSessionId);
     return row ? rowToNativeStructuredAnswer(row) : undefined;
+  }
+
+  // ---------------------------------------------------------------------
+  // warble profile registry
+  // ---------------------------------------------------------------------
+
+  upsertWarbleProfile(row: WarbleProfileRow): WarbleProfileRow {
+    this.db.prepare(
+      `INSERT INTO warble_profiles (id, kind, role, source_dir, profile_hash, warble_identity, admission_status, admission_reason,
+         entry_kind, entry_verb, ir_version, components_json, rules_version, created_at, updated_at, admitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         kind = excluded.kind, role = excluded.role, source_dir = excluded.source_dir,
+         profile_hash = excluded.profile_hash, warble_identity = excluded.warble_identity,
+         admission_status = excluded.admission_status, admission_reason = excluded.admission_reason,
+         entry_kind = excluded.entry_kind, entry_verb = excluded.entry_verb, ir_version = excluded.ir_version,
+         components_json = excluded.components_json, rules_version = excluded.rules_version,
+         updated_at = excluded.updated_at, admitted_at = excluded.admitted_at`,
+    ).run(
+      row.id, row.kind, row.role, row.sourceDir, row.profileHash, row.warbleIdentity, row.admissionStatus, row.admissionReason,
+      row.entryKind, row.entryVerb, row.irVersion, row.componentsJson, row.rulesVersion, row.createdAt, row.updatedAt, row.admittedAt,
+    );
+    return this.getWarbleProfile(row.id)!;
+  }
+
+  getWarbleProfile(id: string): WarbleProfileRow | undefined {
+    const row = this.db.prepare(`SELECT * FROM warble_profiles WHERE id = ?`).get(id);
+    return row ? rowToWarbleProfile(row) : undefined;
+  }
+
+  /** Built-ins first (in registration order), then user profiles by id. */
+  listWarbleProfiles(): WarbleProfileRow[] {
+    return this.db
+      .prepare(`SELECT * FROM warble_profiles ORDER BY CASE kind WHEN 'builtin' THEN 0 ELSE 1 END, rowid ASC`)
+      .all()
+      .map(rowToWarbleProfile);
+  }
+
+  deleteWarbleProfile(id: string): boolean {
+    return this.db.prepare(`DELETE FROM warble_profiles WHERE id = ?`).run(id).changes > 0;
+  }
+
+  /** How many native sessions ever ran inside this profile; the registry refuses to remove a referenced one. */
+  countNativeSessionsByDispatchProfile(profileId: string): number {
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM native_sessions WHERE dispatch_profile = ?`).get(profileId);
+    return row ? num(row as Record<string, unknown>, "n") : 0;
   }
 
   listNativeSessions(): NativeSessionRow[] {
@@ -2369,6 +2456,27 @@ function rowToNativeSession(row: Record<string, unknown>): NativeSessionRow {
     createdAt: str(row, "created_at"), updatedAt: str(row, "updated_at"),
     startedAt: strOrNull(row, "started_at"), endedAt: strOrNull(row, "ended_at"),
     exitCode: row["exit_code"] === null ? null : num(row, "exit_code"), failure: strOrNull(row, "failure"),
+  };
+}
+
+function rowToWarbleProfile(row: Record<string, unknown>): WarbleProfileRow {
+  return {
+    id: str(row, "id"),
+    kind: str(row, "kind") as WarbleProfileKind,
+    role: str(row, "role") as WarbleProfileRole,
+    sourceDir: str(row, "source_dir"),
+    profileHash: str(row, "profile_hash"),
+    warbleIdentity: str(row, "warble_identity"),
+    admissionStatus: str(row, "admission_status") as WarbleProfileAdmissionStatus,
+    admissionReason: strOrNull(row, "admission_reason"),
+    entryKind: strOrNull(row, "entry_kind") as WarbleProfileEntryKind | null,
+    entryVerb: strOrNull(row, "entry_verb"),
+    irVersion: strOrNull(row, "ir_version"),
+    componentsJson: str(row, "components_json"),
+    rulesVersion: row["rules_version"] === null || row["rules_version"] === undefined ? 0 : num(row, "rules_version"),
+    createdAt: str(row, "created_at"),
+    updatedAt: str(row, "updated_at"),
+    admittedAt: strOrNull(row, "admitted_at"),
   };
 }
 

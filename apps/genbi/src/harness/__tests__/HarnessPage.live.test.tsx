@@ -13,6 +13,9 @@ const getHarness = vi.fn();
 
 vi.mock('@/bff/client', () => ({
   getHarness: (...args: unknown[]) => getHarness(...args),
+  listProfiles: () => Promise.resolve({ profiles: [] }),
+  addProfile: () => Promise.reject(new Error('not in this test')),
+  deleteProfile: () => Promise.reject(new Error('not in this test')),
   getRuntimeSettingsReadiness: () => Promise.resolve({ valid: true as const }),
 }));
 

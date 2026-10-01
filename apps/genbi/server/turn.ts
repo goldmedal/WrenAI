@@ -1,4 +1,5 @@
 import { captureStructuredScope } from "./structured-scope.js";
+import type { ProfileRegistry } from "./profile-registry.js";
 import type { StructuredRuntime } from "./structured-runtime.js";
 /**
  * Orchestrates one turn end-to-end: clarify pre-flight, context
@@ -113,6 +114,8 @@ export interface TurnDeps {
   readonly nativeSessions?: NativeSessionService;
   /** Session-scoped MCP persistence service; never used by Ask publish routes. */
   readonly nativeArtifacts?: NativeArtifactService;
+  /** Server-held registry of conversation profiles; absent means `/api/profiles` answers 503. */
+  readonly profileRegistry?: ProfileRegistry;
   readonly baseRouteOptions: Omit<RouteOptions, "question" | "onEvent">;
   /**
    * Ask/compile-bind only: compiles+loads the analysis profile's bundle.
@@ -129,7 +132,7 @@ export interface TurnDeps {
    * dependency resolves the corresponding server-owned profile source. It is
    * intentionally distinct from native-session IR/launch wiring.
    */
-  readonly describeHarnessBundle?: (purpose: NativePurpose, options: Omit<RouteOptions, "question" | "onEvent">) => Promise<Bundle>;
+  readonly describeHarnessBundle?: (purpose: NativePurpose, options: Omit<RouteOptions, "question" | "onEvent">, profileSource?: string) => Promise<Bundle>;
   /**
    * Compiles the canonical post-bind profile without rebinding its context and
    * returns its declared tier names. Unlike `describeBundle`, this seam is

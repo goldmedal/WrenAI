@@ -185,7 +185,8 @@ export type HarnessPurpose = 'setup' | 'analysis' | 'context_enrichment';
 /** Server-derived active execution metadata for the profile currently rendered. */
 interface HarnessPurposeInfoBase {
   purpose: HarnessPurpose;
-  profile: 'genbi-setup' | 'genbi-default' | 'genbi-enrich-context';
+  /** A system purpose's fixed profile, or the registry id of the selected conversation profile. */
+  profile: string;
   scopeKind: 'bootstrap' | 'bound_project';
   available: boolean;
   reason?: string;

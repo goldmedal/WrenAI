@@ -862,7 +862,8 @@ export interface HarnessDto {
  */
 interface HarnessPurposeBase {
   readonly purpose: "setup" | "analysis" | "context_enrichment";
-  readonly profile: "genbi-setup" | "genbi-default" | "genbi-enrich-context";
+  /** A system purpose's fixed profile, or the registry id of the selected conversation profile. */
+  readonly profile: string;
   readonly scopeKind: "bootstrap" | "bound_project";
   readonly available: boolean;
   readonly reason?: string;
@@ -893,3 +894,49 @@ export type SseFrame =
   | { readonly event: "event"; readonly data: SessionEvent }
   | { readonly event: "error"; readonly data: { readonly message: string } }
   | { readonly event: "done"; readonly data: Record<string, never> };
+
+// ---------------------------------------------------------------------------
+// Warble profile registry (`/api/profiles`). A browser selects a conversation
+// profile by `id`; it never names a directory or a launch tuple. `selectable`
+// is the registry's verdict (conversation role AND admitted); whether a native
+// session can start right now is native readiness's answer, per profile.
+// ---------------------------------------------------------------------------
+
+export interface WarbleProfileDto {
+  readonly id: string;
+  readonly kind: "builtin" | "user";
+  readonly role: "conversation" | "system";
+  readonly selectable: boolean;
+  readonly admission: {
+    readonly status: "admitted" | "unavailable";
+    /** Every failed admission rule, joined; absent when admitted. System profiles state their role here. */
+    readonly reason?: string;
+    readonly checkedAt: string;
+  };
+  /** How a session enters the profile — decided at admission, not by the caller. */
+  readonly entry?: { readonly kind: "scope" | "agent"; readonly verb?: string };
+  readonly irVersion?: string;
+  readonly components: readonly {
+    readonly id: string;
+    readonly type: string;
+    readonly nativeEligible: boolean;
+    readonly hasDescription: boolean;
+    readonly tiers: readonly string[];
+    readonly capabilities: readonly string[];
+    /** `alias → component` edges this component's steps authorize; non-empty means it composes. */
+    readonly composes: readonly string[];
+  }[];
+  /** Where the registry keeps its copy; user profiles only. */
+  readonly sourceDir?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface WarbleProfileListDto {
+  readonly profiles: readonly WarbleProfileDto[];
+}
+
+/** `POST /api/profiles`: an absolute directory path on the BFF's machine holding a `profile.yml`. */
+export interface AddWarbleProfileRequest {
+  readonly sourcePath: string;
+}

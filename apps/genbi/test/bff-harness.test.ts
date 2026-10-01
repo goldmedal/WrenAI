@@ -205,15 +205,27 @@ describe("GET /api/harness", () => {
     expect(describeHarnessBundle.mock.calls.map(([purpose]) => purpose)).toEqual(["setup", "analysis", "context_enrichment"]);
   });
 
-  it("does not let URL input select the BFF-owned descriptor source or bundle identity", async () => {
-    const describeHarnessBundle = vi.fn<(purpose: keyof typeof NATIVE_DISPATCH_REGISTRY, options: Omit<RouteOptions, "question" | "onEvent">) => Promise<Bundle>>(async (purpose) => bundleForPurpose(purpose));
+  it("does not let URL input select the BFF-owned descriptor source; a profile id is resolved by the registry, never by the caller", async () => {
+    const describeHarnessBundle = vi.fn<(purpose: keyof typeof NATIVE_DISPATCH_REGISTRY, options: Omit<RouteOptions, "question" | "onEvent">, profileSource?: string) => Promise<Bundle>>(async (purpose) => bundleForPurpose(purpose));
     const deps: TurnDeps = { store: new Store(":memory:"), route: noRoute(), baseRouteOptions: BASE_ROUTE_OPTIONS, describeHarnessBundle };
     const app = createApp(deps);
 
-    const res = await app.request("/api/harness?purpose=analysis&profileSource=%2Fattacker%2Fprofile&profile=genbi-setup");
+    // A source path in the URL is ignored outright; the default profile id is the same as no id.
+    const res = await app.request("/api/harness?purpose=analysis&profileSource=%2Fattacker%2Fprofile&profile=genbi-default");
     expect(res.status).toBe(200);
     expect(describeHarnessBundle).toHaveBeenCalledWith("analysis", expect.objectContaining({ profileSource: "/fixture/profile" }));
     expect(await res.json()).toMatchObject({ purpose: { purpose: "analysis", profile: "genbi-default" }, profile: { id: "genbi-default" } });
+
+    // Any other id needs the registry; without one the request fails closed rather than describing anything.
+    const other = await app.request("/api/harness?purpose=analysis&profile=genbi-setup");
+    expect(other.status).toBe(503);
+    expect(describeHarnessBundle).toHaveBeenCalledTimes(1);
+    // A profile is only selectable for analysis.
+    const setup = await app.request("/api/harness?purpose=setup&profile=genbi-default");
+    expect(setup.status).toBe(400);
+    const malformed = await app.request("/api/harness?purpose=analysis&profile=..%2Fescape");
+    expect(malformed.status).toBe(400);
+    expect(describeHarnessBundle).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed for every purpose when the server-owned source produces a mismatched bundle", async () => {
@@ -232,7 +244,7 @@ describe("GET /api/harness", () => {
     const app = createApp(deps);
 
     for (const purpose of ["setup", "analysis", "context_enrichment"] as const) {
-      const res = await app.request(`/api/harness?purpose=${purpose}&profile=genbi-default`);
+      const res = await app.request(`/api/harness?purpose=${purpose}`);
       expect(res.status).toBe(500);
       expect(await res.json()).toEqual({ error: HARNESS_PROFILE_IDENTITY_ERROR });
     }
@@ -262,6 +274,67 @@ describe("GET /api/harness", () => {
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ error: expect.stringContaining("harness purpose") });
     }
+    expect(describeHarnessBundle).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/harness with a registry-selected conversation profile", () => {
+  function registryFor(rows: Record<string, { role: "conversation" | "system"; admitted: boolean; reason?: string; sourceDir: string }>) {
+    return {
+      resolveConversationProfileSource: async (id: string) => {
+        const { ProfileRegistryError } = await import("../server/profile-registry.js");
+        const row = rows[id];
+        if (!row) throw new ProfileRegistryError(404, `no profile with id "${id}"`);
+        if (row.role !== "conversation") throw new ProfileRegistryError(409, `profile "${id}" is a system purpose profile and cannot start a conversation`);
+        if (!row.admitted) throw new ProfileRegistryError(409, `profile "${id}" is unavailable: ${row.reason ?? "admission failed"}`);
+        return { sourceDir: row.sourceDir, row };
+      },
+    } as never;
+  }
+  const rows = {
+    "team-kpis": { role: "conversation" as const, admitted: true, sourceDir: "/workspace/profiles/team-kpis" },
+    "genbi-monitor": { role: "conversation" as const, admitted: false, reason: 'component "monitor_freshness" is outside the host\'s execution scope', sourceDir: "/pkg/profiles/genbi-monitor" },
+    "genbi-setup": { role: "system" as const, admitted: true, sourceDir: "/pkg/profiles/genbi-setup" },
+  };
+
+  it("describes the selected profile from the registry's directory and reports it under its own id, with per-profile readiness", async () => {
+    const describeHarnessBundle = vi.fn(async (_purpose: keyof typeof NATIVE_DISPATCH_REGISTRY, _options: unknown, profileSource?: string) =>
+      loadBundle(buildSyntheticBundle({ profile: profileSource === "/workspace/profiles/team-kpis" ? "team-kpis" : "genbi-default" })));
+    const deps: TurnDeps = {
+      store: new Store(":memory:"), route: noRoute(), baseRouteOptions: BASE_ROUTE_OPTIONS, describeHarnessBundle,
+      profileRegistry: registryFor(rows),
+      nativeSessions: { readiness: async () => ({
+        purposes: { analysis: { available: true, target: "claude-code:interactive", targetLabel: "Claude CLI", profile: "genbi-default", scopeKind: "bound_project" } },
+        profiles: { "team-kpis": { id: "team-kpis", available: false, reason: "native sessions require a current bound project", target: "claude-code:interactive", targetLabel: "Claude CLI" } },
+      }) } as never,
+    };
+    const app = createApp(deps);
+    const res = await app.request("/api/harness?purpose=analysis&profile=team-kpis");
+    expect(res.status).toBe(200);
+    expect(describeHarnessBundle).toHaveBeenCalledWith("analysis", expect.objectContaining({ profileSource: "/fixture/profile" }), "/workspace/profiles/team-kpis");
+    const dto = (await res.json()) as HarnessDto;
+    expect(dto.purpose).toMatchObject({ purpose: "analysis", profile: "team-kpis", scopeKind: "bound_project", executionKind: "native_session", available: false, reason: "native sessions require a current bound project" });
+    expect(dto.profile.id).toBe("team-kpis");
+  });
+
+  it("fails closed when the registry's directory compiles to a bundle with another identity", async () => {
+    const describeHarnessBundle = vi.fn(async () => loadBundle(buildSyntheticBundle({ profile: "genbi-default" })));
+    const app = createApp({ store: new Store(":memory:"), route: noRoute(), baseRouteOptions: BASE_ROUTE_OPTIONS, describeHarnessBundle, profileRegistry: registryFor(rows) });
+    const res = await app.request("/api/harness?purpose=analysis&profile=team-kpis");
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: HARNESS_PROFILE_IDENTITY_ERROR });
+  });
+
+  it("answers 409 with the registry's reason for an unavailable or system profile and 404 for an unknown one, without describing anything", async () => {
+    const describeHarnessBundle = vi.fn(async () => loadBundle(buildSyntheticBundle({ profile: "team-kpis" })));
+    const app = createApp({ store: new Store(":memory:"), route: noRoute(), baseRouteOptions: BASE_ROUTE_OPTIONS, describeHarnessBundle, profileRegistry: registryFor(rows) });
+    const unavailable = await app.request("/api/harness?purpose=analysis&profile=genbi-monitor");
+    expect(unavailable.status).toBe(409);
+    expect(await unavailable.json()).toEqual({ error: expect.stringMatching(/outside the host's execution scope/) });
+    const system = await app.request("/api/harness?purpose=analysis&profile=genbi-setup");
+    expect(system.status).toBe(409);
+    expect(await system.json()).toEqual({ error: expect.stringMatching(/system purpose profile/) });
+    expect((await app.request("/api/harness?purpose=analysis&profile=nope")).status).toBe(404);
     expect(describeHarnessBundle).not.toHaveBeenCalled();
   });
 });

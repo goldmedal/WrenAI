@@ -91,7 +91,7 @@ describe("resolveDispatchIr wiring", () => {
     // behavioural half — that the resolved path is what reaches dispatch — is
     // asserted by the compile checks above and by native-sessions' own suite.
     const bin = readFileSync(new URL("../server/bin.ts", import.meta.url), "utf-8");
-    expect(bin).toMatch(/resolveDispatchIr: async \(purpose, binding\)/);
+    expect(bin).toMatch(/resolveDispatchIr: async \(purpose, binding, selectedProfileSource\)/);
     expect(bin).toMatch(/compileProfile\(\{ profileSource, userProject: binding\.path/);
     expect(bin).toMatch(/compileRawProfile\(\{ profileSource/);
     expect(bin).toMatch(/const nativeRuntimeHost = new RuntimeHost\(/);

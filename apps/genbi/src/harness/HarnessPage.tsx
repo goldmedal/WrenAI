@@ -15,6 +15,7 @@ import { HarnessOverview } from './HarnessOverview';
  */
 export function HarnessPage() {
   const selectedPurpose = useHarnessStore((s) => s.selectedPurpose);
+  const selectedProfile = useHarnessStore((s) => s.selectedProfile);
   const harness = useHarnessStore((s) => s.harness);
   const loading = useHarnessStore((s) => s.loading);
   const error = useHarnessStore((s) => s.error);
@@ -25,7 +26,12 @@ export function HarnessPage() {
   }, [loadHarness]);
 
   const live = isBffEnabled();
-  const view = live ? harness : fixtureHarnessViews[selectedPurpose];
+  // Fixture mode has one analysis view; a fixture conversation profile is that view under its own id.
+  const view = live
+    ? harness
+    : selectedPurpose === 'analysis' && selectedProfile !== 'genbi-default'
+      ? { ...fixtureHarnessViews.analysis, purpose: { ...fixtureHarnessViews.analysis.purpose, profile: selectedProfile } }
+      : fixtureHarnessViews[selectedPurpose];
 
   let body;
   if (live && loading && !harness) {

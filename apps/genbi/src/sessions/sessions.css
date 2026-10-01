@@ -37,6 +37,10 @@
 .sessions-new-menu .ant-typography { overflow-wrap: anywhere; }
 .sessions-new-menu .ant-btn { width: 100%; min-height: 32px; height: auto; justify-content: flex-start; white-space: normal; text-align: left; line-height: 1.35; }
 .sessions-new-menu .ant-btn > span { min-width: 0; overflow-wrap: anywhere; }
+.sessions-new-profile { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.sessions-new-profile .ant-select { width: 100%; }
+.sessions-new-profile-option { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sessions-new-profile-reason { font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
 .sessions-workbench.is-compact .sessions-toolbar { gap: 6px; padding-inline: 8px; }
 .sessions-workbench.is-compact .sessions-toolbar-title span { display: none; }
 .sessions-workbench.is-compact .sessions-terminal-wrap { padding: 8px; }

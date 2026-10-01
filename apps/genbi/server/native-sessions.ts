@@ -237,6 +237,8 @@ export type NativeSessionReadiness = {
   /** Read-only RuntimeHost projection. Diagnostics remain in the host process. */
   readonly runtimeHost?: RuntimeReadiness;
   readonly purposes: Record<NativePurpose, NativePurposeReadiness>;
+  /** Per conversation profile, when a registry is wired: analysis readiness narrowed by the profile's own verdict. */
+  readonly profiles?: Readonly<Record<string, NativeProfileReadiness>>;
   /** Health of the host-owned GenBI MCP endpoint; never includes a credential. */
   readonly mcp: NativeMcpHealth;
 } & Record<NativePurpose, NativePurposeReadiness>;
@@ -311,6 +313,104 @@ const welcomePromptFor = (purpose: NativePurpose): string => {
   }
 };
 
+/**
+ * The conversation profile an analysis session starts inside.
+ *
+ * The default is the registry's fixed analysis profile and keeps every existing entry rule
+ * (`claudeScopeEntry`, `agentFor`, the Codex entry verbs). Any other id is a profile the
+ * server-held registry (`profile-registry.ts`) has admitted; its entry form was decided at
+ * admission and is carried here, never inferred at launch. A browser only ever names the id.
+ */
+export interface NativeProfileSelection {
+  readonly id: string;
+  /** Directory the session's IR is compiled from; absent means the boot-time analysis source. */
+  readonly sourceDir?: string;
+  readonly entry: { readonly kind: "scope" } | { readonly kind: "agent"; readonly verb: string };
+}
+
+/** One conversation profile as readiness reports it; `selectable` is the registry's verdict. */
+export interface NativeConversationProfileSummary {
+  readonly id: string;
+  readonly selectable: boolean;
+  readonly reason?: string;
+  readonly entryKind?: "scope" | "agent";
+  readonly entryVerb?: string;
+}
+
+export interface NativeProfileReadiness {
+  readonly id: string;
+  readonly scopeKind: "bound_project";
+  readonly profile: string;
+  readonly target?: InteractiveTarget;
+  readonly targetLabel?: string;
+  readonly available: boolean;
+  readonly reason?: string;
+  readonly entryKind?: "scope" | "agent";
+  readonly entryVerb?: string;
+}
+
+export const DEFAULT_CONVERSATION_PROFILE: string = NATIVE_DISPATCH_REGISTRY.analysis.profile;
+const DEFAULT_PROFILE_SELECTION: NativeProfileSelection = Object.freeze({ id: DEFAULT_CONVERSATION_PROFILE, entry: { kind: "scope" as const } });
+const PROFILE_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const CODEX_CUSTOM_PROFILE_UNAVAILABLE = "conversation profiles other than the default are not available on the Codex CLI";
+
+/**
+ * A selection that departs from the purpose's fixed profile, or `undefined` when the registry's
+ * rules for that purpose apply unchanged. System purposes never have one.
+ */
+const customSelection = (purpose: NativePurpose, selection: NativeProfileSelection | undefined): NativeProfileSelection | undefined =>
+  purpose === "analysis" && selection !== undefined && selection.id !== NATIVE_DISPATCH_REGISTRY[purpose].profile ? selection : undefined;
+
+/**
+ * The profile id a launch request names, validated for shape and purpose. Only analysis sessions
+ * run inside a selectable profile; the system purposes keep their fixed ones.
+ */
+function requestedProfileId(purpose: NativePurpose, profile: string | undefined): string {
+  if (profile === undefined) return purpose === "analysis" ? DEFAULT_CONVERSATION_PROFILE : NATIVE_DISPATCH_REGISTRY[purpose].profile;
+  if (purpose !== "analysis") throw new InteractiveLaunchError("native session profile is only selectable for analysis");
+  if (!PROFILE_ID_PATTERN.test(profile)) throw new InteractiveLaunchError("native session profile is invalid");
+  return profile;
+}
+
+const scopeEntryFor = (purpose: NativePurpose, vendor: NativeVendor, selection?: NativeProfileSelection): boolean => {
+  const custom = customSelection(purpose, selection);
+  return custom ? custom.entry.kind === "scope" : claudeScopeEntry(purpose, vendor);
+};
+
+/** The agent a pinned launch names, or the component a scope session is recorded under. */
+const expectedAgentFor = (purpose: NativePurpose, vendor: NativeVendor, selection?: NativeProfileSelection): string => {
+  const custom = customSelection(purpose, selection);
+  if (!custom) return agentFor(purpose, vendor);
+  return custom.entry.kind === "agent" ? custom.entry.verb : custom.id;
+};
+
+/** The entry declared in the scope descriptor; a custom profile's form comes from admission. */
+const entryFor = (
+  purpose: NativePurpose,
+  vendor: NativeVendor,
+  entryVerb: string | undefined,
+  selection?: NativeProfileSelection,
+): { readonly kind: "scope"; readonly prompt: string } | { readonly verb: string; readonly prompt: string } => {
+  const custom = customSelection(purpose, selection);
+  if (!custom) return nativeEntryFor(purpose, vendor, entryVerb);
+  // The welcome text is purpose text, not profile text: every conversation profile is entered the
+  // same way, so the first turn stays the one string the launch gate already checks.
+  return custom.entry.kind === "scope"
+    ? { kind: "scope", prompt: welcomePromptFor(purpose) }
+    : { verb: custom.entry.verb, prompt: welcomePromptFor(purpose) };
+};
+
+/** A resume's dispatch: the registry's definition for the purpose, with the row's own profile for analysis. */
+type ResumeDispatch = Omit<NonNullable<ReturnType<typeof dispatchForPurpose>>, "profile"> & { readonly profile: string };
+
+/** The one shape every launch entry point accepts; `profile` is only meaningful for analysis. */
+export interface NativeLaunchInput {
+  readonly purpose: NativePurpose;
+  readonly vendor?: NativeVendor;
+  readonly entryVerb?: string | undefined;
+  readonly profile?: string | undefined;
+}
+
 export interface NativeSessionServiceOptions {
   /** Certified server composition only; absence keeps direct execution closed. */
   readonly directCodex?: DirectCodexProvisioner;
@@ -335,7 +435,15 @@ export interface NativeSessionServiceOptions {
    * this Warble can dispatch these profile shapes at all and has no user
    * project in view. They are wrong the moment a session has a binding.
    */
-  readonly resolveDispatchIr?: (purpose: NativePurpose, binding: EnrichmentBinding | undefined) => Promise<string>;
+  readonly resolveDispatchIr?: (purpose: NativePurpose, binding: EnrichmentBinding | undefined, profileSource?: string) => Promise<string>;
+  /**
+   * Resolves a non-default conversation profile id to the directory and entry form the registry
+   * admitted it with. Rejects (with the stored reason) for an unknown, system or unavailable id.
+   * Absent means only the default profile can be selected.
+   */
+  readonly resolveConversationProfile?: (id: string) => Promise<NativeProfileSelection>;
+  /** Every conversation profile the registry lists, for per-profile readiness. */
+  readonly listConversationProfiles?: () => Promise<readonly NativeConversationProfileSummary[]>;
   readonly warbleBin: string;
   /** Absolute server-configured Wren shim for native Codex sessions; never a request input. */
   readonly wrenShim?: string;
@@ -869,7 +977,7 @@ function parseNativeSetupRecoveryReport(value: unknown): NativeSetupRecoveryRepo
  * omits the host-issued scope; Setup exposes only its separately authorized
  * bootstrap root, which is revalidated against the durable host configuration.
  */
-export function readNativeLaunchSpec(cwd: string, purpose: NativePurpose, vendor: NativeVendor, scopeId: string, binding?: EnrichmentBinding, mcp?: NativeMcpDescriptor, materializationState?: NativeSessionStateBase, authorizedWorkspace?: string, providerLaunch?: NativeProviderLaunch, componentReceipt?: NativeComponentReceipt): InteractiveLaunchSpec {
+export function readNativeLaunchSpec(cwd: string, purpose: NativePurpose, vendor: NativeVendor, scopeId: string, binding?: EnrichmentBinding, mcp?: NativeMcpDescriptor, materializationState?: NativeSessionStateBase, authorizedWorkspace?: string, providerLaunch?: NativeProviderLaunch, componentReceipt?: NativeComponentReceipt, selection?: NativeProfileSelection): InteractiveLaunchSpec {
   const ownershipRoot = binding?.path ?? authorizedWorkspace;
   const root = materializationState && ownershipRoot
     ? validateNativeSessionWorkspace(materializationState, ownershipRoot, cwd)
@@ -886,8 +994,8 @@ export function readNativeLaunchSpec(cwd: string, purpose: NativePurpose, vendor
   const keys = ["version", "target", "purpose", "executable", "argv", "agent", ...(isV5 ? ["component_host"] : []), ...(isV4 ? ["mcp", ...(isSetupV4 ? ["bootstrap_root"] : [])] : ["scope"]), "cwd", "artifact_root", "handoff_path"];
   const target = targetForProvider(vendor);
   const executable = vendor === "claude" ? "claude" : "codex";
-  const expectedAgent = agentFor(purpose, vendor);
-  const scopeEntry = claudeScopeEntry(purpose, vendor);
+  const expectedAgent = expectedAgentFor(purpose, vendor, selection);
+  const scopeEntry = scopeEntryFor(purpose, vendor, selection);
   if (!value || !hasExactlyKeys(value, keys) ||
     value.version !== (isV5 ? "5" : isV4 ? "4" : "2") || value.target !== target || value.purpose !== purpose || value.executable !== executable ||
     !Array.isArray(value.argv) || !value.argv.every((arg) => typeof arg === "string") || !record(value.agent) ||
@@ -918,7 +1026,7 @@ export function readNativeLaunchSpec(cwd: string, purpose: NativePurpose, vendor
   // "agent" descriptor is a distinct kind (`claude_scope`) carrying the profile id rather than
   // `claude_agent`/`expectedAgent`. See `claudeScopeEntry` above.
   const expectedAgentKind = scopeEntry ? "claude_scope" : vendor === "claude" ? "claude_agent" : "codex_skill";
-  const expectedAgentName = scopeEntry ? NATIVE_DISPATCH_REGISTRY[purpose].profile : expectedAgent;
+  const expectedAgentName = scopeEntry ? (customSelection(purpose, selection)?.id ?? NATIVE_DISPATCH_REGISTRY[purpose].profile) : expectedAgent;
   if (!hasExactlyKeys(agent, ["kind", "name"]) || (!isV4 && !validV2Scope) ||
     JSON.stringify(value.argv) !== JSON.stringify(baseArgv) || agent.kind !== expectedAgentKind || agent.name !== expectedAgentName ||
     (isV4 && (!launchMcp || !hasExactlyKeys(launchMcp, ["server_name", "credential_env_var"]) || launchMcp.server_name !== "genbi_session" || launchMcp.credential_env_var !== NATIVE_MCP_CREDENTIAL_ENV_VAR))) throw new InteractiveLaunchError("native session launch specification is incompatible");
@@ -1173,7 +1281,7 @@ export class NativeSessionService {
    * particular, a setup session never inherits the active project binding,
    * while a bound-purpose session cannot cross a generation or revision.
    */
-  async openOrCreate(input: { purpose: NativePurpose; vendor?: NativeVendor; entryVerb?: string | undefined }): Promise<NativeSessionLaunch> {
+  async openOrCreate(input: NativeLaunchInput): Promise<NativeSessionLaunch> {
     this.assertRuntimeDispatchable();
     const storedRuntime = this.options.store.getNativeRuntimeBinding();
     // Compatibility seam for existing server-side callers/tests only. Browser
@@ -1184,8 +1292,9 @@ export class NativeSessionService {
     const dispatch = dispatchForPurpose(input.purpose, runtime);
     if (!dispatch) throw new InteractiveLaunchError("native sessions require a saved Runtime & authentication binding");
     const binding = input.purpose === "setup" ? undefined : this.options.getBinding();
+    const profileId = requestedProfileId(input.purpose, input.profile);
     const entryVerb = selectedNativeEntry(input.purpose, dispatch.provider, input.entryVerb);
-    const reusable = this.list().find((row) => this.matchesOpenScope(row, input.purpose, dispatch.target, runtime.generation, binding) && selectedNativeEntry(row.purpose, row.vendor, row.entryVerb) === entryVerb);
+    const reusable = this.list().find((row) => this.matchesOpenScope(row, input.purpose, dispatch.target, runtime.generation, binding, profileId) && selectedNativeEntry(row.purpose, row.vendor, row.entryVerb) === entryVerb);
     if (reusable) {
       const recoveryCapability = this.recoveryCapabilities.get(reusable.id);
       return { row: reusable, capability: this.liveCapability(reusable.id)!, ...(recoveryCapability ? { recoveryCapability } : {}) };
@@ -1193,7 +1302,7 @@ export class NativeSessionService {
     const selectedEntry = selectedNativeEntry(input.purpose, dispatch.provider, input.entryVerb);
     const scopeKey = input.purpose === "setup"
       ? JSON.stringify([input.purpose, dispatch.target, runtime.generation, "bootstrap"])
-      : JSON.stringify([input.purpose, dispatch.target, runtime.generation, binding?.identity ?? "unbound", binding?.generation ?? null, binding?.revision ?? null, selectedEntry]);
+      : JSON.stringify([input.purpose, dispatch.target, runtime.generation, binding?.identity ?? "unbound", binding?.generation ?? null, binding?.revision ?? null, selectedEntry, profileId]);
     return this.singleFlight(`open:${scopeKey}`, scopeKey, input, binding, runtime);
   }
 
@@ -1219,7 +1328,7 @@ export class NativeSessionService {
    * click coalesce, while a later intentional launch receives new durable and
    * browser-scoped authority.
    */
-  async startSeparate(input: { purpose: NativePurpose; idempotencyKey: string; vendor?: NativeVendor; entryVerb?: string | undefined }): Promise<NativeSessionLaunch> {
+  async startSeparate(input: NativeLaunchInput & { readonly idempotencyKey: string }): Promise<NativeSessionLaunch> {
     this.assertRuntimeDispatchable();
     const storedRuntime = this.options.store.getNativeRuntimeBinding();
     const runtime = !storedRuntime.configured && input.vendor
@@ -1228,10 +1337,11 @@ export class NativeSessionService {
     const dispatch = dispatchForPurpose(input.purpose, runtime);
     if (!dispatch) throw new InteractiveLaunchError("native sessions require a saved Runtime & authentication binding");
     const binding = input.purpose === "setup" ? undefined : this.options.getBinding();
+    const profileId = requestedProfileId(input.purpose, input.profile);
     const selectedEntry = selectedNativeEntry(input.purpose, dispatch.provider, input.entryVerb);
     const scopeKey = input.purpose === "setup"
       ? JSON.stringify([input.purpose, dispatch.target, runtime.generation, "bootstrap"])
-      : JSON.stringify([input.purpose, dispatch.target, runtime.generation, binding?.identity ?? "unbound", binding?.generation ?? null, binding?.revision ?? null, selectedEntry]);
+      : JSON.stringify([input.purpose, dispatch.target, runtime.generation, binding?.identity ?? "unbound", binding?.generation ?? null, binding?.revision ?? null, selectedEntry, profileId]);
     return this.replayStartSeparate(`start:${input.idempotencyKey}`, scopeKey, input, binding, runtime);
   }
 
@@ -1313,12 +1423,17 @@ export class NativeSessionService {
     }
   }
 
-  private resumeScope(row: NativeSessionRow): { readonly binding: EnrichmentBinding | undefined; readonly runtime: NativeRuntimeBinding; readonly dispatch: NonNullable<ReturnType<typeof dispatchForPurpose>> } | undefined {
+  private resumeScope(row: NativeSessionRow): { readonly binding: EnrichmentBinding | undefined; readonly runtime: NativeRuntimeBinding; readonly dispatch: ResumeDispatch } | undefined {
     const storedRuntime = this.options.store.getNativeRuntimeBinding();
     const runtime: NativeRuntimeBinding = !storedRuntime.configured && this.legacyFixtureMode()
       ? { configured: true, generation: 0, provider: row.vendor, target: targetForProvider(row.vendor), targetLabel: nativeTargetLabel(row.vendor) }
       : storedRuntime;
-    const dispatch = dispatchForPurpose(row.purpose, runtime);
+    const registryDispatch = dispatchForPurpose(row.purpose, runtime);
+    // An analysis row resumes inside the profile it ran in; whether that profile is still admitted is
+    // the launch's question (it resolves the id again), not this scope fence's.
+    const dispatch = registryDispatch && row.purpose === "analysis" && row.dispatchProfile !== null
+      ? { ...registryDispatch, profile: row.dispatchProfile }
+      : registryDispatch;
     const binding = row.purpose === "setup" ? undefined : this.options.getBinding();
     const matches = dispatch?.provider === row.vendor && row.dispatchProfile === dispatch.profile && row.dispatchTarget === dispatch.target && row.runtimeGeneration === runtime.generation
       && (row.purpose === "setup"
@@ -1335,7 +1450,7 @@ export class NativeSessionService {
       && (row.purpose === "setup" || binding !== undefined);
   }
 
-  private async resumeReserved(source: NativeSessionRow, idempotencyKey: string, scope: { readonly binding: EnrichmentBinding | undefined; readonly runtime: NativeRuntimeBinding; readonly dispatch: NonNullable<ReturnType<typeof dispatchForPurpose>> }): Promise<NativeSessionLaunch> {
+  private async resumeReserved(source: NativeSessionRow, idempotencyKey: string, scope: { readonly binding: EnrichmentBinding | undefined; readonly runtime: NativeRuntimeBinding; readonly dispatch: ResumeDispatch }): Promise<NativeSessionLaunch> {
     const fingerprint = resumeScopeFingerprint(source);
     const existing = this.options.store.getNativeSessionResumeAction(source.id, idempotencyKey);
     if (existing) {
@@ -1359,17 +1474,17 @@ export class NativeSessionService {
     const reserved = this.options.store.reserveNativeSessionResume({
       sourceSessionId: source.id, idempotencyKey, scopeFingerprint: fingerprint, sealedHandle: sealedChild,
       child: {
-        id: childId, purpose: source.purpose, vendor: source.vendor, agent: agentFor(source.purpose, source.vendor), entryVerb: selectedNativeEntry(source.purpose, source.vendor, source.entryVerb), scopeKind: source.scopeKind, scopeId: childScopeId,
+        id: childId, purpose: source.purpose, vendor: source.vendor, agent: source.agent, entryVerb: selectedNativeEntry(source.purpose, source.vendor, source.entryVerb), scopeKind: source.scopeKind, scopeId: childScopeId,
         dispatchProfile: scope.dispatch.profile, dispatchTarget: scope.dispatch.target, runtimeGeneration: scope.runtime.generation,
         ...(scope.binding ? { projectIdentity: scope.binding.identity, bindingGeneration: scope.binding.generation, projectRevision: scope.binding.revision } : {}),
       },
     });
     if (!reserved) throw new InteractiveLaunchError("native session resume is unavailable");
     if (!reserved.created) return this.recoverReservedResume(reserved.row.id, scope);
-    return this.create({ purpose: source.purpose, entryVerb: selectedNativeEntry(source.purpose, source.vendor, source.entryVerb), ...(this.legacyFixtureMode() ? { vendor: source.vendor } : {}) }, scope.binding, scope.runtime, { row: reserved.row, handle });
+    return this.create({ purpose: source.purpose, entryVerb: selectedNativeEntry(source.purpose, source.vendor, source.entryVerb), ...(source.purpose === "analysis" && source.dispatchProfile !== null ? { profile: source.dispatchProfile } : {}), ...(this.legacyFixtureMode() ? { vendor: source.vendor } : {}) }, scope.binding, scope.runtime, { row: reserved.row, handle });
   }
 
-  private async recoverReservedResume(id: string, scope: { readonly binding: EnrichmentBinding | undefined; readonly runtime: NativeRuntimeBinding; readonly dispatch: NonNullable<ReturnType<typeof dispatchForPurpose>> }): Promise<NativeSessionLaunch> {
+  private async recoverReservedResume(id: string, scope: { readonly binding: EnrichmentBinding | undefined; readonly runtime: NativeRuntimeBinding; readonly dispatch: ResumeDispatch }): Promise<NativeSessionLaunch> {
     const row = this.get(id);
     if (!row) throw new InteractiveLaunchError("native session resume is unavailable");
     const terminal = this.sessions.get(row.id);
@@ -1390,7 +1505,7 @@ export class NativeSessionService {
       this.failReservedResume(row.id, "native session resume reservation cannot be recovered");
       throw error;
     }
-    return this.create({ purpose: row.purpose, entryVerb: selectedNativeEntry(row.purpose, row.vendor, row.entryVerb), ...(this.legacyFixtureMode() ? { vendor: row.vendor } : {}) }, scope.binding, scope.runtime, { row, handle });
+    return this.create({ purpose: row.purpose, entryVerb: selectedNativeEntry(row.purpose, row.vendor, row.entryVerb), ...(row.purpose === "analysis" && row.dispatchProfile !== null ? { profile: row.dispatchProfile } : {}), ...(this.legacyFixtureMode() ? { vendor: row.vendor } : {}) }, scope.binding, scope.runtime, { row, handle });
   }
 
   private failReservedResume(id: string, failure: string): void {
@@ -1399,8 +1514,10 @@ export class NativeSessionService {
     this.options.store.invalidateNativeSessionResume(id);
   }
 
-  private matchesOpenScope(row: NativeSessionRow, purpose: NativePurpose, target: InteractiveTarget, generation: number, binding: EnrichmentBinding | undefined): boolean {
+  private matchesOpenScope(row: NativeSessionRow, purpose: NativePurpose, target: InteractiveTarget, generation: number, binding: EnrichmentBinding | undefined, profileId?: string): boolean {
     if (row.purpose !== purpose || row.dispatchTarget !== target || row.runtimeGeneration !== generation || !this.liveCapability(row.id)) return false;
+    // A live session inside another conversation profile is not this one, however its scope matches.
+    if (profileId !== undefined && (row.dispatchProfile ?? NATIVE_DISPATCH_REGISTRY[purpose].profile) !== profileId) return false;
     if (row.status !== "creating" && row.status !== "running" && row.status !== "detached") return false;
     return purpose === "setup"
       ? row.scopeKind === "bootstrap" && row.projectIdentity === null && row.bindingGeneration === null && row.projectRevision === null
@@ -1415,7 +1532,7 @@ export class NativeSessionService {
   private replayStartSeparate(
     launchKey: string,
     scopeKey: string,
-    input: { purpose: NativePurpose; vendor?: NativeVendor; entryVerb?: string | undefined },
+    input: NativeLaunchInput,
     binding: EnrichmentBinding | undefined,
     runtime: NativeRuntimeBinding,
   ): Promise<NativeSessionLaunch> {
@@ -1460,7 +1577,7 @@ export class NativeSessionService {
   private async singleFlight(
     launchKey: string,
     scopeKey: string,
-    input: { purpose: NativePurpose; vendor?: NativeVendor; entryVerb?: string | undefined },
+    input: NativeLaunchInput,
     binding: EnrichmentBinding | undefined,
     runtime: NativeRuntimeBinding,
   ): Promise<NativeSessionLaunch> {
@@ -1477,6 +1594,61 @@ export class NativeSessionService {
     } finally {
       if (this.launches.get(launchKey)?.launch === launch) this.launches.delete(launchKey);
     }
+  }
+
+  /**
+   * Resolves the profile a launch runs inside. The default needs no registry; any other id is
+   * Claude-only (the Codex entry is a purpose skill with no scope form), accepts no entry verb
+   * (its entry form was decided at admission), and must still be admitted right now.
+   */
+  private async selectProfile(purpose: NativePurpose, profile: string | undefined, provider: NativeVendor, entryVerb: string | undefined, resumedRow: NativeSessionRow | undefined): Promise<NativeProfileSelection> {
+    const id = requestedProfileId(purpose, profile);
+    if (resumedRow && (resumedRow.dispatchProfile ?? NATIVE_DISPATCH_REGISTRY[purpose].profile) !== id) throw new InteractiveLaunchError("native session profile changed during resume");
+    // A system purpose always runs its registry profile; the analysis default needs no registry either.
+    if (purpose !== "analysis") return { id, entry: { kind: "scope" } };
+    if (id === DEFAULT_CONVERSATION_PROFILE) return DEFAULT_PROFILE_SELECTION;
+    if (provider !== "claude") throw new InteractiveLaunchError(CODEX_CUSTOM_PROFILE_UNAVAILABLE);
+    // An entry verb beside a selected profile was already refused by `selectedNativeEntry`: Claude
+    // never takes one, and the Codex vendor was refused just above. Nothing to re-check here.
+    void entryVerb;
+    if (!this.options.resolveConversationProfile) throw new InteractiveLaunchError("conversation profile selection is not configured");
+    try {
+      const resolved = await this.options.resolveConversationProfile(id);
+      if (resolved.id !== id) throw new InteractiveLaunchError("conversation profile resolution is inconsistent");
+      return resolved;
+    } catch (error) {
+      if (error instanceof InteractiveLaunchError) throw error;
+      throw new InteractiveLaunchError(error instanceof Error ? error.message : "conversation profile is unavailable");
+    }
+  }
+
+  /** Analysis readiness, narrowed per conversation profile by the registry's verdict and the vendor. */
+  private async conversationProfileReadiness(analysis: NativePurposeReadiness, provider: NativeVendor | undefined): Promise<Readonly<Record<string, NativeProfileReadiness>> | undefined> {
+    if (!this.options.listConversationProfiles) return undefined;
+    let summaries: readonly NativeConversationProfileSummary[];
+    try { summaries = await this.options.listConversationProfiles(); } catch { return undefined; }
+    const result: Record<string, NativeProfileReadiness> = {};
+    for (const summary of summaries) {
+      const custom = summary.id !== DEFAULT_CONVERSATION_PROFILE;
+      // A profile the registry refused is refused for good; say that before any runtime reason,
+      // which may come and go, so a picker can tell the two apart.
+      const reason = (!summary.selectable ? summary.reason ?? "this profile is unavailable" : undefined)
+        ?? analysis.reason
+        ?? (custom && provider !== undefined && provider !== "claude" ? CODEX_CUSTOM_PROFILE_UNAVAILABLE : undefined);
+      result[summary.id] = {
+        id: summary.id,
+        scopeKind: "bound_project",
+        profile: summary.id,
+        ...(analysis.target !== undefined ? { target: analysis.target } : {}),
+        ...(analysis.targetLabel !== undefined ? { targetLabel: analysis.targetLabel } : {}),
+        available: analysis.available && reason === undefined,
+        ...(reason !== undefined ? { reason } : {}),
+        ...(custom
+          ? { ...(summary.entryKind !== undefined ? { entryKind: summary.entryKind } : {}), ...(summary.entryVerb !== undefined ? { entryVerb: summary.entryVerb } : {}) }
+          : { entryKind: provider === "codex" ? "agent" as const : "scope" as const }),
+      };
+    }
+    return result;
   }
 
   async readiness(): Promise<NativeSessionReadiness> {
@@ -1501,7 +1673,8 @@ export class NativeSessionService {
           target: "codex:interactive", targetLabel: "Codex CLI", available: !unavailable, ...(unavailable ? { reason: unavailable } : {}),
           vendors: { codex: { available: !unavailable }, claude: { available: false } } }];
       })) as Record<NativePurpose, NativePurposeReadiness>;
-      return { runtime, runtimeHost: runtimeHostReadiness, purposes, ...purposes, mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason: "Direct conversations use host-owned tools." } };
+      const profiles = await this.conversationProfileReadiness(purposes.analysis, "codex");
+      return { runtime, runtimeHost: runtimeHostReadiness, purposes, ...(profiles ? { profiles } : {}), ...purposes, mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason: "Direct conversations use host-owned tools." } };
     }
     const hostAvailable = await terminalHostAvailable();
     const selectedRuntimeUnavailable = runtimeHostReadiness.selectedReadiness.state === "ready"
@@ -1612,10 +1785,12 @@ export class NativeSessionService {
       }));
       return legacy as unknown as NativeSessionReadiness;
     }
+    const profiles = await this.conversationProfileReadiness(result.analysis, runtime.configured ? runtime.provider : undefined);
     return {
       runtime,
       runtimeHost: runtimeHostReadiness,
       purposes: result,
+      ...(profiles ? { profiles } : {}),
       mcp: this.options.artifactService?.health() ?? {
         server: "GenBI MCP",
         tool: "save_dashboard",
@@ -1627,7 +1802,7 @@ export class NativeSessionService {
     };
   }
 
-  async create(input: { purpose: NativePurpose; vendor?: NativeVendor; entryVerb?: string | undefined }, binding = input.purpose === "setup" ? undefined : this.options.getBinding(), capturedRuntime = this.options.store.getNativeRuntimeBinding(), resumed?: { readonly row: NativeSessionRow; readonly handle: string }): Promise<NativeSessionLaunch> {
+  async create(input: NativeLaunchInput, binding = input.purpose === "setup" ? undefined : this.options.getBinding(), capturedRuntime = this.options.store.getNativeRuntimeBinding(), resumed?: { readonly row: NativeSessionRow; readonly handle: string }): Promise<NativeSessionLaunch> {
     this.assertRuntimeDispatchable();
     const pending = this.createCaptured(input, binding, capturedRuntime, resumed);
     this.pendingCreates.add(pending);
@@ -1635,19 +1810,22 @@ export class NativeSessionService {
     return pending;
   }
 
-  private async createCaptured(input: { purpose: NativePurpose; vendor?: NativeVendor; entryVerb?: string | undefined }, binding = input.purpose === "setup" ? undefined : this.options.getBinding(), capturedRuntime = this.options.store.getNativeRuntimeBinding(), resumed?: { readonly row: NativeSessionRow; readonly handle: string }): Promise<NativeSessionLaunch> {
+  private async createCaptured(input: NativeLaunchInput, binding = input.purpose === "setup" ? undefined : this.options.getBinding(), capturedRuntime = this.options.store.getNativeRuntimeBinding(), resumed?: { readonly row: NativeSessionRow; readonly handle: string }): Promise<NativeSessionLaunch> {
     this.assertRuntimeDispatchable();
     const runtimeReadiness = await this.assertSelectedRuntimeReady();
     const purpose = input.purpose;
     const legacyRuntime = !capturedRuntime.configured && input.vendor
       ? { configured: true as const, generation: 0, provider: input.vendor, target: targetForProvider(input.vendor), targetLabel: nativeTargetLabel(input.vendor) }
       : capturedRuntime;
-    const dispatchDefinition = dispatchForPurpose(purpose, legacyRuntime);
-    if (!dispatchDefinition) throw new InteractiveLaunchError("native sessions require a saved Runtime & authentication binding");
-    const entryVerb = selectedNativeEntry(purpose, dispatchDefinition.provider, input.entryVerb);
-    if (resumed && selectedNativeEntry(purpose, dispatchDefinition.provider, resumed.row.entryVerb) !== entryVerb) throw new InteractiveLaunchError("native session entry changed during resume");
+    const registryDispatch = dispatchForPurpose(purpose, legacyRuntime);
+    if (!registryDispatch) throw new InteractiveLaunchError("native sessions require a saved Runtime & authentication binding");
+    const entryVerb = selectedNativeEntry(purpose, registryDispatch.provider, input.entryVerb);
+    if (resumed && selectedNativeEntry(purpose, registryDispatch.provider, resumed.row.entryVerb) !== entryVerb) throw new InteractiveLaunchError("native session entry changed during resume");
+    const selection = await this.selectProfile(purpose, input.profile, registryDispatch.provider, input.entryVerb, resumed?.row);
+    // The launch tuple names the selected profile; everything else is the registry's for the purpose.
+    const dispatchDefinition = { ...registryDispatch, profile: selection.id };
     if (runtimeReadiness.selected === "codex-app-server") {
-      if (dispatchDefinition.provider !== "codex" || purpose !== "analysis" || !binding || resumed || !this.options.directCodex) {
+      if (dispatchDefinition.provider !== "codex" || purpose !== "analysis" || !binding || resumed || !this.options.directCodex || customSelection(purpose, selection)) {
         throw new InteractiveLaunchError("direct Codex session preparation is unavailable");
       }
       return this.createDirectCodex(binding, legacyRuntime, entryVerb!);
@@ -1667,7 +1845,7 @@ export class NativeSessionService {
     if (purpose !== "setup" && !binding) throw new InteractiveLaunchError("native session requires a current bound project");
     const configuredCwd = binding?.path ?? this.options.workspaceRoot;
     const configuredIr = this.options.irPaths[purpose];
-    if (!configuredCwd || !configuredIr) throw new InteractiveLaunchError(`native ${dispatchDefinition.profile} session is not configured`);
+    if (!configuredCwd || !configuredIr) throw new InteractiveLaunchError(`native ${selection.id} session is not configured`);
     // Compile for this binding rather than dispatching the profile's golden.
     // Falls back to the configured path only where no resolver is wired (the
     // fixture-mode tests), never silently in production — see `bin.ts`.
@@ -1679,7 +1857,7 @@ export class NativeSessionService {
     try {
       irPath = this.options.resolveDispatchIr === undefined
         ? configuredIr
-        : await this.options.resolveDispatchIr(purpose, binding);
+        : await this.options.resolveDispatchIr(purpose, binding, selection.sourceDir);
     } catch (error) {
       logNativeLaunchFailure(purpose, dispatchDefinition.provider, "dispatch_ir", error);
       throw error;
@@ -1702,7 +1880,7 @@ export class NativeSessionService {
       providerLaunch = { kind: "initial", sessionId };
     }
     this.assertRuntimeDispatchable();
-    const row = resumed?.row ?? this.options.store.createNativeSession({ id, purpose, vendor: dispatchDefinition.provider, agent: agentFor(purpose, dispatchDefinition.provider), entryVerb, scopeKind: dispatchDefinition.scopeKind, scopeId,
+    const row = resumed?.row ?? this.options.store.createNativeSession({ id, purpose, vendor: dispatchDefinition.provider, agent: expectedAgentFor(purpose, dispatchDefinition.provider, selection), entryVerb, scopeKind: dispatchDefinition.scopeKind, scopeId,
       dispatchProfile: dispatchDefinition.profile, dispatchTarget: dispatchDefinition.target, runtimeGeneration: legacyRuntime.generation,
       ...(binding ? { projectIdentity: binding.identity, bindingGeneration: binding.generation, projectRevision: binding.revision } : {}) });
     if (initialSealedHandle) this.options.store.saveNativeSessionResumeHandle(id, "claude", initialSealedHandle);
@@ -1754,7 +1932,7 @@ export class NativeSessionService {
         ...(mcp ? { mcpCredential: mcp.credential } : {}),
         ...(purpose === "setup" ? { setupBootstrapRoot: authorizedWorkspace } : {}),
       });
-      const scope: Record<string, unknown> = { version: "3", kind: row.scopeKind, scope_id: scopeId, cwd, entry: nativeEntryFor(purpose, dispatchDefinition.provider, entryVerb), ...(purpose === "setup" ? { bootstrap_root: authorizedWorkspace } : {}), ...(wrenRuntime ? { wren_runtime: wrenRuntime } : {}), ...(binding ? { binding: { project_identity: binding.identity, generation: String(binding.generation), revision: binding.revision } } : {}) };
+      const scope: Record<string, unknown> = { version: "3", kind: row.scopeKind, scope_id: scopeId, cwd, entry: entryFor(purpose, dispatchDefinition.provider, entryVerb, selection), ...(purpose === "setup" ? { bootstrap_root: authorizedWorkspace } : {}), ...(wrenRuntime ? { wren_runtime: wrenRuntime } : {}), ...(binding ? { binding: { project_identity: binding.identity, generation: String(binding.generation), revision: binding.revision } } : {}) };
       const componentIr = this.options.prepareComponents && binding && purpose === "analysis" ? readFileSync(irPath, "utf8") : undefined;
       const preparedComponents = componentIr && binding ? await this.options.prepareComponents!({ session: row, binding, irDocument: componentIr, scope }) : undefined;
       if (preparedComponents) {
@@ -1791,7 +1969,7 @@ export class NativeSessionService {
         throw new InteractiveLaunchError("native session is stale because the bound project changed");
       }
       launchPhase = "launch_spec";
-      const launchSpec = readNativeLaunchSpec(cwd, purpose, dispatchDefinition.provider, scopeId, binding, mcp, materializationState, authorizedWorkspace, providerLaunch, componentReceipt);
+      const launchSpec = readNativeLaunchSpec(cwd, purpose, dispatchDefinition.provider, scopeId, binding, mcp, materializationState, authorizedWorkspace, providerLaunch, componentReceipt, selection);
       if (componentReceipt && preparedComponents) {
         const launch = JSON.parse(readFileSync(path.join(cwd, ".warble", "interactive-launch.json"), "utf8"));
         const plans = readNativeComponentPlans(readFileSync(path.join(cwd, ".warble", "component-plans.json"), "utf8"), launch.component_host, componentReceipt);
