@@ -199,3 +199,37 @@ describe("a terminal cites an executed query by the id the host attached to its 
     expect(answer({ definition: { query_id: "q9", sql: STRAY } }, ran).status).toBe("refused");
   });
 });
+
+describe("lineage when the tool proves no definition, and optional filters on a composed definition block", () => {
+  const bare = [{ step: "generate_sql", tool: "query", input: { sql: CORRECT }, output: { columns: ["n"], rows: [{ n: 99 }], query_id: "q1" } }];
+  it("a single answer over a tool output without lineage keeps the claimed source tables and carries no filters", () => {
+    const result = answer({ summary: "99 orders", definition: { query_id: "q1", source_tables: ["orders"], filters: ["invented"] } }, bare as unknown as ReturnType<typeof observed>[]);
+    expect(result).toMatchObject({ status: "ok", provenance: { definition: { sql: CORRECT, source_tables: ["orders"] } } });
+    if (result.status !== "ok") throw new Error("unreachable");
+    expect(result.provenance?.definition).toEqual({ sql: CORRECT, source_tables: ["orders"] });
+    expect((result.output as { value: { definition: unknown } }).value.definition).toEqual({ sql: CORRECT, source_tables: ["orders"] });
+  });
+  it("a single answer over a tool-proven definition takes the proven one", () => {
+    const proven = [{ ...observed(CORRECT, 99), output: { ...observed(CORRECT, 99).output, query_id: "q1" } }];
+    const result = answer({ definition: { query_id: "q1", source_tables: ["private"] } }, proven);
+    if (result.status !== "ok") throw new Error("unreachable");
+    expect(result.provenance?.definition).toEqual({ sql: CORRECT, source_tables: ["orders"], filters: [] });
+  });
+  const lenient = (block: Record<string, unknown>, childDefinition: Record<string, unknown>) => {
+    const component: ComponentPlan = { id: "dashboard", declaration: { required_capabilities: ["component_invocation"], effect: { render_blocks: [
+      { type: "definition", fields: { sql: "string", source_tables: "string[]", filters: "string[]?" } },
+    ] } }, steps: [{ name: "layout", tier: "strong", prompt: "", consumes: [], produces: "result", tools: [], calls: [{ alias: "answer", component: "answer" }] }] };
+    return normalizeComponentEvidence(component, { steps: { result: JSON.stringify({ blocks: [block] }) }, tools: [],
+      children: [{ status: "ok", output: { kind: "value", value: { columns: ["n"], rows: [{ n: 7 }] } }, provenance: { verified: true, definition: childDefinition } }] });
+  };
+  it("a definition block without filters matches a child definition carrying filters, and one carrying filters must match them exactly", () => {
+    const child = { sql: CORRECT, source_tables: ["orders"], filters: [] };
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["orders"] }, child).status).toBe("ok");
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["orders"], filters: [] }, child).status).toBe("ok");
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["orders"], filters: ["n > 0"] }, child).status).toBe("refused");
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["invented"] }, child).status).toBe("refused");
+  });
+  it("a child definition without filters (no tool lineage) still grounds a definition block", () => {
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["orders"] }, { sql: CORRECT, source_tables: ["orders"] }).status).toBe("ok");
+  });
+});

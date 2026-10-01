@@ -6,6 +6,10 @@ import { isQueryGrant, type ComponentEvidence, type ComponentPlan } from "./runn
 import { batchEntry, parseTerminalJson } from "./terminal-json.js";
 
 const definitionSchema = z.object({ sql: z.string(), source_tables: z.array(z.string()), filters: z.array(z.string()) }).strict();
+/** A definition a render block may be grounded on: `filters` is optional in the block contract. */
+const lineageSchema = z.object({ sql: z.string(), source_tables: z.array(z.string()), filters: z.array(z.string()).optional() }).strict();
+type Lineage = z.infer<typeof lineageSchema>;
+const stringList = z.array(z.string()).max(64);
 const table = z.object({ columns: z.array(z.string()).min(1), rows: z.array(z.record(z.string(), z.unknown())) });
 const blocks = z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict());
 const capabilities = z.array(z.string());
@@ -15,10 +19,16 @@ function queryIdOf(output: unknown): string | undefined {
   const id = (output as { query_id?: unknown } | null)?.query_id;
   return typeof id === "string" ? id : undefined;
 }
-/** The observed definition for an executed query, or the bare SQL when the tool returned none. */
-function definitionOf(query: GroundedQuery): z.infer<typeof definitionSchema> | { sql: string } {
+/**
+ * The observed definition for an executed query. When the tool proved none: the executed SQL
+ * with the model's claimed source tables (else none) and no filters, so a composing parent can
+ * still build a definition block.
+ */
+function definitionOf(query: GroundedQuery, terminalValue: unknown): Lineage {
   const parsed = definitionSchema.safeParse((query.output as { definition?: unknown } | null)?.definition);
-  return parsed.success && parsed.data.sql === query.sql ? parsed.data : { sql: query.sql };
+  if (parsed.success && parsed.data.sql === query.sql) return parsed.data;
+  const claimed = (terminalValue as { definition?: { source_tables?: unknown } } | null)?.definition?.source_tables;
+  return { sql: query.sql, source_tables: stringList.safeParse(claimed).success ? claimed as string[] : [] };
 }
 function groundedQueries(observations: readonly { readonly input: unknown; readonly output: unknown }[]): GroundedQuery[] {
   const grounded: GroundedQuery[] = [];
@@ -51,7 +61,7 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // additivity from a child's generic verified flag or from its model-authored value.
   if (semanticGuard && evidence.children.length > 0) return refused();
   if (!checkSemanticGuards(guards, proofs, context)) return refused();
-  const definitions: z.infer<typeof definitionSchema>[] = [];
+  const definitions: Lineage[] = [];
   for (const call of observations) {
     const parsed = definitionSchema.safeParse((call.output as { definition?: unknown } | null)?.definition);
     if (parsed.success && parsed.data.sql === (call.input as { sql?: unknown })?.sql) definitions.push(parsed.data);
@@ -95,7 +105,7 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
       chosen = selectAnsweringCandidate(grounded, terminalValue);
     }
     if (!chosen) return refused();
-    const definition = definitionOf(chosen);
+    const definition = definitionOf(chosen, terminalValue);
     return { status: "ok", output: { kind: "value", value: { ...chosen.table, verified: true, summary: "Query completed.", definition } },
       provenance: { verified: true, definition } };
   }
@@ -109,7 +119,7 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
       const parsed = table.safeParse(child.output.value);
       if (!parsed.success) return refused();
       data.push(parsed.data);
-      const definition = definitionSchema.safeParse(child.provenance?.definition);
+      const definition = lineageSchema.safeParse(child.provenance?.definition);
       if (definition.success) definitions.push(definition.data);
     }
   }
@@ -119,10 +129,12 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   return { ...result, provenance: { ...result.provenance, verified: data.length > 0 } };
 }
 
-function grounded(render: readonly Record<string, unknown>[], data: readonly z.infer<typeof table>[], definitions: readonly z.infer<typeof definitionSchema>[]): boolean {
+function grounded(render: readonly Record<string, unknown>[], data: readonly z.infer<typeof table>[], definitions: readonly Lineage[]): boolean {
   return render.every((block) => {
+    // `filters` is optional in the block contract: compared only when both sides carry it.
     if (block.type === "definition") return definitions.some((definition) => definition.sql === block.sql
-      && JSON.stringify(definition.source_tables) === JSON.stringify(block.source_tables) && JSON.stringify(definition.filters) === JSON.stringify(block.filters));
+      && JSON.stringify(definition.source_tables) === JSON.stringify(block.source_tables)
+      && (block.filters === undefined || definition.filters === undefined || JSON.stringify(definition.filters) === JSON.stringify(block.filters)));
     if (block.type === "kpi_card") return typeof block.label === "string" && data.some((source) => source.columns.includes(block.label as string)
       && source.rows.some((row) => row[block.label as string] === block.value
         && (block.unit === undefined || (Object.hasOwn(row, "unit") && row.unit === block.unit))
@@ -144,7 +156,6 @@ function grounded(render: readonly Record<string, unknown>[], data: readonly z.i
   });
 }
 
-const stringList = z.array(z.string()).max(64);
 const REASON_LIMIT = 200;
 function sanitizedReason(value: unknown, fallback: string): string {
   const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
