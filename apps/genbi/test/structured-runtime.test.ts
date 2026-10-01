@@ -37,11 +37,11 @@ function provisioner() {
 }
 
 describe("explicit structured runtime boundary", () => {
-  it("keeps unavailable vendors independent and never falls back", async () => {
-    const f = provisioner(); f.backend.probe.mockResolvedValue({ readiness: runtimeNotReady("codex-app-server", "incompatible", "codex_identity_uncertified"), diagnostic: { phase: "identity" } } as never);
+  it.each(["codex_identity_uncertified", "codex_dependencies_drifted"] as const)("keeps unavailable vendors independent and never falls back (%s)", async (code) => {
+    const f = provisioner(); f.backend.probe.mockResolvedValue({ readiness: runtimeNotReady("codex-app-server", "incompatible", code), diagnostic: { phase: "identity" } } as never);
     await expect(f.runtime.route(request, scope())).rejects.toMatchObject({ code: "unavailable" });
     const readiness = await f.runtime.readiness();
-    expect(readiness.codex).toMatchObject({ ask: false, code: "codex_identity_uncertified" });
+    expect(readiness.codex).toMatchObject({ ask: false, code });
     expect(readiness.claude).toMatchObject({ ask: false, setup: false });
     expect(f.prepare).not.toHaveBeenCalled(); expect(f.localRoute).not.toHaveBeenCalled();
     await expect(f.runtime.route({ ...request, authChoice: { mode: "subscription", provider: "claude" } }, scope())).rejects.toMatchObject({ code: "unavailable" });

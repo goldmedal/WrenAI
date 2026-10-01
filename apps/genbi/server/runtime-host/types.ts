@@ -28,6 +28,7 @@ export const RUNTIME_BACKEND_REASON_CODES = {
     "codex_cli_version_malformed",
     "codex_cli_version_unsupported",
     "codex_identity_uncertified",
+    "codex_dependencies_drifted",
     "codex_app_server_unreachable",
     "codex_app_server_cleanup_failed",
     "codex_app_server_protocol_incompatible",
