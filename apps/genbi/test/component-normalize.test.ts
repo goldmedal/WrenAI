@@ -151,3 +151,85 @@ describe("the answering query is the one the terminal value names, not the last 
         provenance: { verified: true, definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } } });
   });
 });
+
+describe("a terminal cites an executed query by the id the host attached to its result", () => {
+  const withId = (call: ReturnType<typeof observed>, id: string) => ({ ...call, output: { ...call.output, query_id: id } });
+  const ran = [withId(observed(CORRECT, 99), "q1"), withId(observed(STRAY, 67), "q2")];
+  const batch: ComponentPlan = { id: "answer_batch", declaration: { required_capabilities: ["sql_execution:read_only"], effect: { render_blocks: [] } },
+    steps: [{ name: "generate_sql", tier: "strong", prompt: "", consumes: [], produces: "batch_result", tools: [{ name: "query", source: "native" }], calls: [] }] };
+  const runBatch = (entries: unknown[], tools = ran) => normalizeComponentEvidence(batch, { steps: { batch_result: JSON.stringify(entries) }, tools, children: [] });
+  it("grounds each entry on the observation carrying that id, with provenance from that query", () => {
+    const result = runBatch([
+      { slot_id: "stray", summary: "67 completed", definition: { query_id: "q2" } },
+      { slot_id: "all", summary: "99 orders", definition: { query_id: "q1" } },
+    ]);
+    expect(result).toEqual({ status: "ok", output: { kind: "value", value: [
+      { slot_id: "stray", columns: ["n"], rows: [{ n: 67 }], verified: true, summary: "67 completed", definition: { sql: STRAY, source_tables: ["orders"], filters: [] } },
+      { slot_id: "all", columns: ["n"], rows: [{ n: 99 }], verified: true, summary: "99 orders", definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } },
+    ] }, provenance: { verified: true } });
+  });
+  const definitionOf = (result: ReturnType<typeof runBatch>) => result.status === "ok" && result.output.kind === "value" ? (result.output.value as { definition?: unknown }[])[0]?.definition : undefined;
+  it("an id-cited entry over a tool output with no lineage keeps the claimed source tables, takes the SQL from the observation and carries no filters", () => {
+    const bare = [{ step: "generate_sql", tool: "query", input: { sql: STRAY }, output: { columns: ["n"], rows: [{ n: 67 }], query_id: "q1" } }];
+    const result = runBatch([{ slot_id: "s", definition: { query_id: "q1", sql: "SELECT invented", source_tables: ["orders"], filters: ["status = 'x'"] } }], bare as typeof ran);
+    expect(result).toMatchObject({ status: "ok", output: { value: [{ slot_id: "s", rows: [{ n: 67 }] }] } });
+    expect(definitionOf(result)).toEqual({ sql: STRAY, source_tables: ["orders"] });
+  });
+  it("an id-cited entry over a tool-proven definition takes the proven lineage, not the claimed one", () => {
+    const result = runBatch([{ slot_id: "s", definition: { query_id: "q2", source_tables: ["private"], filters: ["invented"] } }]);
+    expect(definitionOf(result)).toEqual({ sql: STRAY, source_tables: ["orders"], filters: [] });
+  });
+  it("an id no executed query carries is unanswerable, even when its SQL matches one that ran; unknown SQL stays unanswerable", () => {
+    const result = runBatch([
+      { slot_id: "missing", definition: { query_id: "q9" } },
+      { slot_id: "missing_with_sql", definition: { query_id: "q9", sql: CORRECT } },
+      { slot_id: "never_ran", definition: { sql: "SELECT COUNT(*) AS n FROM customers" } },
+      { slot_id: "by_sql", definition: { sql: CORRECT } },
+    ]);
+    if (result.status !== "ok" || result.output.kind !== "value") throw new Error("unreachable");
+    expect(result.output.value).toEqual([
+      { slot_id: "missing", status: "unanswerable", reason: "no executed query backs this answer" },
+      { slot_id: "missing_with_sql", status: "unanswerable", reason: "no executed query backs this answer" },
+      { slot_id: "never_ran", status: "unanswerable", reason: "no executed query backs this answer" },
+      { slot_id: "by_sql", columns: ["n"], rows: [{ n: 99 }], verified: true, summary: "Query completed.", definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } },
+    ]);
+  });
+  it("the single-answer path selects the cited query, and refuses an id that never ran", () => {
+    expect(answer({ summary: "99 orders", definition: { query_id: "q1" } }, ran)).toMatchObject({ status: "ok", output: { value: { rows: [{ n: 99 }], definition: { sql: CORRECT } } } });
+    expect(answer({ definition: { query_id: "q9", sql: STRAY } }, ran).status).toBe("refused");
+  });
+});
+
+describe("lineage when the tool proves no definition, and optional filters on a composed definition block", () => {
+  const bare = [{ step: "generate_sql", tool: "query", input: { sql: CORRECT }, output: { columns: ["n"], rows: [{ n: 99 }], query_id: "q1" } }];
+  it("a single answer over a tool output without lineage keeps the claimed source tables and carries no filters", () => {
+    const result = answer({ summary: "99 orders", definition: { query_id: "q1", source_tables: ["orders"], filters: ["invented"] } }, bare as unknown as ReturnType<typeof observed>[]);
+    expect(result).toMatchObject({ status: "ok", provenance: { definition: { sql: CORRECT, source_tables: ["orders"] } } });
+    if (result.status !== "ok") throw new Error("unreachable");
+    expect(result.provenance?.definition).toEqual({ sql: CORRECT, source_tables: ["orders"] });
+    expect((result.output as { value: { definition: unknown } }).value.definition).toEqual({ sql: CORRECT, source_tables: ["orders"] });
+  });
+  it("a single answer over a tool-proven definition takes the proven one", () => {
+    const proven = [{ ...observed(CORRECT, 99), output: { ...observed(CORRECT, 99).output, query_id: "q1" } }];
+    const result = answer({ definition: { query_id: "q1", source_tables: ["private"] } }, proven);
+    if (result.status !== "ok") throw new Error("unreachable");
+    expect(result.provenance?.definition).toEqual({ sql: CORRECT, source_tables: ["orders"], filters: [] });
+  });
+  const lenient = (block: Record<string, unknown>, childDefinition: Record<string, unknown>) => {
+    const component: ComponentPlan = { id: "dashboard", declaration: { required_capabilities: ["component_invocation"], effect: { render_blocks: [
+      { type: "definition", fields: { sql: "string", source_tables: "string[]", filters: "string[]?" } },
+    ] } }, steps: [{ name: "layout", tier: "strong", prompt: "", consumes: [], produces: "result", tools: [], calls: [{ alias: "answer", component: "answer" }] }] };
+    return normalizeComponentEvidence(component, { steps: { result: JSON.stringify({ blocks: [block] }) }, tools: [],
+      children: [{ status: "ok", output: { kind: "value", value: { columns: ["n"], rows: [{ n: 7 }] } }, provenance: { verified: true, definition: childDefinition } }] });
+  };
+  it("a definition block without filters matches a child definition carrying filters, and one carrying filters must match them exactly", () => {
+    const child = { sql: CORRECT, source_tables: ["orders"], filters: [] };
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["orders"] }, child).status).toBe("ok");
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["orders"], filters: [] }, child).status).toBe("ok");
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["orders"], filters: ["n > 0"] }, child).status).toBe("refused");
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["invented"] }, child).status).toBe("refused");
+  });
+  it("a child definition without filters (no tool lineage) still grounds a definition block", () => {
+    expect(lenient({ type: "definition", sql: CORRECT, source_tables: ["orders"] }, { sql: CORRECT, source_tables: ["orders"] }).status).toBe("ok");
+  });
+});

@@ -317,7 +317,8 @@ function host(verifyChild: RunnerHost["verifyChild"] | undefined, sink: Componen
         return { value: "planned" };
       }
       await run.tools.query!({ sql: SQL });
-      return { value: "done" };
+      // A per-slot terminal must parse; this binding's normalize builds the value itself.
+      return { value: JSON.stringify({ definition: { query_id: "q1" } }) };
     },
     ...(verifyChild ? { verifyChild } : {}),
     onEvent: (event) => sink.push(event),

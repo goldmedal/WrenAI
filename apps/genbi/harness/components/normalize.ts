@@ -1,73 +1,44 @@
 import { normalizeComponentResult, type ComponentInvocationResult, type RenderBlock } from "@warble/claude-agent-sdk";
 import { z } from "zod";
 import { checkSemanticGuards, querySemantics, type QuerySemantics } from "./semantic-guards.js";
-import { namedAnswerSql, selectAnsweringCandidate, sqlKey } from "../render/answering-query.js";
-import type { ComponentEvidence, ComponentPlan } from "./runner.js";
+import { namedAnswerQueryId, namedAnswerSql, selectAnsweringCandidate, sqlKey } from "../render/answering-query.js";
+import { isQueryGrant, type ComponentEvidence, type ComponentPlan } from "./runner.js";
+import { batchEntry, parseTerminalJson } from "./terminal-json.js";
 
 const definitionSchema = z.object({ sql: z.string(), source_tables: z.array(z.string()), filters: z.array(z.string()) }).strict();
+/** A definition a render block may be grounded on: `filters` is optional in the block contract. */
+const lineageSchema = z.object({ sql: z.string(), source_tables: z.array(z.string()), filters: z.array(z.string()).optional() }).strict();
+type Lineage = z.infer<typeof lineageSchema>;
+const stringList = z.array(z.string()).max(64);
 const table = z.object({ columns: z.array(z.string()).min(1), rows: z.array(z.record(z.string(), z.unknown())) });
 const blocks = z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict());
 const capabilities = z.array(z.string());
-interface GroundedQuery { readonly sql: string; readonly table: z.infer<typeof table>; readonly output: unknown }
-/** The observed definition for an executed query, or the bare SQL when the tool returned none. */
-function definitionOf(query: GroundedQuery): z.infer<typeof definitionSchema> | { sql: string } {
+interface GroundedQuery { readonly sql: string; readonly queryId?: string; readonly table: z.infer<typeof table>; readonly output: unknown }
+/** The host-assigned id of an executed query (`q<N>`, see the runner), read from the observed output only. */
+function queryIdOf(output: unknown): string | undefined {
+  const id = (output as { query_id?: unknown } | null)?.query_id;
+  return typeof id === "string" ? id : undefined;
+}
+/**
+ * The observed definition for an executed query. When the tool proved none: the executed SQL
+ * with the model's claimed source tables (else none) and no filters, so a composing parent can
+ * still build a definition block.
+ */
+function definitionOf(query: GroundedQuery, terminalValue: unknown): Lineage {
   const parsed = definitionSchema.safeParse((query.output as { definition?: unknown } | null)?.definition);
-  return parsed.success && parsed.data.sql === query.sql ? parsed.data : { sql: query.sql };
+  if (parsed.success && parsed.data.sql === query.sql) return parsed.data;
+  const claimed = (terminalValue as { definition?: { source_tables?: unknown } } | null)?.definition?.source_tables;
+  return { sql: query.sql, source_tables: stringList.safeParse(claimed).success ? claimed as string[] : [] };
 }
 function groundedQueries(observations: readonly { readonly input: unknown; readonly output: unknown }[]): GroundedQuery[] {
   const grounded: GroundedQuery[] = [];
   for (const call of observations) {
     const sql = (call.input as { sql?: unknown } | null)?.sql;
     const parsed = table.safeParse(call.output);
-    if (typeof sql === "string" && parsed.success) grounded.push({ sql, table: parsed.data, output: call.output });
+    const queryId = queryIdOf(call.output);
+    if (typeof sql === "string" && parsed.success) grounded.push({ sql, ...(queryId !== undefined ? { queryId } : {}), table: parsed.data, output: call.output });
   }
   return grounded;
-}
-// An unclosed bracket rescans to the end, and a bracket that closes but does not parse (a Markdown
-// link) also counts: after this many failures the scan gives up and the text stays prose.
-const MAX_FAILED_STARTS = 64;
-/** The end index of the bracketed span opening at `start`, tracking JSON strings; -1 when it never closes. */
-function spanEnd(text: string, start: number): number {
-  let depth = 0;
-  let inString = false;
-  for (let index = start; index < text.length; index++) {
-    const char = text[index];
-    if (inString) {
-      if (char === "\\") index++;
-      else if (char === '"') inString = false;
-    } else if (char === '"') inString = true;
-    else if (char === "{" || char === "[") depth++;
-    else if (char === "}" || char === "]") { depth--; if (depth === 0) return index; }
-  }
-  return -1;
-}
-function parsedJson(text: string): { value: unknown } | undefined {
-  try { return { value: JSON.parse(text) }; } catch { return undefined; }
-}
-/**
- * The one top-level JSON array or object in a prose terminal, after dropping reasoning tags
- * and Markdown fences. Zero or several candidates return undefined, so the text stays prose.
- * Only the parse is tolerant: the value feeds the refusal check and the value branches; the render
- * path still parses the raw text.
- */
-function soleJsonValue(raw: string): unknown {
-  const untagged = raw.replace(/<think>[\s\S]*?<\/think>/gi, "");
-  // A lone closing tag: everything before it is treated as reasoning.
-  const closing = untagged.toLowerCase().lastIndexOf("</think>");
-  const text = (closing >= 0 ? untagged.slice(closing + "</think>".length) : untagged).replace(/```[\w-]*/g, "");
-  const found: unknown[] = [];
-  let failures = 0;
-  for (let index = 0; index < text.length; index++) {
-    if (text[index] !== "{" && text[index] !== "[") continue;
-    const end = spanEnd(text, index);
-    const candidate = end >= 0 ? parsedJson(text.slice(index, end + 1)) : undefined;
-    if (candidate) {
-      found.push(candidate.value);
-      if (found.length > 1) return undefined;
-      index = end;
-    } else if (++failures > MAX_FAILED_STARTS) return undefined;
-  }
-  return found.length === 1 ? found[0] : undefined;
 }
 function refused(): ComponentInvocationResult {
   return { status: "refused", code: "callee_refused", message: "The component did not produce a grounded result." };
@@ -76,7 +47,7 @@ function refused(): ComponentInvocationResult {
 /** Child normalization is pure. Data evidence comes from observed tools, never a verified flag. */
 export function normalizeComponentEvidence(component: ComponentPlan, evidence: ComponentEvidence, context?: unknown): ComponentInvocationResult {
   const grants = component.steps.flatMap((step) => step.tools);
-  const queryNames = new Set(grants.filter((grant) => grant.source === "host:sql_execution:read_only" || (grant.source === "native" && grant.name === "query")).map((grant) => grant.name));
+  const queryNames = new Set(grants.filter(isQueryGrant).map((grant) => grant.name));
   const observations = evidence.tools.filter((call) => queryNames.has(call.tool));
   const guards = z.array(z.record(z.string(), z.unknown())).parse(component.declaration.guardrails ?? []);
   const semanticGuard = guards.some((guard) => (guard.name === "additivity_guard" && guard.locked === true) || guard.name === "drill_depth_limit");
@@ -90,7 +61,7 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // additivity from a child's generic verified flag or from its model-authored value.
   if (semanticGuard && evidence.children.length > 0) return refused();
   if (!checkSemanticGuards(guards, proofs, context)) return refused();
-  const definitions: z.infer<typeof definitionSchema>[] = [];
+  const definitions: Lineage[] = [];
   for (const call of observations) {
     const parsed = definitionSchema.safeParse((call.output as { definition?: unknown } | null)?.definition);
     if (parsed.success && parsed.data.sql === (call.input as { sql?: unknown })?.sql) definitions.push(parsed.data);
@@ -105,12 +76,10 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // Tool evidence cannot turn an explicit terminal refusal or error into success.
   let terminalValue: unknown = lastProduct;
   if (typeof lastProduct === "string") {
-    try { terminalValue = JSON.parse(lastProduct); } catch {
-      // Ordinary prose is normalized below. A loose array counts only when it holds batch entries,
-      // so an incidental array in a single-answer terminal stays prose.
-      const loose = soleJsonValue(lastProduct);
-      terminalValue = loose !== undefined && (!Array.isArray(loose) || loose.some((entry) => batchEntry.safeParse(entry).success)) ? loose : lastProduct;
-    }
+    // Ordinary prose is normalized below. Only the parse is tolerant: the value feeds the refusal
+    // check and the value branches; the render path still parses the raw text.
+    const parsed = parseTerminalJson(lastProduct);
+    terminalValue = parsed.ok ? parsed.value : lastProduct;
   }
   if (terminalValue && typeof terminalValue === "object" && "status" in terminalValue
     && ["refused", "error"].includes(String(terminalValue.status))) return refused();
@@ -123,10 +92,10 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
     const grounded = groundedQueries(observations);
     // The answer is the query the terminal value names, never simply the last table: a model
     // that runs a stray check after the right query must not turn that check into the answer.
-    // A value naming no query keeps the historical last-observation rule; a value naming a
-    // query that never ran is refused rather than answered with another table.
+    // A value naming no query (by id or SQL) keeps the historical last-observation rule; a value
+    // naming a query that never ran is refused rather than answered with another table.
     let chosen: GroundedQuery | undefined;
-    if (namedAnswerSql(terminalValue) === undefined) {
+    if (namedAnswerQueryId(terminalValue) === undefined && namedAnswerSql(terminalValue) === undefined) {
       const last = observations[observations.length - 1]!;
       const actual = table.safeParse(last.output);
       if (!actual.success) return refused();
@@ -136,7 +105,7 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
       chosen = selectAnsweringCandidate(grounded, terminalValue);
     }
     if (!chosen) return refused();
-    const definition = definitionOf(chosen);
+    const definition = definitionOf(chosen, terminalValue);
     return { status: "ok", output: { kind: "value", value: { ...chosen.table, verified: true, summary: "Query completed.", definition } },
       provenance: { verified: true, definition } };
   }
@@ -150,7 +119,7 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
       const parsed = table.safeParse(child.output.value);
       if (!parsed.success) return refused();
       data.push(parsed.data);
-      const definition = definitionSchema.safeParse(child.provenance?.definition);
+      const definition = lineageSchema.safeParse(child.provenance?.definition);
       if (definition.success) definitions.push(definition.data);
     }
   }
@@ -160,10 +129,12 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   return { ...result, provenance: { ...result.provenance, verified: data.length > 0 } };
 }
 
-function grounded(render: readonly Record<string, unknown>[], data: readonly z.infer<typeof table>[], definitions: readonly z.infer<typeof definitionSchema>[]): boolean {
+function grounded(render: readonly Record<string, unknown>[], data: readonly z.infer<typeof table>[], definitions: readonly Lineage[]): boolean {
   return render.every((block) => {
+    // `filters` is optional in the block contract: compared only when both sides carry it.
     if (block.type === "definition") return definitions.some((definition) => definition.sql === block.sql
-      && JSON.stringify(definition.source_tables) === JSON.stringify(block.source_tables) && JSON.stringify(definition.filters) === JSON.stringify(block.filters));
+      && JSON.stringify(definition.source_tables) === JSON.stringify(block.source_tables)
+      && (block.filters === undefined || definition.filters === undefined || JSON.stringify(definition.filters) === JSON.stringify(block.filters)));
     if (block.type === "kpi_card") return typeof block.label === "string" && data.some((source) => source.columns.includes(block.label as string)
       && source.rows.some((row) => row[block.label as string] === block.value
         && (block.unit === undefined || (Object.hasOwn(row, "unit") && row.unit === block.unit))
@@ -185,8 +156,6 @@ function grounded(render: readonly Record<string, unknown>[], data: readonly z.i
   });
 }
 
-const batchEntry = z.object({ slot_id: z.string().min(1).max(128) }).passthrough();
-const stringList = z.array(z.string()).max(64);
 const REASON_LIMIT = 200;
 function sanitizedReason(value: unknown, fallback: string): string {
   const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
@@ -194,10 +163,12 @@ function sanitizedReason(value: unknown, fallback: string): string {
 }
 /**
  * One entry per slot, first entry per slot id wins. A tabular entry is
- * accepted only when its `definition.sql` names a query this run executed
- * with a table-shaped result; its columns and rows are then the observed
- * ones. The model contributes `summary` and the lineage strings of
- * `definition`; every value comes from the tool. Entries the model marked
+ * accepted only when its `definition` cites a query this run executed with a
+ * table-shaped result: by `query_id` (the id the host attached to that tool
+ * result), else by `sql`. Its columns, rows and SQL are then the observed ones.
+ * The model contributes `summary` and, when the tool proved no definition, its
+ * claimed `source_tables` (plus `filters` on the SQL path); every value comes
+ * from the tool. Entries the model marked
  * `unanswerable` (or `refused`) pass through with a bounded reason.
  */
 function normalizeBatchTerminal(entries: readonly unknown[], observations: readonly ComponentEvidence["tools"][number][]): ComponentInvocationResult {
@@ -214,19 +185,30 @@ function normalizeBatchTerminal(entries: readonly unknown[], observations: reado
       continue;
     }
     const claimed = item.definition && typeof item.definition === "object" ? item.definition as Record<string, unknown> : undefined;
-    const sql = typeof claimed?.sql === "string" ? claimed.sql : undefined;
+    const tabular = (call: ComponentEvidence["tools"][number]) => table.safeParse(call.output).success;
+    // A query the entry cites by its host-assigned id resolves to that observation only: an id no
+    // executed query carries is unanswerable, never grounded on another query or on its SQL text.
+    const queryId = typeof claimed?.query_id === "string" ? claimed.query_id : undefined;
+    const claimedSql = queryId === undefined && typeof claimed?.sql === "string" ? claimed.sql : undefined;
     // Whitespace- and terminator-insensitive, like the single-answer selection: the model may reformat the SQL it names.
-    const observed = sql === undefined ? undefined : [...observations].reverse().find((call) => { const ran = (call.input as { sql?: unknown } | null)?.sql; return typeof ran === "string" && sqlKey(ran) === sqlKey(sql) && table.safeParse(call.output).success; });
+    const observed = queryId !== undefined ? observations.find((call) => queryIdOf(call.output) === queryId && tabular(call))
+      : claimedSql === undefined ? undefined
+      : [...observations].reverse().find((call) => { const ran = (call.input as { sql?: unknown } | null)?.sql; return typeof ran === "string" && sqlKey(ran) === sqlKey(claimedSql) && tabular(call); });
     const actual = observed ? table.safeParse(observed.output) : undefined;
-    if (!observed || !actual?.success) {
+    const sql = (observed?.input as { sql?: unknown } | null | undefined)?.sql;
+    if (!observed || !actual?.success || typeof sql !== "string") {
       value.push({ slot_id: item.slot_id, status: "unanswerable", reason: "no executed query backs this answer" });
       continue;
     }
+    // Provenance is the observed query's: its SQL always, and its tool-proven definition when
+    // present. Otherwise the model's claimed source tables are kept, so a composing parent can
+    // still build a definition block. Claimed filters are kept on the SQL path only: an entry
+    // citing an id carries none, and any it sends are ignored.
     const proven = definitionSchema.safeParse((observed.output as { definition?: unknown }).definition);
     const definition = proven.success && proven.data.sql === sql ? proven.data : {
-      sql: sql!,
+      sql,
       source_tables: stringList.safeParse(claimed?.source_tables).success ? claimed!.source_tables as string[] : [],
-      filters: stringList.safeParse(claimed?.filters).success ? claimed!.filters as string[] : [],
+      ...(queryId === undefined ? { filters: stringList.safeParse(claimed?.filters).success ? claimed!.filters as string[] : [] } : {}),
     };
     answered += 1;
     value.push({ slot_id: item.slot_id, columns: actual.data.columns, rows: actual.data.rows, verified: true,
