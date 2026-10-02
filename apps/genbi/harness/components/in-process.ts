@@ -73,7 +73,10 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     const snapshot: unknown = JSON.parse(await readFile(snapshotPath, "utf8"));
     let card: CapabilityCard | undefined;
     if (zoneAware) {
-      card = buildCapabilityCard(JSON.parse(await readFile(catalogPath, "utf8")), options.capabilityCard ?? {});
+      // The bound policy's shape limits go on the card, so the planner plans within what egress allows.
+      const maxBytes = options.capabilityCard?.maxBytes;
+      card = buildCapabilityCard(JSON.parse(await readFile(catalogPath, "utf8")), { ...(maxBytes !== undefined ? { maxBytes } : {}),
+        ...(binding.disclosurePolicy ? { disclosure: binding.disclosurePolicy } : {}) });
       if (card.truncated) traceSteps.push({ id: "capability-card", tool: "capability_card", outcome: "success", ordinal: -1,
         detail: `warning: capability card truncated by the size bound (${card.omittedLines} lines omitted, ${card.bytes} bytes kept)` });
     }

@@ -195,7 +195,7 @@ async function main(): Promise<void> {
     try {
       const catalogPath = path.join(scratch, "catalog.json");
       await generatePreparedContextAndCatalog(resolveContextLoader().bin, path.resolve(project), path.join(scratch, "context.json"), catalogPath);
-      card = buildCapabilityCard(JSON.parse(await readFile(catalogPath, "utf8")));
+      card = buildCapabilityCard(JSON.parse(await readFile(catalogPath, "utf8")), binding.disclosurePolicy ? { disclosure: binding.disclosurePolicy } : {});
     } finally { await rm(scratch, { recursive: true, force: true }); }
     const dryRun = describeZoneDryRun(plan, defaultEntry(plan), binding, { card: { digest: card.digest, bytes: card.bytes, truncated: card.truncated } });
     process.stdout.write(formatZoneDryRun(dryRun));
