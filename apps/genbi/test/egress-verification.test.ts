@@ -96,6 +96,23 @@ describe("egress verification: deterministic checks", () => {
       expect(answers(outcome)[0], cell).toMatchObject({ status: "refused", reason_category: "pii_pattern" });
     }
   });
+  it("refuses a dotted international phone number, while a signed decimal still passes", async () => {
+    for (const phone of ["+1.4155551234", "+44.7911123456"]) {
+      const summary = await verify({ columns: ["total"], rows: [{ total: 5 }], summary: `Phone ${phone}` }, slots({ expected_shape: "scalar" }));
+      expect(answers(summary)[0], phone).toEqual({ slot_id: "s1", status: "refused", reason_category: "pii_pattern" });
+      const cell = await verify(table([{ region: "a", note: phone, revenue: 1 }]));
+      expect(answers(cell)[0], phone).toMatchObject({ status: "refused", reason_category: "pii_pattern" });
+    }
+    const signed = await verify({ columns: ["delta"], rows: [{ delta: 0.12345678901234 }], summary: "The delta is +0.12345678901234." }, slots({ expected_shape: "scalar" }));
+    expect(answers(signed)[0]).toMatchObject({ status: "ok" });
+  });
+  it("runs the policy's own PII patterns on the raw text, decimals included", async () => {
+    const decimalPolicy = { ...policy, pii_patterns: ["\\b\\d+\\.\\d{2}\\b"] };
+    const summary = await verifyEgress(slots({ expected_shape: "scalar" }), ok({ columns: ["total"], rows: [{ total: 5 }], summary: "Balance 1234.56" }), { policy: decimalPolicy, judge: passJudge });
+    expect(answers(summary)[0]).toEqual({ slot_id: "s1", status: "refused", reason_category: "pii_pattern" });
+    const cell = await verifyEgress(slots(), ok(table([{ region: "a", note: "1234.56", revenue: 1 }])), { policy: decimalPolicy, judge: passJudge });
+    expect(answers(cell)[0]).toMatchObject({ status: "refused", reason_category: "pii_pattern" });
+  });
   it("reads a group size from the common count-column spellings, not only *_count", async () => {
     for (const column of ["number_of_orders", "num_orders", "count_orders", "cnt_orders", "orders_cnt", "order_count"]) {
       const columns = ["status", column, "revenue"];

@@ -142,6 +142,7 @@ export const BUILT_IN_PII_PATTERNS: readonly RegExp[] = [
   PAYMENT_CARD,
   PHONE_NUMBER,
   /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/, // IPv4
+  /\+[1-9]\d{0,2}\.\d{6,14}\b/,                                       // dotted international phone
 ];
 /**
  * The card and phone patterns match bare digit runs, so the fraction of a decimal (`0.12345678901234`)
