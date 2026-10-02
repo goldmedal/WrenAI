@@ -2,7 +2,7 @@ import type { ComponentInvocationResult } from "@warble/claude-agent-sdk";
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import { createModelJudge, EGRESS_JUDGE_INSTRUCTIONS } from "../harness/components/egress-judge.js";
-import { readSlots, verifyEgress, type EgressJudge, type EgressJudgeInput } from "../harness/components/egress.js";
+import { readSlots, wholeChildDisclosure, verifyEgress, type EgressJudge, type EgressJudgeInput } from "../harness/components/egress.js";
 import { ComponentRunner, type ComponentBinding, type ComponentEvent, type ExecutionPlan, type RunnerHost } from "../harness/components/runner.js";
 import { parseDisclosurePolicy, type DisclosurePolicy } from "../harness/providers/index.js";
 
@@ -132,11 +132,32 @@ describe("egress verification: deterministic checks", () => {
     const render = await verifyEgress(slots(), { status: "ok", output: { kind: "render", blocks: [{ type: "table", rows: [[1]] }] }, provenance: { verified: true } }, { policy, judge: passJudge });
     expect(answers(render)[0]).toMatchObject({ status: "refused", reason_category: "invalid_answer" });
   });
-  it("passes callee refusals and errors through unchanged, recording the reason", async () => {
+  it("a per-slot refused child crosses as every declared slot refused on callee_refused; a request without slots keeps the raw refusal", async () => {
     const refused: ComponentInvocationResult = { status: "refused", code: "callee_refused", message: "no grounded result" };
     const outcome = await verifyEgress(slots(), refused, { policy, judge: passJudge });
-    expect(outcome.disclosed).toEqual(refused);
+    expect(outcome.disclosed).toStrictEqual({ status: "ok", output: { kind: "value", value: { answers: [{ slot_id: "s1", status: "refused", reason_category: "callee_refused" }] } }, provenance: { verified: false } });
+    expect(outcome.disclosed).toStrictEqual(wholeChildDisclosure(slots(), "callee_refused"));
+    expect(JSON.stringify(outcome.disclosed)).not.toContain("no grounded result");
     expect(outcome.decisions).toEqual([{ slot_id: "s1", status: "refused", reason_category: "callee_refused", judge: "skipped", row_count: 0 }]);
+    const implicit = await verifyEgress({ request: "how much revenue", input: {} }, refused, { policy, judge: passJudge });
+    expect(implicit.disclosed).toEqual(refused);
+    expect(implicit.decisions).toEqual([{ slot_id: "answer", status: "refused", reason_category: "callee_refused", judge: "skipped", row_count: 0 }]);
+  });
+  it("a per-slot callee_failed crosses as every declared slot refused on callee_error; other error codes and a request without slots pass through", async () => {
+    const failure = (code: Extract<ComponentInvocationResult, { status: "error" }>["code"]): ComponentInvocationResult => ({ status: "error", code, message: "Component execution did not complete.", retryable: false });
+    const two = { request: "fill the report", input: { slots: [{ slot_id: "s1", expected_shape: "table", question: "q1" }, { slot_id: "s2", expected_shape: "scalar", question: "q2" }] } };
+    const failed = await verifyEgress(two, failure("callee_failed"), { policy, judge: passJudge });
+    expect(failed.disclosed).toStrictEqual({ status: "ok", output: { kind: "value", value: { answers: [
+      { slot_id: "s1", status: "refused", reason_category: "callee_error" }, { slot_id: "s2", status: "refused", reason_category: "callee_error" }] } }, provenance: { verified: false } });
+    expect(failed.disclosed).toStrictEqual(wholeChildDisclosure(two, "callee_error"));
+    expect(failed.decisions.map((decision) => [decision.slot_id, decision.status, decision.reason_category])).toEqual([["s1", "refused", "callee_error"], ["s2", "refused", "callee_error"]]);
+    for (const code of ["cancelled", "budget_exhausted", "transient_transport", "invalid_result", "invalid_request", "unsupported_callee"] as const) {
+      expect((await verifyEgress(two, failure(code), { policy, judge: passJudge })).disclosed).toEqual(failure(code));
+    }
+    const implicit = { request: "how much revenue", input: {} };
+    expect(wholeChildDisclosure(implicit, "callee_error")).toBeUndefined();
+    expect(wholeChildDisclosure(implicit, "callee_refused")).toBeUndefined();
+    expect((await verifyEgress(implicit, failure("callee_failed"), { policy, judge: passJudge })).disclosed).toEqual(failure("callee_failed"));
   });
 });
 
@@ -417,6 +438,70 @@ describe("egress verification: the seam", () => {
         async runStep(run) { if (run.tools.ask) { await run.tools.ask({ request: "x" }).catch(() => undefined); return { value: "planned" }; } return { value: "no data" }; } })
       .run("report", { request: "report" });
     expect(widened.status).toBe("error");
+  });
+  it("a per-slot child that fails as a whole reaches the seam as callee_failed, and only the exact all-unavailable answer may stand in for it", async () => {
+    const failing = (verifyChild: RunnerHost["verifyChild"] | undefined, seen: unknown[], raws: unknown[] = []): RunnerHost => {
+      const base = host(verifyChild ? async (context, result, signal) => { raws.push(result); return verifyChild(context, result, signal); } : undefined, [], seen);
+      // The child's only step ends without a terminal (its loop cap), and no repair is declared.
+      return { ...base, async runStep(run, binding) { return run.tools.ask ? base.runStep(run, binding) : { value: "child model text", failed: true }; } };
+    };
+    const real: RunnerHost["verifyChild"] = async (context, result) => verifyEgress(context.request, result, { policy, judge: passJudge });
+    const seen: unknown[] = []; const raws: unknown[] = [];
+    expect(await new ComponentRunner(plan(), failing(real, seen, raws)).run("report", { request: "report" })).toMatchObject({ status: "ok" });
+    expect(raws).toEqual([1, 2].map(() => ({ status: "error", code: "callee_failed", message: "Component execution did not complete.", retryable: false })));
+    expect(seen).toStrictEqual(["first", "second"].map((slot_id) => ({ status: "ok", output: { kind: "value", value: { answers: [{ slot_id, status: "refused", reason_category: "callee_error" }] } }, provenance: { verified: false } })));
+    // A seam that adds anything to that answer widens a failed child: the caller's alias call fails as before.
+    const widening: RunnerHost["verifyChild"] = async (context, result) => {
+      const outcome = await real(context, result, new AbortController().signal);
+      if (outcome.disclosed.status !== "ok" || outcome.disclosed.output.kind !== "value") throw new Error("unexpected");
+      const value = outcome.disclosed.output.value as { answers: Record<string, unknown>[] };
+      return { ...outcome, disclosed: { ...outcome.disclosed, output: { kind: "value", value: { answers: value.answers.map((answer) => ({ ...answer, note: "child model text" })) } } } };
+    };
+    const widened: unknown[] = [];
+    expect(await new ComponentRunner(plan(), failing(widening, widened)).run("report", { request: "report" })).toMatchObject({ status: "error", code: "callee_failed" });
+    expect(widened[0]).toEqual({ threw: "callee_failed" });
+    // Without a seam, the failed child fails the caller's alias call unchanged.
+    const unsealed: unknown[] = [];
+    expect(await new ComponentRunner(plan(), failing(undefined, unsealed)).run("report", { request: "report" })).toMatchObject({ status: "error", code: "callee_failed" });
+    expect(unsealed[0]).toEqual({ threw: "callee_failed" });
+    // Any other whole-child failure keeps its own code: a child over its step budget still ends the run as budget_exhausted.
+    const base = host(real, [], []);
+    const busy: RunnerHost = { ...base, async runStep(run, binding) { return run.tools.ask ? base.runStep(run, binding) : { value: "child model text" }; } };
+    const long = plan();
+    const answer = long.components.answer!;
+    const steps = Array.from({ length: 13 }, (_, i) => ({ ...answer.steps[0]!, name: `query${i}`, produces: `data${i}`, tools: [] }));
+    const budget = await new ComponentRunner({ ...long, components: { ...long.components, answer: { ...answer, steps } } }, busy).run("report", { request: "report" });
+    expect(budget).toMatchObject({ status: "error", code: "budget_exhausted" });
+  });
+  it("a per-slot refused child crosses as callee_refused, and neither whole-child disclosure may stand in for the other raw result", async () => {
+    const real: RunnerHost["verifyChild"] = async (context, result) => verifyEgress(context.request, result, { policy, judge: passJudge });
+    const refusing = (verifyChild: RunnerHost["verifyChild"], seen: unknown[], raws: unknown[] = []): RunnerHost => {
+      const base = host(async (context, result, signal) => { raws.push(result); return verifyChild!(context, result, signal); }, [], seen);
+      return { ...base, async prepare(component, signal) {
+        const bound = await base.prepare(component, signal);
+        return component.id === "answer" ? { ...bound, async normalize() { return { status: "refused", code: "callee_refused", message: "child model text" }; } } : bound;
+      } };
+    };
+    const failing = (verifyChild: RunnerHost["verifyChild"], seen: unknown[]): RunnerHost => {
+      const base = host(verifyChild, [], seen);
+      return { ...base, async runStep(run, binding) { return run.tools.ask ? base.runStep(run, binding) : { value: "child model text", failed: true }; } };
+    };
+    const disclosure = (reason: "callee_error" | "callee_refused") => ["first", "second"].map((slot_id) => ({ status: "ok", output: { kind: "value", value: { answers: [{ slot_id, status: "refused", reason_category: reason }] } }, provenance: { verified: false } }));
+    // The refused child reaches the seam as the refusal it is, and crosses with its own category.
+    const seen: unknown[] = []; const raws: unknown[] = [];
+    expect(await new ComponentRunner(plan(), refusing(real, seen, raws)).run("report", { request: "report" })).toMatchObject({ status: "ok" });
+    expect(raws).toEqual([1, 2].map(() => ({ status: "refused", code: "callee_refused", message: "child model text" })));
+    expect(seen).toStrictEqual(disclosure("callee_refused"));
+    expect(JSON.stringify(seen)).not.toContain("child model text");
+    // A seam that relabels either one as the other is a widening, and the caller's alias call fails.
+    const as = (reason: "callee_error" | "callee_refused"): RunnerHost["verifyChild"] => async (context, result) =>
+      ({ ...await real(context, result, new AbortController().signal), disclosed: wholeChildDisclosure(context.request, reason)! });
+    const relabelledRefusal: unknown[] = [];
+    expect(await new ComponentRunner(plan(), refusing(as("callee_error"), relabelledRefusal)).run("report", { request: "report" })).toMatchObject({ status: "error", code: "callee_failed" });
+    expect(relabelledRefusal[0]).toEqual({ threw: "callee_failed" });
+    const relabelledFailure: unknown[] = [];
+    expect(await new ComponentRunner(plan(), failing(as("callee_refused"), relabelledFailure)).run("report", { request: "report" })).toMatchObject({ status: "error", code: "callee_failed" });
+    expect(relabelledFailure[0]).toEqual({ threw: "callee_failed" });
   });
   it("traces every decision with slot id, status and reason category and never the payload", async () => {
     const seam: RunnerHost["verifyChild"] = async (context, result) => verifyEgress(context.request, result, { policy, judge: async () => JSON.stringify({ verdict: "refuse", reason_category: "individual_level" }) });

@@ -366,6 +366,19 @@ export function readSlots(request: { readonly request: string; readonly input: R
   return { slots: parsed.data, implicit: false, ...(preamble !== undefined ? { preamble } : {}) };
 }
 
+/**
+ * What crosses for a per-slot child that failed or was refused as a whole: every declared slot
+ * as refused with the category that says what happened (`callee_error` for a child that failed
+ * with `callee_failed`, `callee_refused` for a refused child), so the caller can still lay out
+ * the report with unavailable cells. Only slot ids, the status and the category cross; nothing
+ * the child produced does. Undefined for a request without slots, which keeps the raw result.
+ */
+export function wholeChildDisclosure(request: { readonly request: string; readonly input: Readonly<Record<string, unknown>> }, reason: "callee_error" | "callee_refused"): ComponentInvocationResult | undefined {
+  const read = readSlots(request);
+  if ("error" in read || read.implicit) return undefined;
+  return { status: "ok", output: { kind: "value", value: { answers: read.slots.map((slot) => refusedAnswer(slot, reason)) } }, provenance: { verified: false } };
+}
+
 type Answer = { readonly kind: "table"; readonly table: TableAnswer } | { readonly kind: "narrative"; readonly narrative: z.infer<typeof narrativeSchema> };
 function classify(value: unknown): Answer | undefined {
   const table = tableSchema.safeParse(value);
@@ -427,10 +440,13 @@ export async function verifyEgress(
   }
   const { slots, implicit, preamble } = read;
   if (result.status === "refused") {
-    return { disclosed: result, decisions: slots.map((slot) => ({ slot_id: slot.slot_id, status: "refused", reason_category: "callee_refused", judge: "skipped", row_count: 0 })), provenance: [] };
+    const decisions: EgressDecision[] = slots.map((slot) => ({ slot_id: slot.slot_id, status: "refused", reason_category: "callee_refused", judge: "skipped", row_count: 0 }));
+    return { disclosed: wholeChildDisclosure(request, "callee_refused") ?? result, decisions, provenance: [] };
   }
   if (result.status === "error") {
-    return { disclosed: result, decisions: slots.map((slot) => ({ slot_id: slot.slot_id, status: "refused", reason_category: "callee_error", judge: "skipped", row_count: 0 })), provenance: [] };
+    const decisions: EgressDecision[] = slots.map((slot) => ({ slot_id: slot.slot_id, status: "refused", reason_category: "callee_error", judge: "skipped", row_count: 0 }));
+    const unavailable = result.code === "callee_failed" ? wholeChildDisclosure(request, "callee_error") : undefined;
+    return { disclosed: unavailable ?? result, decisions, provenance: [] };
   }
   const answers = result.output.kind === "value" ? answersOf(result.output.value, slots) : undefined;
   const declinedByCallee = result.output.kind === "value" ? declinedOf(result.output.value) : new Set<string>();

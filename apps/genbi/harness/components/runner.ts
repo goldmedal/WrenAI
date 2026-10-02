@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { normalizeComponentRequest, type ComponentInvocationResult } from "@warble/claude-agent-sdk";
-import { readSlots, type EgressDecision, type EgressProvenance } from "./egress.js";
+import { readSlots, wholeChildDisclosure, type EgressDecision, type EgressProvenance } from "./egress.js";
 import { parseTerminalJson } from "./terminal-json.js";
 import { reportedUsage, type StepUsage } from "./usage.js";
 
@@ -287,7 +288,13 @@ export class ComponentRunner {
     if ("error" in context.request) throw new ExecutionFailure("callee_failed");
     const verified = await this.wait(this.host.verifyChild({ ...context, request: context.request.value }, raw, this.controller.signal));
     // Narrowing only: a seam that returns success for a child that did not succeed is a host bug, never a disclosure.
-    if (verified.disclosed.status === "ok" && raw.status !== "ok") throw new ExecutionFailure("callee_failed");
+    // The one exception is the all-unavailable answer for a per-slot child that failed or was refused as a whole,
+    // matched exactly and with the category of what happened to the raw result: never one category for the other.
+    const admitted = raw.status === "error" && raw.code === "callee_failed" ? wholeChildDisclosure(context.request.value, "callee_error")
+      : raw.status === "refused" ? wholeChildDisclosure(context.request.value, "callee_refused") : undefined;
+    if (verified.disclosed.status === "ok" && raw.status !== "ok" && !(admitted !== undefined && isDeepStrictEqual(verified.disclosed, admitted))) {
+      throw new ExecutionFailure("callee_failed");
+    }
     return verified;
   }
 
@@ -316,6 +323,24 @@ export class ComponentRunner {
       this.check();
       return result;
     } finally { this.controller.signal.removeEventListener("abort", stop); }
+  }
+
+  /**
+   * A per-slot child behind an egress seam that throws `callee_failed` (an unrepaired step) reaches
+   * the seam as a `callee_failed` result instead of failing the caller, so the seam can answer every
+   * slot unavailable. A grandchild's seam-narrowing violation thrown as `callee_failed` inside the
+   * child lands here too and renders all-unavailable (fails closed). Cancellation, budget, invalid
+   * results and any other error keep propagating, as does every failure of a child without slots
+   * or without a seam. A refused child is returned as is; the seam discloses it with its own category.
+   */
+  private async invokeChild(id: string, raw: unknown, parent: string, depth: number, perSlotBehindSeam: boolean): Promise<ComponentInvocationResult> {
+    if (!perSlotBehindSeam) return this.invoke(id, raw, parent, depth);
+    try {
+      return await this.invoke(id, raw, parent, depth);
+    } catch (error) {
+      if (error instanceof ExecutionFailure && error.code === "callee_failed") return safeError(error);
+      throw error;
+    }
   }
 
   private async invoke(id: string, raw: unknown, parent: string | null, depth: number): Promise<ComponentInvocationResult> {
@@ -425,12 +450,14 @@ export class ComponentRunner {
             const callId = randomUUID();
             const pending = queue.then(() => trackTool(edge.alias, async () => {
               assertActive();
-              const raw = await this.invoke(edge.component, savedInput, invocation, depth + 1);
+              const childRequest = normalizeComponentRequest(savedInput, COMPONENT_LIMITS.requestBytes);
+              const raw = await this.invokeChild(edge.component, savedInput, invocation, depth + 1,
+                Boolean(this.host.verifyChild) && !("error" in childRequest) && isPerSlotRequest(childRequest.value));
               assertActive();
               // The egress seam: the caller only ever receives `disclosed`. The raw
               // child result exists on this stack frame and nowhere else.
               const verified = await this.verifyChild({ caller: id, step: step.name, alias: edge.alias, callee: edge.component, depth: depth + 1,
-                request: normalizeComponentRequest(savedInput, COMPONENT_LIMITS.requestBytes) }, raw);
+                request: childRequest }, raw);
               assertActive();
               for (const decision of verified.decisions) {
                 this.host.onEvent?.({ ...event, kind: "egress", step: step.name, tool: edge.alias, callId, slot: decision.slot_id,
