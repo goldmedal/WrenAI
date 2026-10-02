@@ -39,12 +39,12 @@ describe("capability card surfaces", () => {
       const base = reportPlan();
       const plan = { ...base, systemPrompt: "Profile instructions", components: Object.fromEntries(Object.entries(base.components)
         .map(([id, node]) => [id, { ...node, declaration: { ...node.declaration, context_binding: { project } } }])) };
-      vi.mocked(openWrenComponentAccess).mockResolvedValue({ query: async () => ({ columns: ["revenue"], rows: [{ revenue: "42" }] }), inspect: async () => ({}), close: async () => {} });
+      vi.mocked(openWrenComponentAccess).mockResolvedValue({ query: async (input) => ({ columns: ["revenue"], rows: [{ revenue: "42" }], definition: { sql: input.sql, source_tables: ["orders"], filters: [] } }), inspect: async () => ({}), close: async () => {} });
       const prompts: { tier: string; prompt: string }[] = [];
       vi.mocked(runAiComponentStep).mockImplementation(async (run: StepRun) => {
         prompts.push({ tier: run.tier, prompt: run.prompt });
         if (run.tools.ask) { await run.tools.ask({ request: "revenue" }); return { value: JSON.stringify({ layout: "planned" }) }; }
-        if (run.tools.query) { await run.tools.query({ sql: "SELECT 42 AS revenue" }); return { value: "done" }; }
+        if (run.tools.query) { await run.tools.query({ sql: "SELECT SUM(amount) AS revenue FROM orders" }); return { value: "done" }; }
         return { value: JSON.stringify({ blocks: [{ type: "kpi_card", label: "revenue", value: "42" }] }) };
       });
       const card = buildCapabilityCard(CATALOG, { maxBytes: 260, disclosure: policy });

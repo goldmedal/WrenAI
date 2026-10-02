@@ -26,7 +26,7 @@ describe("observed semantic guards", () => {
   it("never accepts model-created semantic proof or mismatched observed SQL", () => {
     const component: ComponentPlan = { id: "analysis", declaration: { guardrails: guards, required_capabilities: ["sql_execution:read_only"], effect: { render_blocks: [] } },
       steps: [{ name: "query", tier: "strong", produces: "result", prompt: "", consumes: [], calls: [], tools: [{ name: "query", source: "native" }] }] };
-    const output = { columns: ["revenue"], rows: [{ revenue: 1 }] };
+    const output = { columns: ["revenue"], rows: [{ revenue: 1 }], definition: { sql: proof([]).sql, source_tables: ["sales"], filters: [] } };
     const evidence = { steps: { result: { verified: true, semantics: proof(["region"]) } }, children: [],
       tools: [{ step: "query", tool: "query", input: { sql: proof([]).sql }, output }] };
     expect(normalizeComponentEvidence(component, evidence, context).status).toBe("refused");

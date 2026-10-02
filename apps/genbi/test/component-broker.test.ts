@@ -22,7 +22,7 @@ function fixture(step: (run: StepRun) => Promise<unknown>) {
   const queries: unknown[] = [];
   const broker = createComponentBroker({ plan: plan(), contexts, verifierBinary, identity, currentIdentity: () => current,
     async prepare() { return {
-      async query(input, signal) { signal.throwIfAborted(); queries.push(input); return { columns: ["n"], rows: [{ n: 7 }] }; },
+      async query(input, signal) { signal.throwIfAborted(); queries.push(input); return { columns: ["n"], rows: [{ n: 7 }], definition: { sql: input.sql, source_tables: [...input.sql.matchAll(/\bFROM (\w+)/g)].map((match) => match[1]!), filters: [] } }; },
       async inspect() { return { models: [] }; }, async close() { closed++; },
     }; },
     async step(run) { return { value: await step(run) }; },
@@ -36,12 +36,12 @@ describe("component-owned typed access", () => {
   it("bounds SQL rows and earns result provenance only from observed data", async () => {
     const f = fixture(async (run) => {
       expect(run.toolSchemas.query).toMatchObject({ additionalProperties: false });
-      await run.tools.query!({ sql: "SELECT 7 AS n", limit: 999 });
+      await run.tools.query!({ sql: "SELECT n FROM orders", limit: 999 });
       return JSON.stringify({ verified: true, rows: [{ n: 999 }] });
     });
     const result = await new ComponentRunner(plan(), f.broker).run("answer", { request: "question" });
-    expect(result).toMatchObject({ status: "ok", output: { value: { rows: [{ n: 7 }] } }, provenance: { verified: true, definition: { sql: "SELECT 7 AS n" } } });
-    expect(f.queries).toEqual([{ sql: "SELECT 7 AS n", limit: 2 }]);
+    expect(result).toMatchObject({ status: "ok", output: { value: { rows: [{ n: 7 }] } }, provenance: { verified: true, definition: { sql: "SELECT n FROM orders", source_tables: ["orders"] } } });
+    expect(f.queries).toEqual([{ sql: "SELECT n FROM orders", limit: 2 }]);
     expect(f.closed()).toBe(1);
   });
   it.each(["project", "connection", "cwd", "component", "step"])("rejects model override %s before data access", async (field) => {
@@ -56,6 +56,11 @@ describe("component-owned typed access", () => {
     });
     expect(await new ComponentRunner(plan(), f.broker).run("answer", { request: "go" })).toMatchObject({ status: "error", code: "cancelled" });
     expect(f.queries).toEqual([]);
+  });
+  it("refuses an answer whose only query read no table", async () => {
+    const f = fixture(async (run) => { await run.tools.query!({ sql: "SELECT 7 AS n" }); return JSON.stringify({ rows: [{ n: 7 }] }); });
+    expect((await new ComponentRunner(plan(), f.broker).run("answer", { request: "go" })).status).toBe("refused");
+    expect(f.queries).toEqual([{ sql: "SELECT 7 AS n", limit: 2 }]);
   });
   it("refuses model self-attestation without observed query success", async () => {
     const f = fixture(async () => JSON.stringify({ verified: true, rows: [{ n: 7 }] }));

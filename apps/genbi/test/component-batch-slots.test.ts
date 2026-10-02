@@ -16,7 +16,9 @@ const text = (value: unknown) => ({ content: [{ type: "text" as const, text: typ
 const query = (sql: string, id: string) => ({ content: [{ type: "tool-call" as const, toolName: "query", toolCallId: id, input: JSON.stringify({ sql }) }], finishReason: { unified: "tool-calls" as const, raw: "tool-calls" }, usage, warnings: [] });
 const SQL = { a: "SELECT SUM(amount) AS n FROM orders", b: "SELECT total_revenue FROM revenue", c: "SELECT COUNT(*) AS n FROM customers" };
 const ROWS: Record<string, number> = { [SQL.a]: 1672, [SQL.c]: 100 };
-const answered = (slot: "a" | "c") => ({ slot_id: slot, columns: ["n"], rows: [[ROWS[SQL[slot]]]], summary: `${slot} answered`, verified: true, definition: { sql: SQL[slot], source_tables: [], filters: [] } });
+/** The tables a query reads, as the governed transport proves them in `definition.source_tables`. */
+const tablesOf = (sql: string) => [...sql.matchAll(/\bFROM (\w+)/g)].map((match) => match[1]!);
+const answered = (slot: "a" | "c") => ({ slot_id: slot, columns: ["n"], rows: [[ROWS[SQL[slot]]]], summary: `${slot} answered`, verified: true, definition: { sql: SQL[slot], source_tables: tablesOf(SQL[slot]), filters: [] } });
 
 function plan(options: { repair?: boolean } = {}): ExecutionPlan {
   const tools = [{ name: "query", source: "native" }];
@@ -37,7 +39,7 @@ function host(strong: MockLanguageModelV4, extra: Readonly<Record<string, unknow
       async execute(input) {
         const sql = (input as { sql: string }).sql; executed.push(sql);
         if (!(sql in ROWS)) throw new GovernedWrenError("model_not_found");
-        return { columns: ["n"], rows: [{ n: ROWS[sql] }], definition: { sql, source_tables: [], filters: [] }, ...extra };
+        return { columns: ["n"], rows: [{ n: ROWS[sql] }], definition: { sql, source_tables: tablesOf(sql), filters: [] }, ...extra };
       } }],
     isCurrent: () => true, async close() {},
     async normalize(observed) { evidence.push(observed); return normalizeComponentEvidence(plan().components.answer_batch!, observed); },
@@ -53,9 +55,9 @@ describe("per-slot failure isolation in a batch-shaped child", () => {
     const f = host(strong);
     const result = await new ComponentRunner(plan(), f.host).run("answer_batch", { request: "fill the report", input: { preamble: "FY2025", slots } });
     expect(result).toEqual({ status: "ok", output: { kind: "value", value: [
-      { slot_id: "a", columns: ["n"], rows: [{ n: 1672 }], summary: "a answered", verified: true, definition: { sql: SQL.a, source_tables: [], filters: [] } },
+      { slot_id: "a", columns: ["n"], rows: [{ n: 1672 }], summary: "a answered", verified: true, definition: { sql: SQL.a, source_tables: tablesOf(SQL.a), filters: [] } },
       { slot_id: "b", status: "unanswerable", reason: "model_not_found: revenue is a cube, not a model" },
-      { slot_id: "c", columns: ["n"], rows: [{ n: 100 }], summary: "c answered", verified: true, definition: { sql: SQL.c, source_tables: [], filters: [] } },
+      { slot_id: "c", columns: ["n"], rows: [{ n: 100 }], summary: "c answered", verified: true, definition: { sql: SQL.c, source_tables: tablesOf(SQL.c), filters: [] } },
     ] }, provenance: { verified: true } });
     // The tool error reached the model as a bounded class, and no repair step ran.
     expect(JSON.stringify(strong.doGenerateCalls[2]!.prompt)).toContain("model_not_found");
@@ -67,7 +69,7 @@ describe("per-slot failure isolation in a batch-shaped child", () => {
     const good = (slot: string) => `SELECT COUNT(*) AS n FROM orders_${slot}`;
     for (const [index, slot] of six.entries()) ROWS[good(slot)] = index + 1;
     const turns = six.flatMap((slot) => [query(`SELECT COUNT(*) AS n FROM missing_${slot}`, `${slot}-1`), query(good(slot), `${slot}-2`)]);
-    const final = six.map((slot) => ({ slot_id: slot, columns: ["n"], rows: [[0]], verified: true, definition: { sql: good(slot), source_tables: [], filters: [] } }));
+    const final = six.map((slot) => ({ slot_id: slot, columns: ["n"], rows: [[0]], verified: true, definition: { sql: good(slot), source_tables: tablesOf(good(slot)), filters: [] } }));
     const strong = new MockLanguageModelV4({ doGenerate: [...turns, text(final)] });
     const f = host(strong);
     const prompts: string[] = [];
@@ -119,9 +121,9 @@ describe("executed queries are cited by the id the host attaches to each result"
     expect(receivedQueryIds(strong.doGenerateCalls[2]!.prompt)).toEqual([["a", "q1"], ["c", "q2"]]);
     expect(f.evidence[0]!.tools.map((call) => [(call.input as { sql: string }).sql, (call.output as { query_id?: unknown }).query_id])).toEqual([[SQL.a, "q1"], [SQL.c, "q2"]]);
     expect(result).toEqual({ status: "ok", output: { kind: "value", value: [
-      { slot_id: "a", columns: ["n"], rows: [{ n: 1672 }], summary: "a by sql", verified: true, definition: { sql: SQL.a, source_tables: [], filters: [] } },
+      { slot_id: "a", columns: ["n"], rows: [{ n: 1672 }], summary: "a by sql", verified: true, definition: { sql: SQL.a, source_tables: tablesOf(SQL.a), filters: [] } },
       { slot_id: "b", status: "unanswerable", reason: "no executed query backs this answer" },
-      { slot_id: "c", columns: ["n"], rows: [{ n: 100 }], summary: "c by id", verified: true, definition: { sql: SQL.c, source_tables: [], filters: [] } },
+      { slot_id: "c", columns: ["n"], rows: [{ n: 100 }], summary: "c by id", verified: true, definition: { sql: SQL.c, source_tables: tablesOf(SQL.c), filters: [] } },
     ] }, provenance: { verified: true } });
   });
   it("a tool result that already carries a query_id gets the host id, in evidence and at the model", async () => {
@@ -160,9 +162,9 @@ describe("an unparseable batch terminal", () => {
     // Ids keep counting across the invocation's steps, so the repair may cite the first step's queries.
     expect(receivedQueryIds(strong.doGenerateCalls[3]!.prompt)).toEqual([["c", "q2"]]);
     expect(result).toEqual({ status: "ok", output: { kind: "value", value: [
-      { slot_id: "a", columns: ["n"], rows: [{ n: 1672 }], summary: "a repaired", verified: true, definition: { sql: SQL.a, source_tables: [], filters: [] } },
+      { slot_id: "a", columns: ["n"], rows: [{ n: 1672 }], summary: "a repaired", verified: true, definition: { sql: SQL.a, source_tables: tablesOf(SQL.a), filters: [] } },
       { slot_id: "b", status: "unanswerable", reason: "no revenue model" },
-      { slot_id: "c", columns: ["n"], rows: [{ n: 100 }], summary: "c repaired", verified: true, definition: { sql: SQL.c, source_tables: [], filters: [] } },
+      { slot_id: "c", columns: ["n"], rows: [{ n: 100 }], summary: "c repaired", verified: true, definition: { sql: SQL.c, source_tables: tablesOf(SQL.c), filters: [] } },
     ] }, provenance: { verified: true } });
   });
   it("a repair whose terminal still does not parse yields every declared slot unanswerable, not callee_failed", async () => {

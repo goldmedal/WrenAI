@@ -9,36 +9,43 @@ const definitionSchema = z.object({ sql: z.string(), source_tables: z.array(z.st
 /** A definition a render block may be grounded on: `filters` is optional in the block contract. */
 const lineageSchema = z.object({ sql: z.string(), source_tables: z.array(z.string()), filters: z.array(z.string()).optional() }).strict();
 type Lineage = z.infer<typeof lineageSchema>;
-const stringList = z.array(z.string()).max(64);
 const table = z.object({ columns: z.array(z.string()).min(1), rows: z.array(z.record(z.string(), z.unknown())) });
 const blocks = z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict());
 const capabilities = z.array(z.string());
-interface GroundedQuery { readonly sql: string; readonly queryId?: string; readonly table: z.infer<typeof table>; readonly output: unknown }
+type Definition = z.infer<typeof definitionSchema>;
+type Observation = ComponentEvidence["tools"][number];
+interface GroundedQuery { readonly sql: string; readonly queryId?: string; readonly table: z.infer<typeof table>; readonly definition: Definition }
 /** The host-assigned id of an executed query (`q<N>`, see the runner), read from the observed output only. */
 function queryIdOf(output: unknown): string | undefined {
   const id = (output as { query_id?: unknown } | null)?.query_id;
   return typeof id === "string" ? id : undefined;
 }
 /**
- * The observed definition for an executed query. When the tool proved none: the executed SQL
- * with the model's claimed source tables (else none) and no filters, so a composing parent can
- * still build a definition block.
+ * The one test for whether a component's own tool observation may ground an answer, a render
+ * block or a batch entry: the result is a table, the tool itself proved a `definition` for the
+ * SQL it executed, and that definition reads at least one table. Returns the proven definition,
+ * else `undefined`. A definition the model claims never counts, so an observation without a
+ * proven one grounds nothing (fail closed).
+ *
+ * Known limit: this proves the query read a model, not where each projected value came from. A
+ * query that reads a model can still project literals (`SELECT CASE ... THEN 424 ... FROM orders`).
  */
-function definitionOf(query: GroundedQuery, terminalValue: unknown): Lineage {
-  const parsed = definitionSchema.safeParse((query.output as { definition?: unknown } | null)?.definition);
-  if (parsed.success && parsed.data.sql === query.sql) return parsed.data;
-  const claimed = (terminalValue as { definition?: { source_tables?: unknown } } | null)?.definition?.source_tables;
-  return { sql: query.sql, source_tables: stringList.safeParse(claimed).success ? claimed as string[] : [] };
+function groundingDefinition(call: Pick<Observation, "input" | "output">): Definition | undefined {
+  const sql = (call.input as { sql?: unknown } | null)?.sql;
+  if (typeof sql !== "string" || !table.safeParse(call.output).success) return undefined;
+  const proven = definitionSchema.safeParse((call.output as { definition?: unknown } | null)?.definition);
+  if (!proven.success || proven.data.sql !== sql) return undefined;
+  return proven.data.source_tables.some((name) => name.length > 0) ? proven.data : undefined;
 }
-function groundedQueries(observations: readonly { readonly input: unknown; readonly output: unknown }[]): GroundedQuery[] {
-  const grounded: GroundedQuery[] = [];
-  for (const call of observations) {
-    const sql = (call.input as { sql?: unknown } | null)?.sql;
-    const parsed = table.safeParse(call.output);
-    const queryId = queryIdOf(call.output);
-    if (typeof sql === "string" && parsed.success) grounded.push({ sql, ...(queryId !== undefined ? { queryId } : {}), table: parsed.data, output: call.output });
-  }
-  return grounded;
+function canGround(call: Pick<Observation, "input" | "output">): boolean {
+  return groundingDefinition(call) !== undefined;
+}
+function groundedQuery(call: Pick<Observation, "input" | "output">): GroundedQuery | undefined {
+  const definition = groundingDefinition(call);
+  const parsed = table.safeParse(call.output);
+  if (!definition || !parsed.success) return undefined;
+  const queryId = queryIdOf(call.output);
+  return { sql: definition.sql, ...(queryId !== undefined ? { queryId } : {}), table: parsed.data, definition };
 }
 function refused(): ComponentInvocationResult {
   return { status: "refused", code: "callee_refused", message: "The component did not produce a grounded result." };
@@ -61,12 +68,11 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // additivity from a child's generic verified flag or from its model-authored value.
   if (semanticGuard && evidence.children.length > 0) return refused();
   if (!checkSemanticGuards(guards, proofs, context)) return refused();
-  const definitions: Lineage[] = [];
-  for (const call of observations) {
-    const parsed = definitionSchema.safeParse((call.output as { definition?: unknown } | null)?.definition);
-    if (parsed.success && parsed.data.sql === (call.input as { sql?: unknown })?.sql) definitions.push(parsed.data);
-  }
-  const data = observations.map((call) => table.safeParse(call.output)).filter((value) => value.success).map((value) => value.data!);
+  // Only observations that can ground become evidence, for the single answer, a batch entry and
+  // render blocks alike; a table-less or unproven query is as if it never returned a table.
+  const queries = observations.map(groundedQuery).filter((query) => query !== undefined);
+  const definitions: Lineage[] = queries.map((query) => query.definition);
+  const data = queries.map((query) => query.table);
   const declared = capabilities.parse(component.declaration.required_capabilities);
   const render = blocks.parse((component.declaration.effect as { render_blocks?: unknown }).render_blocks ?? []) as RenderBlock[];
   const steps = component.steps.filter((step) => Object.hasOwn(evidence.steps, step.produces));
@@ -89,23 +95,18 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // is never read, and an entry no executed query backs is returned as unanswerable.
   if (render.length === 0 && Array.isArray(terminalValue)) return normalizeBatchTerminal(terminalValue, observations);
   if (render.length === 0 && data.length > 0) {
-    const grounded = groundedQueries(observations);
     // The answer is the query the terminal value names, never simply the last table: a model
     // that runs a stray check after the right query must not turn that check into the answer.
     // A value naming no query (by id or SQL) keeps the historical last-observation rule; a value
     // naming a query that never ran is refused rather than answered with another table.
     let chosen: GroundedQuery | undefined;
     if (namedAnswerQueryId(terminalValue) === undefined && namedAnswerSql(terminalValue) === undefined) {
-      const last = observations[observations.length - 1]!;
-      const actual = table.safeParse(last.output);
-      if (!actual.success) return refused();
-      const sql = (last.input as { sql?: unknown }).sql;
-      chosen = { sql: typeof sql === "string" ? sql : "", table: actual.data, output: last.output };
+      chosen = groundedQuery(observations[observations.length - 1]!);
     } else {
-      chosen = selectAnsweringCandidate(grounded, terminalValue);
+      chosen = selectAnsweringCandidate(queries, terminalValue);
     }
     if (!chosen) return refused();
-    const definition = definitionOf(chosen, terminalValue);
+    const definition = chosen.definition;
     return { status: "ok", output: { kind: "value", value: { ...chosen.table, verified: true, summary: "Query completed.", definition } },
       provenance: { verified: true, definition } };
   }
@@ -164,14 +165,13 @@ function sanitizedReason(value: unknown, fallback: string): string {
 /**
  * One entry per slot, first entry per slot id wins. A tabular entry is
  * accepted only when its `definition` cites a query this run executed with a
- * table-shaped result: by `query_id` (the id the host attached to that tool
- * result), else by `sql`. Its columns, rows and SQL are then the observed ones.
- * The model contributes `summary` and, when the tool proved no definition, its
- * claimed `source_tables` (plus `filters` on the SQL path); every value comes
- * from the tool. Entries the model marked
+ * result that can ground (see `groundingDefinition`): by `query_id` (the id the
+ * host attached to that tool result), else by `sql`. Its columns, rows and
+ * definition are then the observed ones. The model contributes `summary` only;
+ * every value comes from the tool. Entries the model marked
  * `unanswerable` (or `refused`) pass through with a bounded reason.
  */
-function normalizeBatchTerminal(entries: readonly unknown[], observations: readonly ComponentEvidence["tools"][number][]): ComponentInvocationResult {
+function normalizeBatchTerminal(entries: readonly unknown[], observations: readonly Observation[]): ComponentInvocationResult {
   const seen = new Set<string>();
   const value: Record<string, unknown>[] = [];
   let answered = 0;
@@ -185,34 +185,25 @@ function normalizeBatchTerminal(entries: readonly unknown[], observations: reado
       continue;
     }
     const claimed = item.definition && typeof item.definition === "object" ? item.definition as Record<string, unknown> : undefined;
-    const tabular = (call: ComponentEvidence["tools"][number]) => table.safeParse(call.output).success;
     // A query the entry cites by its host-assigned id resolves to that observation only: an id no
     // executed query carries is unanswerable, never grounded on another query or on its SQL text.
     const queryId = typeof claimed?.query_id === "string" ? claimed.query_id : undefined;
     const claimedSql = queryId === undefined && typeof claimed?.sql === "string" ? claimed.sql : undefined;
     // Whitespace- and terminator-insensitive, like the single-answer selection: the model may reformat the SQL it names.
-    const observed = queryId !== undefined ? observations.find((call) => queryIdOf(call.output) === queryId && tabular(call))
+    // An observation that cannot ground is skipped, so the entry citing it is unanswerable.
+    const observed = queryId !== undefined ? observations.find((call) => queryIdOf(call.output) === queryId && canGround(call))
       : claimedSql === undefined ? undefined
-      : [...observations].reverse().find((call) => { const ran = (call.input as { sql?: unknown } | null)?.sql; return typeof ran === "string" && sqlKey(ran) === sqlKey(claimedSql) && tabular(call); });
-    const actual = observed ? table.safeParse(observed.output) : undefined;
-    const sql = (observed?.input as { sql?: unknown } | null | undefined)?.sql;
-    if (!observed || !actual?.success || typeof sql !== "string") {
+      : [...observations].reverse().find((call) => { const ran = (call.input as { sql?: unknown } | null)?.sql; return typeof ran === "string" && sqlKey(ran) === sqlKey(claimedSql) && canGround(call); });
+    const query = observed ? groundedQuery(observed) : undefined;
+    if (!query) {
       value.push({ slot_id: item.slot_id, status: "unanswerable", reason: "no executed query backs this answer" });
       continue;
     }
-    // Provenance is the observed query's: its SQL always, and its tool-proven definition when
-    // present. Otherwise the model's claimed source tables are kept, so a composing parent can
-    // still build a definition block. Claimed filters are kept on the SQL path only: an entry
-    // citing an id carries none, and any it sends are ignored.
-    const proven = definitionSchema.safeParse((observed.output as { definition?: unknown }).definition);
-    const definition = proven.success && proven.data.sql === sql ? proven.data : {
-      sql,
-      source_tables: stringList.safeParse(claimed?.source_tables).success ? claimed!.source_tables as string[] : [],
-      ...(queryId === undefined ? { filters: stringList.safeParse(claimed?.filters).success ? claimed!.filters as string[] : [] } : {}),
-    };
+    // Provenance is the observed query's tool-proven definition; any definition fields the
+    // model sends besides the citation are ignored.
     answered += 1;
-    value.push({ slot_id: item.slot_id, columns: actual.data.columns, rows: actual.data.rows, verified: true,
-      summary: typeof item.summary === "string" ? item.summary : "Query completed.", definition });
+    value.push({ slot_id: item.slot_id, columns: query.table.columns, rows: query.table.rows, verified: true,
+      summary: typeof item.summary === "string" ? item.summary : "Query completed.", definition: query.definition });
   }
   if (value.length === 0) return refused();
   // Spec §6.2: an array value is preserved as-is with no outer provenance; per-entry `verified`/`definition` stay on the entries.

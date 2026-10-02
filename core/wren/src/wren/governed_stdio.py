@@ -73,12 +73,18 @@ class _ResultTooLarge(ValueError):
     """A well-formed result that does not fit the byte limit."""
 
 
+class _ReadsNoModel(ValueError):
+    """The query reads no table, so its values cannot come from the bound data."""
+
+
 def classify_error(error: BaseException) -> str:
     """Map an exception to one key of ``ERROR_MESSAGES``; never reads its text."""
     if isinstance(error, _RequestError):
         return "invalid_request"
     if isinstance(error, _ResultTooLarge):
         return "result_too_large"
+    if isinstance(error, _ReadsNoModel):
+        return "policy_rejected"
     if isinstance(error, WrenError):
         code, phase = error.error_code, error.phase
         if code is ErrorCode.MODEL_NOT_FOUND:
@@ -142,23 +148,33 @@ def serve(project: Path) -> None:
                         or not 1 <= request["limit"] <= 10_000
                     ):
                         raise _RequestError("Invalid query")
-                    result = engine.query(
-                        request["sql"], limit=request["limit"], read_only=True
-                    )
                     ast = parse_one(
                         request["sql"],
                         dialect=get_sqlglot_dialect(DataSource(datasource)),
                     )
-                    aliases = {cte.alias_or_name for cte in ast.find_all(exp.CTE)}
+                    # Compared case-insensitively: a reference that differs from a CTE alias
+                    # only in case or quoting may resolve to that CTE (DuckDB does so), and
+                    # excluding it can only refuse more queries, never admit one.
+                    aliases = {
+                        cte.alias_or_name.casefold() for cte in ast.find_all(exp.CTE)
+                    }
+                    source_tables = sorted(
+                        {
+                            table.name
+                            for table in ast.find_all(exp.Table)
+                            if table.name and table.name.casefold() not in aliases
+                        }
+                    )
+                    # Checked before execution: a SELECT over literals alone would return
+                    # numbers the caller typed, never values read from a model.
+                    if not source_tables:
+                        raise _ReadsNoModel("Query reads no table")
+                    result = engine.query(
+                        request["sql"], limit=request["limit"], read_only=True
+                    )
                     definition = {
                         "sql": request["sql"],
-                        "source_tables": sorted(
-                            {
-                                table.name
-                                for table in ast.find_all(exp.Table)
-                                if table.name not in aliases
-                            }
-                        ),
+                        "source_tables": source_tables,
                         "filters": [
                             clause.this.sql() for clause in ast.find_all(exp.Where)
                         ],

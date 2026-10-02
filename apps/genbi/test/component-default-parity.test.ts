@@ -35,7 +35,7 @@ describe("default dashboard cross-mode contract", () => {
             return {
               async query(input) {
                 expect(component.id).toBe("answer_query"); expect(input.limit).toBe(1000); queries++;
-                return { columns: ["n"], rows: [{ n: 7 }], definition: { sql: input.sql, source_tables: [], filters: [] } };
+                return { columns: ["n"], rows: [{ n: 7 }], definition: { sql: input.sql, source_tables: ["orders"], filters: [] } };
               },
               async inspect() { expect(component.id).toBe("answer_query"); return snapshot; },
               async close() { closed++; },
@@ -58,7 +58,7 @@ describe("default dashboard cross-mode contract", () => {
               return { value: "Count the synthetic rows" };
             }
             const tool = Object.entries(run.toolSchemas).find(([, schema]) => JSON.stringify(schema).includes('"sql"'))?.[0];
-            expect(tool).toBeDefined(); await run.tools[tool!]!({ sql: "SELECT 7 AS n" });
+            expect(tool).toBeDefined(); await run.tools[tool!]!({ sql: "SELECT n FROM orders" });
             return { value: { verified: true, columns: ["n"], rows: [[7]] } };
           },
           async normalize(component, evidence, _signal, context) { return normalizeComponentEvidence(component, evidence, context); },
