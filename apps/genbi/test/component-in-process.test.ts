@@ -32,7 +32,7 @@ describe("in-process composed route", () => {
   it("uses the dedicated route, repeated isolated child access and truthful events", async () => {
     const project = await mkdtemp(path.join(os.tmpdir(), "genbi-composed-route-"));
     try {
-      const query = vi.fn(async () => ({ columns: ["n"], rows: [{ n: 7 }] }));
+      const query = vi.fn(async (input: { sql: string }) => ({ columns: ["n"], rows: [{ n: 7 }], definition: { sql: input.sql, source_tables: ["orders"], filters: [] } }));
       const close = vi.fn(async () => {});
       vi.mocked(openWrenComponentAccess).mockResolvedValue({ query, inspect: async () => ({}), close });
       vi.mocked(runAiComponentStep).mockImplementation(async (step: StepRun) => {
@@ -49,7 +49,7 @@ describe("in-process composed route", () => {
         expect(Object.keys(step.tools)).toEqual(["query"]);
         expect(step.prompt).not.toContain("Render output:");
         expect(step.consumes).toEqual({});
-        await step.tools.query!({ sql: "SELECT 7 AS n" });
+        await step.tools.query!({ sql: "SELECT n FROM orders" });
         return { value: "done" };
       });
       const events: { kind: string }[] = [];

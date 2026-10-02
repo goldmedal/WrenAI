@@ -64,7 +64,7 @@ describe("zone gate runs before any model, tool or session starts", () => {
       const plan = { ...base, components: Object.fromEntries(Object.entries({ ...base.components,
         plan_report: { ...caller, steps: caller.steps.map((step) => ({ ...step, tier: "strong" })) } })
         .map(([id, node]) => [id, { ...node, declaration: { ...node.declaration, context_binding: { project } } }])) };
-      vi.mocked(openWrenComponentAccess).mockResolvedValue({ query: async () => ({ columns: ["revenue"], rows: [{ revenue: "42" }] }), inspect: async () => ({}), close: async () => {} });
+      vi.mocked(openWrenComponentAccess).mockResolvedValue({ query: async (input) => ({ columns: ["revenue"], rows: [{ revenue: "42" }], definition: { sql: input.sql, source_tables: ["orders"], filters: [] } }), inspect: async () => ({}), close: async () => {} });
       const seen: { step: string; modelId: string }[] = [];
       const events: unknown[] = [];
       vi.mocked(runAiComponentStep).mockImplementation(async (run: StepRun, model) => {
@@ -73,7 +73,7 @@ describe("zone gate runs before any model, tool or session starts", () => {
           await run.tools.ask({ request: "revenue" });
           return { value: JSON.stringify({ layout: "planned" }) };
         }
-        if (run.tools.query) { await run.tools.query({ sql: "SELECT 42 AS revenue" }); return { value: "done" }; }
+        if (run.tools.query) { await run.tools.query({ sql: "SELECT SUM(amount) AS revenue FROM orders" }); return { value: "done" }; }
         return { value: JSON.stringify({ blocks: [{ type: "kpi_card", label: "revenue", value: "42" }] }) };
       });
       const result = await runInProcessDefault({ bundle: describeComponentPlan(plan, "synthetic"), userProject: project, profileSource: project, question: "annual revenue report", agentId: "plan_report",
@@ -92,7 +92,7 @@ describe("zone gate runs before any model, tool or session starts", () => {
       expect(created.map((entry) => (entry.config as { modelId: string }).modelId).sort()).toEqual(["cloud-strong", "local-strong", "nano", "nano-judge"]);
       // The disclosed child value reached the caller without its definition/SQL, and the trace recorded the decision without the payload.
       expect(result.trace?.steps.filter((step) => step.tool === "egress").map((step) => step.detail)).toEqual(["ask/answer: ok"]);
-      expect(JSON.stringify(result.trace)).not.toContain("SELECT 42");
+      expect(JSON.stringify(result.trace)).not.toContain("SELECT SUM(amount)");
     } finally { await rm(project, { recursive: true, force: true }); }
   });
 });

@@ -44,6 +44,8 @@ const SQL = {
   growth_story: `SELECT quarter, SUM(amount) AS revenue, SUM(amount) / SUM(SUM(amount)) OVER () AS share_of_year FROM orders ${FY} GROUP BY quarter ORDER BY quarter`,
   largest_orders: `SELECT id AS order_id, amount FROM orders ${FY} ORDER BY amount DESC LIMIT 5`,
 } as const;
+/** The definition the governed transport proves for an executed query: sorted tables read, and its WHERE clauses. */
+const provenDefinition = (sql: string) => ({ sql, source_tables: sql.includes("customers") ? ["customers", "orders"] : ["orders"], filters: [FY.replace(/^WHERE /, "")] });
 const QUARTERS = [["2025-Q1", 290000], ["2025-Q2", 310500], ["2025-Q3", 322000], ["2025-Q4", 362000]] as const;
 const TABLES: Record<string, { columns: string[]; rows: Record<string, unknown>[] }> = {
   [SQL.total_revenue]: { columns: ["total_revenue"], rows: [{ total_revenue: 1284500 }] },
@@ -213,7 +215,7 @@ async function runReport(project: string, options: { mutateNarration?: boolean; 
     ...(options.brokenTerminal ? { brokenTerminal: options.brokenTerminal } : {}), ...(options.childFailure ? { childFailure: options.childFailure } : {}),
     ...(options.namingSummary ? { namingSummary: true } : {}), ...(options.usage ? { usage: options.usage } : {}) });
   vi.mocked(openWrenComponentAccess).mockResolvedValue({
-    async query(input) { if (input.sql === CUBE_AS_TABLE) throw new GovernedWrenError("model_not_found"); const table = TABLES[input.sql]; if (!table) throw new Error(`unexpected SQL: ${input.sql}`); return structuredClone(table); },
+    async query(input) { if (input.sql === CUBE_AS_TABLE) throw new GovernedWrenError("model_not_found"); const table = TABLES[input.sql]; if (!table) throw new Error(`unexpected SQL: ${input.sql}`); return { ...structuredClone(table), definition: provenDefinition(input.sql) }; },
     async inspect() { return {}; }, async close() {},
   });
   const events: AgentEvent[] = [];
@@ -281,7 +283,8 @@ describe("M1: the annual revenue report end to end, offline", () => {
       // AC 4: definition blocks carry SQL and source tables attached by the host from the child run, one per filled slot.
       const definitions = envelope.blocks.filter((block) => block.type === "definition");
       expect(definitions.map((block) => block.slot_id)).toEqual(["total_revenue", "order_count", "avg_order_value", "revenue_by_quarter", "revenue_by_month", "top_customers", "growth_story"]);
-      expect(definitions[5]).toEqual({ type: "definition", sql: SQL.top_customers, source_tables: ["orders", "customers"], filters: ["fiscal year 2025", "completed orders only"], slot_id: "top_customers" });
+      // The tool-proven lineage, not the model's claimed tables or prose filters.
+      expect(definitions[5]).toEqual({ type: "definition", ...provenDefinition(SQL.top_customers), slot_id: "top_customers" });
       // ...and neither public-tier step's input or output ever contained them.
       const publicCalls = calls.filter((call) => call.step === "plan_layout" || call.step === "narrate");
       const publicText = publicCalls.map((call) => JSON.stringify(call)).join("\n");
@@ -377,9 +380,8 @@ describe("M1: the annual revenue report end to end, offline", () => {
         ["kpi_card", "total_revenue"], ["kpi_card", "order_count"], ["kpi_card", "avg_order_value"], ["chart", "revenue_by_quarter"], ["chart", "revenue_by_month"],
         ["table", "top_customers"], ["narrative", "growth_story"], ["unavailable", "largest_orders"], ["unavailable", "refund_rate"]]);
       expect(data[0]).toMatchObject({ value: 1284500 });
-      // The SQL comes from the executed query the id names. This fake tool proves no lineage, so the claimed
-      // source tables are kept for the definition block, and an id-cited entry contributes no filters.
-      expect(envelope.blocks.find((block) => block.type === "definition" && block.slot_id === "top_customers")).toEqual({ type: "definition", sql: SQL.top_customers, source_tables: ["orders", "customers"], filters: [], slot_id: "top_customers" });
+      // The definition is the one the tool proved for the executed query the id names; the claimed lineage is not read.
+      expect(envelope.blocks.find((block) => block.type === "definition" && block.slot_id === "top_customers")).toEqual({ type: "definition", ...provenDefinition(SQL.top_customers), slot_id: "top_customers" });
       expect(envelope.verified).toBe(true);
       expect(normalizeComponentResult(JSON.stringify(envelope), contract).value.status).toBe("ok");
     } finally { await rm(project, { recursive: true, force: true }); }

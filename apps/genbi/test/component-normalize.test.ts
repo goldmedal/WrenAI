@@ -41,10 +41,12 @@ describe("batch-shaped callee normalization (answer_batch)", () => {
   const component: ComponentPlan = { id: "answer_batch", declaration: { required_capabilities: ["sql_execution:read_only"], guardrails: [{ name: "read_only_execution", locked: true }], effect: { render_blocks: [] } },
     steps: [{ name: "generate_sql", tier: "strong", prompt: "", consumes: [], produces: "batch_result", tools: [{ name: "query", source: "native" }], calls: [] }] };
   const tools = [
-    { step: "generate_sql", tool: "query", input: { sql: sqlTotal }, output: { columns: ["total_revenue"], rows: [{ total_revenue: 1284500 }] } },
+    { step: "generate_sql", tool: "query", input: { sql: sqlTotal }, output: { columns: ["total_revenue"], rows: [{ total_revenue: 1284500 }],
+      definition: { sql: sqlTotal, source_tables: ["orders"], filters: [] } } },
     { step: "generate_sql", tool: "query", input: { sql: sqlQuarter }, output: { columns: ["quarter", "revenue"], rows: [{ quarter: "Q1", revenue: 1 }, { quarter: "Q2", revenue: 2 }],
       definition: { sql: sqlQuarter, source_tables: ["orders"], filters: ["quarter"] } } },
-    { step: "generate_sql", tool: "query", input: { sql: sqlStray }, output: { columns: ["n"], rows: [{ n: 67 }] } },
+    { step: "generate_sql", tool: "query", input: { sql: sqlStray }, output: { columns: ["n"], rows: [{ n: 67 }],
+      definition: { sql: sqlStray, source_tables: ["orders"], filters: ["status = 'completed'"] } } },
   ];
   const run = (entries: unknown[]) => normalizeComponentEvidence(component, { steps: { batch_result: JSON.stringify(entries) }, tools, children: [] });
   it("returns one entry per slot, rebuilt from the observed query result its SQL names", () => {
@@ -56,8 +58,8 @@ describe("batch-shaped callee normalization (answer_batch)", () => {
     expect(result.status).toBe("ok");
     if (result.status !== "ok" || result.output.kind !== "value") throw new Error("unreachable");
     expect(result.output.value).toEqual([
-      // The model wrote 999; the observed row wins. Lineage strings it claimed are kept when no tool-proven definition exists.
-      { slot_id: "total", columns: ["total_revenue"], rows: [{ total_revenue: 1284500 }], verified: true, summary: "total revenue", definition: { sql: sqlTotal, source_tables: ["orders"], filters: ["fy2025"] } },
+      // The model wrote 999; the observed row wins. Its claimed filter "fy2025" is not read: the tool proved the definition.
+      { slot_id: "total", columns: ["total_revenue"], rows: [{ total_revenue: 1284500 }], verified: true, summary: "total revenue", definition: { sql: sqlTotal, source_tables: ["orders"], filters: [] } },
       // The tool proved this definition itself; the model's "invented" lineage is not read.
       { slot_id: "by_quarter", columns: ["quarter", "revenue"], rows: [{ quarter: "Q1", revenue: 1 }, { quarter: "Q2", revenue: 2 }], verified: true, summary: "by quarter", definition: { sql: sqlQuarter, source_tables: ["orders"], filters: ["quarter"] } },
       { slot_id: "refunds", status: "unanswerable", reason: "no refund measure" },
@@ -84,7 +86,7 @@ describe("batch-shaped callee normalization (answer_batch)", () => {
     ];
     const json = JSON.stringify(entries);
     const perSlot = [
-      { slot_id: "total", columns: ["total_revenue"], rows: [{ total_revenue: 1284500 }], verified: true, summary: "total revenue", definition: { sql: sqlTotal, source_tables: [], filters: [] } },
+      { slot_id: "total", columns: ["total_revenue"], rows: [{ total_revenue: 1284500 }], verified: true, summary: "total revenue", definition: { sql: sqlTotal, source_tables: ["orders"], filters: [] } },
       { slot_id: "refunds", status: "unanswerable", reason: "no refund measure" },
     ];
     const terminal = (text: string) => normalizeComponentEvidence(component, { steps: { batch_result: text }, tools, children: [] });
@@ -169,11 +171,19 @@ describe("a terminal cites an executed query by the id the host attached to its 
     ] }, provenance: { verified: true } });
   });
   const definitionOf = (result: ReturnType<typeof runBatch>) => result.status === "ok" && result.output.kind === "value" ? (result.output.value as { definition?: unknown }[])[0]?.definition : undefined;
-  it("an id-cited entry over a tool output with no lineage keeps the claimed source tables, takes the SQL from the observation and carries no filters", () => {
-    const bare = [{ step: "generate_sql", tool: "query", input: { sql: STRAY }, output: { columns: ["n"], rows: [{ n: 67 }], query_id: "q1" } }];
-    const result = runBatch([{ slot_id: "s", definition: { query_id: "q1", sql: "SELECT invented", source_tables: ["orders"], filters: ["status = 'x'"] } }], bare as typeof ran);
-    expect(result).toMatchObject({ status: "ok", output: { value: [{ slot_id: "s", rows: [{ n: 67 }] }] } });
-    expect(definitionOf(result)).toEqual({ sql: STRAY, source_tables: ["orders"] });
+  it("an entry citing a tool output with no proven definition is unanswerable, by id or by SQL, whatever source tables it claims", () => {
+    const OPEN = "SELECT COUNT(*) AS n FROM orders WHERE status = 'open'";
+    const bare = [{ step: "generate_sql", tool: "query", input: { sql: OPEN }, output: { columns: ["n"], rows: [{ n: 5 }], query_id: "q5" } }];
+    const entries = [
+      { slot_id: "by_id", definition: { query_id: "q5", source_tables: ["orders"], filters: ["status = 'x'"] } },
+      { slot_id: "by_sql", definition: { sql: OPEN, source_tables: ["orders"] } },
+    ];
+    // Beside a model-backed query the entries are unanswerable; alone, nothing grounds and the batch is refused.
+    expect(runBatch(entries, [...bare, ...ran] as typeof ran)).toEqual({ status: "ok", output: { kind: "value", value: [
+      { slot_id: "by_id", status: "unanswerable", reason: "no executed query backs this answer" },
+      { slot_id: "by_sql", status: "unanswerable", reason: "no executed query backs this answer" },
+    ] } });
+    expect(runBatch(entries, bare as typeof ran).status).toBe("refused");
   });
   it("an id-cited entry over a tool-proven definition takes the proven lineage, not the claimed one", () => {
     const result = runBatch([{ slot_id: "s", definition: { query_id: "q2", source_tables: ["private"], filters: ["invented"] } }]);
@@ -200,14 +210,73 @@ describe("a terminal cites an executed query by the id the host attached to its 
   });
 });
 
+describe("a query that reads no table grounds nothing", () => {
+  // Shaped like the governed transport's reply to a SELECT over literals: tabular, with a proven
+  // definition that reads no table.
+  const LITERAL = "SELECT CASE month_num WHEN 1 THEN 424 ELSE 0 END AS n FROM (SELECT 1 AS month_num) months";
+  const literal = (id: string) => ({ step: "generate_sql", tool: "query", input: { sql: LITERAL },
+    output: { columns: ["n"], rows: [{ n: 424 }], definition: { sql: LITERAL, source_tables: [], filters: [] }, query_id: id } });
+  const modelBacked = { ...observed(CORRECT, 99), output: { ...observed(CORRECT, 99).output, query_id: "q2" } };
+  const batch: ComponentPlan = { id: "answer_batch", declaration: { required_capabilities: ["sql_execution:read_only"], effect: { render_blocks: [] } },
+    steps: [{ name: "generate_sql", tier: "strong", prompt: "", consumes: [], produces: "batch_result", tools: [{ name: "query", source: "native" }], calls: [] }] };
+  const runBatch = (entries: unknown[], tools: unknown[]) => normalizeComponentEvidence(batch, { steps: { batch_result: JSON.stringify(entries) }, tools: tools as ReturnType<typeof observed>[], children: [] });
+  it("a batch entry citing it by id or by SQL is unanswerable, while a model-backed entry beside it is answered", () => {
+    const result = runBatch([
+      { slot_id: "by_id", definition: { query_id: "q1" } },
+      { slot_id: "by_sql", definition: { sql: LITERAL } },
+      { slot_id: "model", definition: { query_id: "q2" } },
+    ], [literal("q1"), modelBacked]);
+    expect(result).toEqual({ status: "ok", output: { kind: "value", value: [
+      { slot_id: "by_id", status: "unanswerable", reason: "no executed query backs this answer" },
+      { slot_id: "by_sql", status: "unanswerable", reason: "no executed query backs this answer" },
+      { slot_id: "model", columns: ["n"], rows: [{ n: 99 }], verified: true, summary: "Query completed.", definition: { sql: CORRECT, source_tables: ["orders"], filters: [] } },
+    ] }, provenance: { verified: true } });
+  });
+  it("a batch whose only query reads no table is refused", () => {
+    expect(runBatch([{ slot_id: "by_id", definition: { query_id: "q1" } }], [literal("q1")]).status).toBe("refused");
+  });
+  it("a single answer naming it by id or SQL, or answering with it as the last observation, is refused", () => {
+    expect(answer({ definition: { query_id: "q1" } }, [literal("q1"), modelBacked] as ReturnType<typeof observed>[]).status).toBe("refused");
+    expect(answer({ definition: { sql: LITERAL } }, [literal("q1"), modelBacked] as ReturnType<typeof observed>[]).status).toBe("refused");
+    expect(answer("done", [modelBacked, literal("q3")] as ReturnType<typeof observed>[]).status).toBe("refused");
+    expect(answer("done", [literal("q1")] as ReturnType<typeof observed>[]).status).toBe("refused");
+    expect(answer({ definition: { query_id: "q2" } }, [literal("q1"), modelBacked] as ReturnType<typeof observed>[]))
+      .toMatchObject({ status: "ok", output: { value: { rows: [{ n: 99 }] } }, provenance: { verified: true, definition: { sql: CORRECT, source_tables: ["orders"] } } });
+  });
+  const renderer: ComponentPlan = { id: "kpi", declaration: { required_capabilities: ["sql_execution:read_only"], effect: { render_blocks: [
+    { type: "kpi_card", fields: { label: "string", value: "number|string" } },
+    { type: "table", fields: { columns: "string[]", rows: "row[]" } },
+  ] } }, steps: [{ name: "render", tier: "strong", prompt: "", consumes: [], produces: "result", tools: [{ name: "query", source: "native" }], calls: [] }] };
+  const render = (block: Record<string, unknown>, tools: unknown[]) => normalizeComponentEvidence(renderer, { steps: { result: JSON.stringify({ blocks: [block] }) }, tools: tools as ReturnType<typeof observed>[], children: [] });
+  it("its rows do not ground the component's own render blocks", () => {
+    expect(render({ type: "kpi_card", label: "n", value: 424 }, [literal("q1")]).status).toBe("refused");
+    expect(render({ type: "table", columns: ["n"], rows: [[424]] }, [literal("q1"), modelBacked]).status).toBe("refused");
+    expect(render({ type: "table", columns: ["n"], rows: [[99]] }, [literal("q1"), modelBacked])).toMatchObject({ status: "ok", provenance: { verified: true } });
+  });
+  it("a child whose only query read no table is refused, so the composing parent is refused too", () => {
+    const child = answer("done", [literal("q1")] as ReturnType<typeof observed>[]);
+    expect(child.status).toBe("refused");
+    const parent: ComponentPlan = { id: "dashboard", declaration: { required_capabilities: ["component_invocation"], effect: { render_blocks: [
+      { type: "table", fields: { columns: "string[]", rows: "row[]" } },
+    ] } }, steps: [{ name: "layout", tier: "strong", prompt: "", consumes: [], produces: "result", tools: [], calls: [{ alias: "answer", component: "answer" }] }] };
+    const result = normalizeComponentEvidence(parent, { steps: { result: JSON.stringify({ blocks: [{ type: "table", columns: ["n"], rows: [[424]] }] }) }, tools: [], children: [child] });
+    expect(result.status).toBe("refused");
+    expect(result.status === "ok" && result.provenance?.verified).not.toBe(true);
+  });
+});
+
 describe("lineage when the tool proves no definition, and optional filters on a composed definition block", () => {
   const bare = [{ step: "generate_sql", tool: "query", input: { sql: CORRECT }, output: { columns: ["n"], rows: [{ n: 99 }], query_id: "q1" } }];
-  it("a single answer over a tool output without lineage keeps the claimed source tables and carries no filters", () => {
-    const result = answer({ summary: "99 orders", definition: { query_id: "q1", source_tables: ["orders"], filters: ["invented"] } }, bare as unknown as ReturnType<typeof observed>[]);
-    expect(result).toMatchObject({ status: "ok", provenance: { definition: { sql: CORRECT, source_tables: ["orders"] } } });
-    if (result.status !== "ok") throw new Error("unreachable");
-    expect(result.provenance?.definition).toEqual({ sql: CORRECT, source_tables: ["orders"] });
-    expect((result.output as { value: { definition: unknown } }).value.definition).toEqual({ sql: CORRECT, source_tables: ["orders"] });
+  it("a single answer over a tool output without a proven definition is refused, whatever source tables it claims", () => {
+    const tools = bare as unknown as ReturnType<typeof observed>[];
+    expect(answer({ summary: "99 orders", definition: { query_id: "q1", source_tables: ["orders"], filters: ["invented"] } }, tools).status).toBe("refused");
+    expect(answer({ definition: { sql: CORRECT, source_tables: ["orders"] } }, tools).status).toBe("refused");
+    expect(answer("done", tools).status).toBe("refused");
+    // Beside a model-backed query, citing the unproven one is still refused, never answered from it.
+    const proven = { ...observed(STRAY, 67), output: { ...observed(STRAY, 67).output, query_id: "q2" } };
+    expect(answer({ definition: { query_id: "q1", source_tables: ["orders"] } }, [...tools, proven]).status).toBe("refused");
+    expect(answer({ definition: { sql: CORRECT, source_tables: ["orders"] } }, [...tools, proven]).status).toBe("refused");
+    expect(answer("done", [proven, ...tools]).status).toBe("refused");
   });
   it("a single answer over a tool-proven definition takes the proven one", () => {
     const proven = [{ ...observed(CORRECT, 99), output: { ...observed(CORRECT, 99).output, query_id: "q1" } }];

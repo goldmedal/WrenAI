@@ -2178,7 +2178,7 @@ describe("native session component MCP integration", () => {
     const contexts = Object.fromEntries(ir.components.map((node: { id: string; context_binding: Record<string, unknown> }) => [node.id, { binding: node.context_binding, snapshot }]));
     const artifacts = new NativeArtifactService({ store, artifactsRoot: path.join(dir, "artifacts"), expectedMcpUrl: NATIVE_MCP_URL, mcpUrl: NATIVE_MCP_URL, getBinding: () => binding });
     const spawn = vi.fn(() => ({ onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), write() {}, resize() {}, kill() {} }));
-    const persist = vi.fn(async () => {}); const query = vi.fn(async () => ({ columns: ["n"], rows: [{ n: 7 }], definition: { sql: "SELECT 7 AS n", source_tables: [], filters: [] } }));
+    const persist = vi.fn(async () => {}); const query = vi.fn(async () => ({ columns: ["n"], rows: [{ n: 7 }], definition: { sql: "SELECT n FROM orders", source_tables: ["orders"], filters: [] } }));
     let credential = "";
     const service = new NativeSessionService({
       store, terminalManager: async () => new InteractiveTerminalManager({ spawn }), getBinding: () => binding,
@@ -2201,7 +2201,7 @@ describe("native session component MCP integration", () => {
             }
             if (!Object.hasOwn(run.consumes, "query_intent")) return { value: "intent" };
             const sqlTool = Object.entries(run.toolSchemas).find(([, schema]) => JSON.stringify(schema).includes('"sql"'))![0];
-            await run.tools[sqlTool]!({ sql: "SELECT 7 AS n" }); return { value: "queried" };
+            await run.tools[sqlTool]!({ sql: "SELECT n FROM orders" }); return { value: "queried" };
           },
           async normalize(component, evidence, _signal, context) { return normalizeComponentEvidence(component, evidence, context); }, persistRoot: persist,
         });
