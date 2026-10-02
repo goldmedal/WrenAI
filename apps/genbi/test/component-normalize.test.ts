@@ -254,14 +254,24 @@ describe("a query that reads no table grounds nothing", () => {
     expect(render({ type: "table", columns: ["n"], rows: [[99]] }, [literal("q1"), modelBacked])).toMatchObject({ status: "ok", provenance: { verified: true } });
   });
   it("a child whose only query read no table is refused, so the composing parent is refused too", () => {
-    const child = answer("done", [literal("q1")] as ReturnType<typeof observed>[]);
-    expect(child.status).toBe("refused");
+    const tableless = answer("done", [literal("q1")] as ReturnType<typeof observed>[]);
+    expect(tableless.status).toBe("refused");
+    const verified = answer("done", [modelBacked] as ReturnType<typeof observed>[]);
+    expect(verified).toMatchObject({ status: "ok", provenance: { verified: true } });
     const parent: ComponentPlan = { id: "dashboard", declaration: { required_capabilities: ["component_invocation"], effect: { render_blocks: [
       { type: "table", fields: { columns: "string[]", rows: "row[]" } },
     ] } }, steps: [{ name: "layout", tier: "strong", prompt: "", consumes: [], produces: "result", tools: [], calls: [{ alias: "answer", component: "answer" }] }] };
-    const result = normalizeComponentEvidence(parent, { steps: { result: JSON.stringify({ blocks: [{ type: "table", columns: ["n"], rows: [[424]] }] }) }, tools: [], children: [child] });
-    expect(result.status).toBe("refused");
-    expect(result.status === "ok" && result.provenance?.verified).not.toBe(true);
+    const compose = (rows: unknown[][], children: ReturnType<typeof answer>[]) => normalizeComponentEvidence(parent,
+      { steps: { result: JSON.stringify({ blocks: [{ type: "table", columns: ["n"], rows }] }) }, tools: [], children });
+    expect(compose([[424]], [tableless]).status).toBe("refused");
+    // Positive control: the same parent over a verified, model-backed child is grounded.
+    expect(compose([[99]], [verified])).toMatchObject({ status: "ok", provenance: { verified: true } });
+    // The refused child alone refuses the parent, even when the blocks cite only the verified child's rows.
+    expect(compose([[99]], [tableless, verified]).status).toBe("refused");
+  });
+  it("a proven definition whose only source table has an empty name grounds nothing", () => {
+    const unnamed = { ...literal("q1"), output: { ...literal("q1").output, definition: { sql: LITERAL, source_tables: [""], filters: [] } } };
+    expect(answer({ definition: { query_id: "q1" } }, [unnamed, modelBacked] as ReturnType<typeof observed>[]).status).toBe("refused");
   });
 });
 

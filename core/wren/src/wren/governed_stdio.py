@@ -152,12 +152,17 @@ def serve(project: Path) -> None:
                         request["sql"],
                         dialect=get_sqlglot_dialect(DataSource(datasource)),
                     )
-                    aliases = {cte.alias_or_name for cte in ast.find_all(exp.CTE)}
+                    # Compared case-insensitively: a reference that differs from a CTE alias
+                    # only in case or quoting may resolve to that CTE (DuckDB does so), and
+                    # excluding it can only refuse more queries, never admit one.
+                    aliases = {
+                        cte.alias_or_name.casefold() for cte in ast.find_all(exp.CTE)
+                    }
                     source_tables = sorted(
                         {
                             table.name
                             for table in ast.find_all(exp.Table)
-                            if table.name and table.name not in aliases
+                            if table.name and table.name.casefold() not in aliases
                         }
                     )
                     # Checked before execution: a SELECT over literals alone would return

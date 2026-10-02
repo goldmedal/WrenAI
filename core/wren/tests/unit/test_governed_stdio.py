@@ -252,6 +252,14 @@ LITERAL_MONTHS = (
         LITERAL_MONTHS,
         "SELECT 1",
         "WITH m AS (SELECT 1 AS n) SELECT n FROM m",
+        # A reference differing from a CTE alias only in case or quoting is the CTE.
+        "WITH months AS (SELECT 424 AS n) SELECT n FROM Months",
+        "WITH M AS (SELECT 424 AS n) SELECT n FROM m",
+        "WITH ORDERS AS (SELECT 424 AS revenue) SELECT revenue FROM orders",
+        'WITH "Orders" AS (SELECT 424 AS revenue) SELECT revenue FROM orders',
+        # Table functions parse as a table without a name.
+        "SELECT * FROM generate_series(1, 12)",
+        "SELECT * FROM read_csv('x')",
     ],
 )
 def test_query_reading_no_table_is_rejected_before_execution(bound_transport, sql):
@@ -276,6 +284,9 @@ def test_query_reading_no_table_is_rejected_before_execution(bound_transport, sq
         "SELECT n FROM orders",
         "WITH x AS (SELECT * FROM orders) SELECT n FROM x",
         "SELECT n FROM (SELECT n FROM orders) t",
+        'SELECT n FROM "orders"',
+        "SELECT n FROM public.orders",
+        "WITH Totals AS (SELECT n FROM orders) SELECT n FROM totals",
     ],
 )
 def test_query_reading_a_model_executes(bound_transport, sql):
