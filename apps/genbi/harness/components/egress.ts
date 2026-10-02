@@ -165,7 +165,9 @@ function hasPii(text: string, patterns: readonly RegExp[]): boolean {
   const integral = withoutFractions(text);
   return patterns.some((pattern) => pattern.test(DIGIT_RUN_PATTERNS.has(pattern) ? integral : text));
 }
-const IDENTIFIER_LIKE = /(^|[_\s-])(id|ids|uuid|guid|key|email|e_mail|phone|ssn|account|user|customer|employee|person|member)([_\s-]|$)/i;
+// Person-name columns count as identifiers: a row keyed by a person's name describes one person.
+// A bare `name` does not, so `product_name` and `category_name` stay grouping keys.
+const IDENTIFIER_LIKE = /(^|[_\s-])(id|ids|uuid|guid|key|email|e_mail|phone|ssn|account|user|customer|employee|person|member|(?:first|last|full|given|family)[_\s-]?name|surname)([_\s-]|$)/i;
 const COUNT_LIKE = /^(count|cnt|n|num|n_[a-z_]+|[a-z_]+_count|number_of_[a-z_]+|num_[a-z_]+|count_[a-z_]+|cnt_[a-z_]+|[a-z_]+_cnt|group_size|size)$/i;
 
 function compile(pattern: string): RegExp {

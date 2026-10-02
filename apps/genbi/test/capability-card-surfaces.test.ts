@@ -47,7 +47,7 @@ describe("capability card surfaces", () => {
         if (run.tools.query) { await run.tools.query({ sql: "SELECT 42 AS revenue" }); return { value: "done" }; }
         return { value: JSON.stringify({ blocks: [{ type: "kpi_card", label: "revenue", value: "42" }] }) };
       });
-      const card = buildCapabilityCard(CATALOG, { maxBytes: 260 });
+      const card = buildCapabilityCard(CATALOG, { maxBytes: 260, disclosure: policy });
       expect(card.truncated).toBe(true);
       const result = await runInProcessDefault({ bundle: describeComponentPlan(plan, "synthetic"), userProject: project, profileSource: project, question: "annual revenue report", agentId: "plan_report",
         authChoice: { mode: "api-key", adapter: "openai" },
@@ -71,7 +71,12 @@ describe("capability card surfaces", () => {
       expect(new Set(surfaces.map((record) => record.digest)).size).toBe(surfaces.length);
       // The assembled prompts agree with the fingerprints: public steps see the card, private steps the snapshot.
       for (const { tier, prompt } of prompts) {
-        if (tier === "plan") { expect(prompt).toContain("# Capability card"); expect(prompt).not.toContain("Host semantic context"); }
+        if (tier === "plan") {
+          expect(prompt).toContain("# Capability card"); expect(prompt).not.toContain("Host semantic context");
+          // The bound policy's limits reach the planner through the card, and survive its truncation.
+          expect(prompt).toContain(`- minimum group size per row: ${policy.min_group_size}`);
+          expect(prompt).toContain(`- maximum rows per cell: ${policy.max_rows}`);
+        }
         else { expect(prompt).toContain("Host semantic context"); expect(prompt).not.toContain("Capability card"); }
       }
       // The truncation is traced as a warning without the card text.

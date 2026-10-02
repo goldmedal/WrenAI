@@ -445,7 +445,8 @@ describe("M1: the annual revenue report end to end, offline", () => {
     try {
       const { result, calls } = await runReport(project);
       if (result.kind !== "answer") throw new Error("expected an answer");
-      const card = buildCapabilityCard(CATALOG);
+      // The run binds `policy`, so the card the public steps receive states its limits.
+      const card = buildCapabilityCard(CATALOG, { disclosure: policy });
       // The host re-serialises the parsed snapshot, so the digest is over the compact form, not the pretty-printed file.
       const snapshotDigest = sha(`Host semantic context:\n${JSON.stringify(JSON.parse(await readFile(SNAPSHOT_PATH, "utf8")))}`);
       const surfaces = result.trace?.surfaces ?? [];

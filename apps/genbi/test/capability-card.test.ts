@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { generatePreparedContextAndCatalog, resolveContextLoader } from "../harness/compile/context-loader.js";
 import { buildCapabilityCard, capabilityCatalogSchema, DEFAULT_CARD_MAX_BYTES } from "../harness/components/capability-card.js";
 import { describeZoneDryRun, formatZoneDryRun } from "../harness/components/zone-dry-run.js";
+import { parseDisclosurePolicy } from "../harness/providers/zone.js";
 import { reportPlan, splitBinding } from "./zone-fixtures.js";
 
 const FIXTURE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "card-project");
@@ -101,5 +102,41 @@ describe("capability card", () => {
     expect(text).toContain(`plan_report.plan_layout  role=caller  tier=plan  key=plan  zone=public  context=card sha256:${card.digest}`);
     expect(text).toContain("answer_batch.generate_sql  role=callee  tier=strong  key=strong  zone=private  context=snapshot");
     expect(text).toContain(`capability card: sha256:${card.digest} (${card.bytes} bytes) — sent to public-zone steps only`);
+  });
+});
+
+describe("capability card: disclosure limits", () => {
+  const catalog = { catalog_version: 1, project: { name: "limits_demo", data_source: "duckdb" },
+    models: ["orders", "customers", "products", "regions"].map((name) => ({ name, description: `One row per ${name}.`, primary_key: ["id"],
+      columns: [{ name: "id", type: "INTEGER" }, { name: "amount", type: "DOUBLE", description: "USD" }, { name: "status", type: "VARCHAR" }] })),
+    relationships: [], cubes: [], views: [] };
+  // Unique markers in every policy field the card must not carry.
+  const policy = parseDisclosurePolicy({ allowed_shapes: ["scalar", "table"], max_rows: 12, min_group_size: 7,
+    sensitive_column_patterns: ["zz_sensitive_marker_7f3a"], pii_patterns: ["zz_pii_marker_91c2"], judge_timeout_ms: 48_213 });
+  const section = ["## Disclosure limits", "- minimum group size per row: 7", "- maximum rows per cell: 12", "- allowed answer shapes: scalar, table"];
+
+  it("states the bound policy's group size, row limit and shapes ahead of the catalog, and nothing else of the policy", () => {
+    const card = buildCapabilityCard(catalog, { disclosure: policy });
+    for (const line of section) expect(card.text.split("\n")).toContain(line);
+    expect(card.text.indexOf("## Disclosure limits")).toBeLessThan(card.text.indexOf("## Models"));
+    for (const marker of ["zz_sensitive_marker_7f3a", "zz_pii_marker_91c2", "48213", "48_213", "judge"]) expect(card.text).not.toContain(marker);
+    expect(card.digest).not.toBe(buildCapabilityCard(catalog).digest);
+  });
+  it("has no disclosure section without a policy", () => {
+    expect(buildCapabilityCard(catalog).text).not.toContain("Disclosure limits");
+  });
+  it("keeps the section when the size bound truncates the catalog, however small the bound", () => {
+    const full = buildCapabilityCard(catalog, { disclosure: policy });
+    const head = full.text.slice(0, full.text.indexOf("## Models"));
+    // Room for the head, a couple of catalog lines and the marker, not the whole catalog.
+    const bound = Buffer.byteLength(head) + 150;
+    const some = buildCapabilityCard(catalog, { disclosure: policy, maxBytes: bound });
+    expect(some.truncated).toBe(true);
+    expect(some.bytes).toBeLessThanOrEqual(bound);
+    for (const line of section) expect(some.text.split("\n")).toContain(line);
+    const tiny = buildCapabilityCard(catalog, { disclosure: policy, maxBytes: 1 });
+    expect(tiny.truncated).toBe(true);
+    expect(tiny.text).not.toContain("## Models");
+    for (const line of section) expect(tiny.text.split("\n")).toContain(line);
   });
 });

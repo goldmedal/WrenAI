@@ -311,7 +311,9 @@ caller declared (`input.slots[]`: `slot_id`, `expected_shape`, `question`,
 `unit?`, `max_rows?`; no slots means one implicit table slot for the request
 text) it runs the deterministic checks first — declared shape, `max_rows`,
 policy-listed sensitive columns, PII patterns in string cells, group size
-against `min_group_size` — and only a passing slot reaches the private-zone
+against `min_group_size` (a row keyed by an identifier-like column — an id, an
+email, a customer, a person's first, last or full name — is a group of one) —
+and only a passing slot reaches the private-zone
 judge (the `roles.judge` tier), which answers `pass | redact | refuse`. A judge
 that times out, errors or answers off-contract counts as `refuse`. The caller
 receives `{answers: [{slot_id, status: ok|partial|refused, shape, columns,
@@ -361,7 +363,11 @@ allow-list, so a new MDL field never leaks by default and no `ref_sql`, view
 statement, expression, saved query, sample value or row count is carried. The
 card is deterministic (same project, same bytes), size-bounded (32 KiB by
 default, `capabilityCard.maxBytes`; trailing lines are dropped and a marker
-line plus a trace warning say so), and every step's prompt surfaces are
+line plus a trace warning say so). With a `disclosure_policy` bound, the card
+also states its minimum group size, row limit and allowed answer shapes, and
+nothing else of the policy, ahead of the catalog; the size bound never drops
+them, so the planner plans within what egress will let through. Every step's
+prompt surfaces are
 fingerprinted per surface and in total (`trace.surfaces`), so an audit can see
 the card went only to public steps and the snapshot only to private ones.
 `knowledge/rules/*.md` is not in the card.

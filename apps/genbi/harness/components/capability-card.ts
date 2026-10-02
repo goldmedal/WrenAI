@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { DisclosurePolicy } from "../providers/zone.js";
 
 /**
  * The capability card: what a planner outside the data zone may know about
@@ -45,9 +46,18 @@ export interface CapabilityCard {
   readonly omittedLines: number;
 }
 
+/** The disclosure-policy fields the card may carry. Nothing else of the policy is read. */
+export type CardDisclosureLimits = Pick<DisclosurePolicy, "min_group_size" | "max_rows" | "allowed_shapes">;
+
 export interface CapabilityCardOptions {
   /** Upper bound on the rendered card in UTF-8 bytes. Default 32 KiB. */
   readonly maxBytes?: number;
+  /**
+   * The bound disclosure policy, when there is one. The card states its shape limits so the
+   * planner plans within them instead of planning slots egress then refuses. Only the three
+   * fields of `CardDisclosureLimits` are read; patterns and the judge budget never reach the card.
+   */
+  readonly disclosure?: CardDisclosureLimits;
 }
 export const DEFAULT_CARD_MAX_BYTES = 32 * 1024;
 const TRUNCATION_MARKER = (omitted: number) => `[card truncated by the size bound: ${omitted} line${omitted === 1 ? "" : "s"} omitted]`;
@@ -73,14 +83,36 @@ function taggedEnums(description: string | undefined): { value: string; meaning:
   return out;
 }
 
-/** Renders the card's lines from an already allow-listed catalog. Pure and order-preserving. */
-export function renderCapabilityCardLines(catalog: CapabilityCatalog): string[] {
+/**
+ * The card's head: the title, the project and, when a policy is bound, its disclosure limits.
+ * The size bound never drops the limits (see `buildCapabilityCard`), so they sit ahead of the
+ * catalog, whose trailing lines are what the bound drops.
+ */
+function renderHeadLines(catalog: CapabilityCatalog, disclosure: CardDisclosureLimits | undefined): string[] {
   const lines: string[] = [];
   lines.push("# Capability card");
   lines.push("Schema of the bound project: names, types, descriptions, relationships, cubes, enum meanings and declared time grains. It carries no sample values, row counts or SQL; ask the data oracle for values.");
   const project = [catalog.project.name, catalog.project.data_source ? `(${catalog.project.data_source})` : undefined].filter(Boolean).join(" ");
   if (project) lines.push(`project: ${project}`);
   lines.push("");
+  if (disclosure) {
+    lines.push("## Disclosure limits");
+    lines.push("Every answer is checked against these before it reaches you; a slot outside them comes back refused.");
+    lines.push(`- minimum group size per row: ${disclosure.min_group_size}`);
+    lines.push(`- maximum rows per cell: ${disclosure.max_rows}`);
+    lines.push(`- allowed answer shapes: ${disclosure.allowed_shapes.join(", ")}`);
+    lines.push("");
+  }
+  return lines;
+}
+
+/** Renders the card's lines from an already allow-listed catalog. Pure and order-preserving. */
+export function renderCapabilityCardLines(catalog: CapabilityCatalog, disclosure?: CardDisclosureLimits): string[] {
+  return [...renderHeadLines(catalog, disclosure), ...renderCatalogLines(catalog)];
+}
+
+function renderCatalogLines(catalog: CapabilityCatalog): string[] {
+  const lines: string[] = [];
   lines.push("## Models");
   if (catalog.models.length === 0) lines.push("- (none)");
   for (const item of catalog.models) {
@@ -138,16 +170,19 @@ function digestOf(text: string): string {
  * Builds the card from a raw catalog document. Deterministic: the same
  * catalog yields the same bytes. Size-bounded: when the rendering exceeds
  * `maxBytes`, trailing lines are dropped until it fits and a marker line
- * says how many were omitted; the caller traces that as a warning.
+ * says how many were omitted; the caller traces that as a warning. The
+ * disclosure limits are never dropped: with a policy bound, the whole head
+ * is kept even when that alone exceeds `maxBytes`.
  */
 export function buildCapabilityCard(catalog: unknown, options: CapabilityCardOptions = {}): CapabilityCard {
   const parsed = capabilityCatalogSchema.parse(catalog);
-  const lines = renderCapabilityCardLines(parsed);
+  const lines = renderCapabilityCardLines(parsed, options.disclosure);
+  const floor = options.disclosure ? renderHeadLines(parsed, options.disclosure).length : 1;
   const maxBytes = options.maxBytes ?? DEFAULT_CARD_MAX_BYTES;
   let kept = lines.length;
   let text = lines.join("\n");
   let omitted = 0;
-  while (Buffer.byteLength(text) > maxBytes && kept > 1) {
+  while (Buffer.byteLength(text) > maxBytes && kept > floor) {
     kept -= 1;
     omitted = lines.length - kept;
     text = [...lines.slice(0, kept), TRUNCATION_MARKER(omitted)].join("\n");

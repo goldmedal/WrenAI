@@ -72,6 +72,22 @@ describe("egress verification: deterministic checks", () => {
     const noMetadata = await verify(table([{ region: "a", revenue: 1 }]));
     expect(answers(noMetadata)[0]).toMatchObject({ status: "ok" });
   });
+  it("treats a person-name column as an identifier-like key, but not a product or category name", async () => {
+    const firstLast = await verify(table([{ first_name: "Ada", last_name: "Lovelace", revenue: 10 }, { first_name: "Alan", last_name: "Turing", revenue: 20 }]));
+    expect(answers(firstLast)[0]).toMatchObject({ status: "refused", reason_category: "group_size" });
+    const fullName = await verify(table([{ full_name: "Ada Lovelace", revenue: 10 }, { full_name: "Alan Turing", revenue: 20 }]));
+    expect(answers(fullName)[0]).toMatchObject({ status: "refused", reason_category: "group_size" });
+    for (const column of ["given_name", "family_name", "surname", "customer_name"]) {
+      const outcome = await verify(table([{ [column]: "Lovelace", revenue: 10 }]));
+      expect(answers(outcome)[0], column).toMatchObject({ status: "refused", reason_category: "group_size" });
+    }
+    // Group counts at or above min_group_size (5): only an identifier-like key could refuse these.
+    for (const column of ["product_name", "category_name", "name"]) {
+      const columns = [column, "order_count", "revenue"];
+      const grouped = await verify(table([{ [column]: "Widgets", order_count: 5, revenue: 10 }, { [column]: "Gadgets", order_count: 40, revenue: 90 }], columns));
+      expect(answers(grouped)[0], column).toMatchObject({ status: "ok" });
+    }
+  });
   it("a long decimal is not a card or phone number, in model text or in a string cell", async () => {
     const scalar = await verify({ columns: ["ratio"], rows: [{ ratio: 0.12345678901234 }], summary: "The ratio is 0.12345678901234." }, slots({ expected_shape: "scalar" }));
     expect(answers(scalar)[0]).toMatchObject({ status: "ok", summary: "The ratio is 0.12345678901234." });
@@ -269,16 +285,21 @@ describe("egress verification: model-written text", () => {
     summary: "Top customers: Avery Quill (900), Bram Otterly (800), Cleo Marchetti (700).", unit: "USD", verified: true, definition, ...extra });
   const redactNames: EgressJudge = async () => JSON.stringify({ verdict: "redact", reason_category: "individual_level", redact_columns: ["first_name", "last_name"] });
   const withoutNames = (value: unknown) => { const text = JSON.stringify(value); for (const name of NAMES) expect(text, name).not.toContain(name); };
+  // These cases are about what the judge's verdict lets cross. Person-name columns are identifier-like, so
+  // under the shared min_group_size the deterministic layer would refuse the people table before the judge.
+  const judgePolicy: DisclosurePolicy = { ...policy, min_group_size: 1 };
+  const verify = (value: unknown, request = slots(), judge: EgressJudge | null = passJudge) =>
+    verifyEgress(request, ok(value), { policy: judgePolicy, ...(judge !== null ? { judge } : {}) });
 
   it("on redact the model's summary never crosses: the host writes a value-free one from the surviving columns and row count", async () => {
     const outcome = await verify(people(), slots(), redactNames);
     withoutNames(outcome.disclosed);
     expect(answers(outcome)[0]).toEqual({ slot_id: "s1", status: "partial", shape: "table", columns: ["revenue"], rows: [{ revenue: 900 }, { revenue: 800 }, { revenue: 700 }], summary: "3 rows; columns: revenue." });
     // The model's own `unit` is model text too; a planner-declared unit is not, and still crosses.
-    const declaredUnit = await verifyEgress({ request: "x", input: { slots: [{ slot_id: "s1", expected_shape: "table", question: "q", unit: "EUR" }] } }, ok(people()), { policy, judge: redactNames });
+    const declaredUnit = await verifyEgress({ request: "x", input: { slots: [{ slot_id: "s1", expected_shape: "table", question: "q", unit: "EUR" }] } }, ok(people()), { policy: judgePolicy, judge: redactNames });
     expect(answers(declaredUnit)[0]).toMatchObject({ status: "partial", unit: "EUR", summary: "3 rows; columns: revenue." });
     // The implicit single slot keeps its tabular contract, with the host summary.
-    const implicit = await verifyEgress({ request: "top customers", input: {} }, ok(people()), { policy, judge: redactNames });
+    const implicit = await verifyEgress({ request: "top customers", input: {} }, ok(people()), { policy: judgePolicy, judge: redactNames });
     withoutNames(implicit.disclosed);
     expect(implicit.disclosed).toMatchObject({ status: "ok", output: { value: { columns: ["revenue"], summary: "3 rows; columns: revenue.", egress: { status: "partial" } } } });
     // Host-side provenance is unchanged by the redaction.
