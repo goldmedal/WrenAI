@@ -120,7 +120,7 @@ const binding = {
 };
 const roles = { judge: "judge", render: "render" };
 
-/** How the batch child fails as a whole: its steps exhaust their loop cap, or its terminal is backed by no executed query. */
+/** How the batch child fails as a whole: its steps exhaust their loop cap (it fails), or its terminal is backed by no executed query (it is refused). */
 type ChildFailure = "loop_cap" | "zero_queries";
 /** Child model text no public-tier surface may ever receive. */
 const CHILD_MARKER = "CHILD-MODEL-TEXT-7f3a9c";
@@ -404,34 +404,34 @@ describe("M1: the annual revenue report end to end, offline", () => {
   });
 
   it.each([
-    ["loop_cap", "generate_sql and its repair both use their whole loop cap", ["resolve_intent", "generate_sql", "repair_sql"]],
-    ["zero_queries", "generate_sql finishes without executing a single query", ["resolve_intent", "generate_sql"]],
-  ] as const)("a batch child that fails as a whole (%s: %s) still renders the report: every slot unavailable with callee_error, unverified", async (failure, _how, childStepNames) => {
+    ["loop_cap", "callee_error", "generate_sql and its repair both use their whole loop cap, so the child fails", ["resolve_intent", "generate_sql", "repair_sql"]],
+    ["zero_queries", "callee_refused", "generate_sql finishes without executing a single query, so normalization refuses the child", ["resolve_intent", "generate_sql"]],
+  ] as const)("a batch child that fails or is refused as a whole (%s) still renders the report: every slot unavailable with %s, unverified (%s)", async (failure, category, _how, childStepNames) => {
     const project = await mkdtemp(path.join(os.tmpdir(), `genbi-report-callee-failed-${failure}-`));
     try {
       const { result, events, calls, askResults, contract } = await runReport(project, { childFailure: failure, usage: {
         "cloud-planner": { inputTokens: 1200, outputTokens: 300 }, "local-super-cheap": { inputTokens: 40, outputTokens: 4 }, "local-super": { inputTokens: 5000, outputTokens: 700 } } });
       expect(result.kind).toBe("answer");
       if (result.kind !== "answer") throw new Error("unreachable");
-      // The child's own steps ran and the last of them failed: this is the whole-child failure, not a per-slot one.
+      // The child's own steps ran: on the loop cap the last of them failed; with no query they finished and normalization refused the child.
       const childFinishes = events.filter((event): event is Extract<AgentEvent, { kind: "step.finish" }> => event.kind === "step.finish" && childStepNames.includes(event.name as never) && event.name !== "resolve_intent");
-      if (failure === "loop_cap") expect(childFinishes.map((event) => [event.name, event.status])).toEqual([["generate_sql", "error"], ["repair_sql", "error"]]);
+      expect(childFinishes.map((event) => [event.name, event.status])).toEqual(failure === "loop_cap" ? [["generate_sql", "error"], ["repair_sql", "error"]] : [["generate_sql", "ok"]]);
       // No child model text reaches the public planner: not its ask result, not its own or the narrator's inputs.
       expect(calls.filter((call) => childStepNames.includes(call.step as never)).some((call) => call.output.includes(CHILD_MARKER))).toBe(true);
       expect(JSON.stringify(askResults)).not.toContain(CHILD_MARKER);
       for (const call of calls.filter((call) => call.step === "plan_layout" || call.step === "narrate")) expect(JSON.stringify(call)).not.toContain(CHILD_MARKER);
       expect(JSON.stringify(result)).not.toContain(CHILD_MARKER);
-      // The planner's ask resolved with every declared slot refused on callee_error, and nothing else.
+      // The planner's ask resolved with every declared slot refused on the category of what happened, and nothing else.
       expect(askResults).toHaveLength(1);
-      expect(askResults[0]).toStrictEqual({ status: "ok", output: { kind: "value", value: { answers: SLOTS.map((slot) => ({ slot_id: slot.slot_id, status: "refused", reason_category: "callee_error" })) } }, provenance: { verified: false } });
+      expect(askResults[0]).toStrictEqual({ status: "ok", output: { kind: "value", value: { answers: SLOTS.map((slot) => ({ slot_id: slot.slot_id, status: "refused", reason_category: category })) } }, provenance: { verified: false } });
       // The planner still laid the report out, and the narrator ran over the all-unavailable slot table.
       expect(calls.map((call) => call.step)).toEqual([...childStepNames, "plan_layout", "narrate"]);
       const envelope = result.envelope as { blocks: Record<string, unknown>[]; verified: boolean };
-      expect(envelope.blocks.map((block) => [block.type, block.slot_id, block.reason_category])).toEqual(SLOTS.map((slot) => ["unavailable", slot.slot_id, "callee_error"]));
+      expect(envelope.blocks.map((block) => [block.type, block.slot_id, block.reason_category])).toEqual(SLOTS.map((slot) => ["unavailable", slot.slot_id, category]));
       expect(envelope.verified).toBe(false);
       expect(normalizeComponentResult(JSON.stringify(envelope), contract).value.status).toBe("ok");
       // The trace keeps the failed child: its egress decisions, its tool calls, and the usage of each of its steps.
-      expect(result.trace?.steps.filter((step) => step.tool === "egress").map((step) => step.detail)).toEqual(SLOTS.map((slot) => `ask/${slot.slot_id}: refused (callee_error)`));
+      expect(result.trace?.steps.filter((step) => step.tool === "egress").map((step) => step.detail)).toEqual(SLOTS.map((slot) => `ask/${slot.slot_id}: refused (${category})`));
       expect(result.trace?.steps.filter((step) => step.tool === "query").map((step) => step.outcome)).toEqual(failure === "loop_cap" ? ["success"] : []);
       const at = (step: string, tier: string, model: string, inputTokens: number, outputTokens: number) => ({ component: "answer_batch", step, tier, depth: 1, zone: "private", adapter: "mock", model, inputTokens, outputTokens });
       expect(result.trace?.usage?.steps.filter((step) => step.component === "answer_batch")).toStrictEqual([
