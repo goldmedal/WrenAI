@@ -133,16 +133,39 @@ const batchSchema = z.union([
   z.object({ answers: z.array(z.unknown()) }).passthrough(),
 ]);
 
+const PAYMENT_CARD = /\b(?:\d[ -]?){13,19}\b/;
+const PHONE_NUMBER = /(?:\+?\d{1,3}[ -]?)?\(?\d{3}\)?[ -]?\d{3}[ -]?\d{4}\b/;
 /** Built-in PII patterns applied to every string cell, in addition to the policy's own. */
 export const BUILT_IN_PII_PATTERNS: readonly RegExp[] = [
   /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/,                // email
   /\b\d{3}-\d{2}-\d{4}\b/,                                            // US SSN
-  /\b(?:\d[ -]?){13,19}\b/,                                           // payment card number
-  /(?:\+?\d{1,3}[ -]?)?\(?\d{3}\)?[ -]?\d{3}[ -]?\d{4}\b/,            // phone number
+  PAYMENT_CARD,
+  PHONE_NUMBER,
   /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/, // IPv4
 ];
+/**
+ * The card and phone patterns match bare digit runs, so the fraction of a decimal (`0.12345678901234`)
+ * looks like one. They alone run on the text with each decimal cut to its integer part; every other
+ * pattern, the policy's own included, runs on the raw text.
+ */
+const DIGIT_RUN_PATTERNS: ReadonlySet<RegExp> = new Set([PAYMENT_CARD, PHONE_NUMBER]);
+/** A run of dot-separated digit groups. Only a two-group run is a decimal; three or more (an IPv4 address, a version) stays as written. */
+const DOTTED_DIGITS = /\d+(?:\.\d+)+/g;
+function withoutFractions(text: string): string {
+  return text.replace(DOTTED_DIGITS, (run) => {
+    const groups = run.split(".");
+    return groups.length === 2 ? groups[0]! : run;
+  });
+}
+function piiPatterns(policy: DisclosurePolicy): RegExp[] {
+  return [...BUILT_IN_PII_PATTERNS, ...policy.pii_patterns.map(compile)];
+}
+function hasPii(text: string, patterns: readonly RegExp[]): boolean {
+  const integral = withoutFractions(text);
+  return patterns.some((pattern) => pattern.test(DIGIT_RUN_PATTERNS.has(pattern) ? integral : text));
+}
 const IDENTIFIER_LIKE = /(^|[_\s-])(id|ids|uuid|guid|key|email|e_mail|phone|ssn|account|user|customer|employee|person|member)([_\s-]|$)/i;
-const COUNT_LIKE = /^(count|cnt|n|num|n_[a-z_]+|[a-z_]+_count|group_size|size)$/i;
+const COUNT_LIKE = /^(count|cnt|n|num|n_[a-z_]+|[a-z_]+_count|number_of_[a-z_]+|num_[a-z_]+|count_[a-z_]+|cnt_[a-z_]+|[a-z_]+_cnt|group_size|size)$/i;
 
 function compile(pattern: string): RegExp {
   try { return new RegExp(pattern, "i"); } catch { return new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"); }
@@ -200,8 +223,8 @@ function modelText(answer: { readonly summary?: string | undefined; readonly tex
 function textReason(texts: readonly string[], policy: DisclosurePolicy): EgressReason | undefined {
   const sensitive = policy.sensitive_column_patterns.map(compile).map((pattern) => new RegExp(`\\b(?:${pattern.source})\\b`, "i"));
   if (texts.some((text) => sensitive.some((pattern) => pattern.test(text)))) return "sensitive_column";
-  const pii = [...BUILT_IN_PII_PATTERNS, ...policy.pii_patterns.map(compile)];
-  if (texts.some((text) => pii.some((pattern) => pattern.test(text)))) return "pii_pattern";
+  const pii = piiPatterns(policy);
+  if (texts.some((text) => hasPii(text, pii))) return "pii_pattern";
   return undefined;
 }
 
@@ -211,8 +234,8 @@ function deterministic(slot: SlotDeclaration, table: TableAnswer, policy: Disclo
   if (table.rows.length > limit) return "row_limit";
   const sensitive = policy.sensitive_column_patterns.map(compile);
   if (table.columns.some((column) => sensitive.some((pattern) => pattern.test(column)))) return "sensitive_column";
-  const pii = [...BUILT_IN_PII_PATTERNS, ...policy.pii_patterns.map(compile)];
-  if (cellStrings(table.rows).some((cell) => pii.some((pattern) => pattern.test(cell)))) return "pii_pattern";
+  const pii = piiPatterns(policy);
+  if (cellStrings(table.rows).some((cell) => hasPii(cell, pii))) return "pii_pattern";
   const inText = textReason(modelText(table), policy);
   if (inText) return inText;
   if (policy.min_group_size > 1 && table.rows.length > 0) {
