@@ -60,7 +60,7 @@ def bound_transport(tmp_path, monkeypatch):
 def test_captures_once_and_always_queries_read_only(bound_transport):
     f = bound_transport
     frames = f.run(
-        b'{"id":1,"operation":"inspect"}\n{"id":2,"operation":"query","sql":"SELECT 1 AS n","limit":5}\n'
+        b'{"id":1,"operation":"inspect"}\n{"id":2,"operation":"query","sql":"SELECT n FROM orders","limit":5}\n'
     )
     assert frames == [
         {"id": 0, "protocol": "wren-governed/2"},
@@ -71,8 +71,8 @@ def test_captures_once_and_always_queries_read_only(bound_transport):
                 "columns": ["n"],
                 "rows": [{"n": 1}],
                 "definition": {
-                    "sql": "SELECT 1 AS n",
-                    "source_tables": [],
+                    "sql": "SELECT n FROM orders",
+                    "source_tables": ["orders"],
                     "filters": [],
                 },
             },
@@ -80,7 +80,9 @@ def test_captures_once_and_always_queries_read_only(bound_transport):
     ]
     for captured in (f.profile, f.build, f.config, f.factory):
         captured.assert_called_once()
-    f.engine.query.assert_called_once_with("SELECT 1 AS n", limit=5, read_only=True)
+    f.engine.query.assert_called_once_with(
+        "SELECT n FROM orders", limit=5, read_only=True
+    )
     f.engine.__exit__.assert_called_once()
 
 
@@ -125,7 +127,7 @@ def test_sanitizes_query_failure_and_oversized_output(bound_transport):
         "credential secret /private/path"
     )
     frames = bound_transport.run(
-        b'{"id":1,"operation":"query","sql":"SELECT 1","limit":1}\n'
+        b'{"id":1,"operation":"query","sql":"SELECT n FROM orders","limit":1}\n'
     )
     assert frames[-1] == {
         "id": 1,
@@ -136,7 +138,7 @@ def test_sanitizes_query_failure_and_oversized_output(bound_transport):
         column_names=["n"], to_pylist=lambda: [{"n": "x" * transport.MAX_RESULT}]
     )
     frames = bound_transport.run(
-        b'{"id":1,"operation":"query","sql":"SELECT 1","limit":1}\n'
+        b'{"id":1,"operation":"query","sql":"SELECT n FROM orders","limit":1}\n'
     )
     assert frames[-1] == {
         "id": 1,
@@ -228,12 +230,62 @@ def test_query_failures_surface_a_bounded_class_and_nothing_else(
     assert frame["error"]["class"] in transport.ERROR_MESSAGES
 
 
-def test_sqlglot_parse_failure_after_execution_is_invalid_sql(bound_transport):
-    # engine.query is mocked to succeed; the definition parse then fails.
+def test_sqlglot_parse_failure_is_invalid_sql_before_execution(bound_transport):
     frames = bound_transport.run(
         b'{"id":1,"operation":"query","sql":"SELECT FROM WHERE ((","limit":1}\n'
     )
     assert frames[-1]["error"]["class"] == "invalid_sql"
+    bound_transport.engine.query.assert_not_called()
+
+
+LITERAL_MONTHS = (
+    "SELECT CASE month_num WHEN 1 THEN 424 WHEN 2 THEN 400 WHEN 3 THEN 279 "
+    "ELSE 0 END AS monthly_revenue FROM (SELECT 1 AS month_num"
+    + "".join(f" UNION ALL SELECT {n}" for n in range(2, 13))
+    + ") months ORDER BY month_num"
+)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        LITERAL_MONTHS,
+        "SELECT 1",
+        "WITH m AS (SELECT 1 AS n) SELECT n FROM m",
+    ],
+)
+def test_query_reading_no_table_is_rejected_before_execution(bound_transport, sql):
+    frames = bound_transport.run(
+        (
+            json.dumps({"id": 1, "operation": "query", "sql": sql, "limit": 5}) + "\n"
+        ).encode()
+    )
+    assert frames[-1] == {
+        "id": 1,
+        "error": {
+            "class": "policy_rejected",
+            "message": transport.ERROR_MESSAGES["policy_rejected"],
+        },
+    }
+    bound_transport.engine.query.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT n FROM orders",
+        "WITH x AS (SELECT * FROM orders) SELECT n FROM x",
+        "SELECT n FROM (SELECT n FROM orders) t",
+    ],
+)
+def test_query_reading_a_model_executes(bound_transport, sql):
+    frames = bound_transport.run(
+        (
+            json.dumps({"id": 1, "operation": "query", "sql": sql, "limit": 5}) + "\n"
+        ).encode()
+    )
+    assert frames[-1]["result"]["definition"]["source_tables"] == ["orders"]
+    bound_transport.engine.query.assert_called_once_with(sql, limit=5, read_only=True)
 
 
 def test_cli_sanitizes_malformed_transport_failure(monkeypatch, tmp_path):
