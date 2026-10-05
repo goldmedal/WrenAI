@@ -187,13 +187,13 @@ export function createCodexRuntimeComposition(options: Options) {
           signal.throwIfAborted(); input.assertActive();
           if (result.provenance?.verified !== true) return;
           if (result.output.kind === "render") {
-            options.artifacts.save(credential, { version: "1", idempotency_key: randomUUID(), name: "Generated dashboard",
+            options.artifacts.saveGrounded(credential, { version: "1", idempotency_key: randomUUID(), name: "Generated dashboard",
               envelope: { blocks: result.output.blocks, ...(result.output.summary ? { summary: result.output.summary } : {}), verified: true } });
           } else {
             const table = z.object({ columns: z.array(z.string()), rows: z.array(z.union([z.array(z.unknown()), z.record(z.string(), z.unknown())])) }).parse(result.output.value);
             const blocks: unknown[] = [{ type: "table", columns: table.columns, rows: table.rows }];
             if (result.provenance.definition) blocks.push({ type: "definition", ...z.record(z.string(), z.unknown()).parse(result.provenance.definition) });
-            options.artifacts.persistAnswer(credential, { version: "1", idempotency_key: randomUUID(), envelope: { blocks, verified: true } });
+            options.artifacts.persistGroundedAnswer(credential, { version: "1", idempotency_key: randomUUID(), envelope: { blocks, verified: true } });
           }
         } });
       return { ...prepared, async dispose() { options.artifacts.revoke(credential); await prepared.dispose(); } };

@@ -152,6 +152,8 @@ export interface NativeStructuredAnswerRow {
   readonly envelopeJson: string;
   readonly digest: string;
   readonly createdAt: string;
+  /** True only when the host persisted a grounded component root; a model-typed answer is never grounded. */
+  readonly grounded: boolean;
 }
 
 /** Retained answers are intentionally bounded without a global cleanup job. */
@@ -477,6 +479,7 @@ CREATE TABLE IF NOT EXISTS native_structured_answers (
   envelope_json TEXT NOT NULL,
   digest TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  grounded INTEGER NOT NULL DEFAULT 0,
   UNIQUE(native_session_id, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS native_structured_answers_session_created_at
@@ -824,6 +827,9 @@ export class Store {
     this.addColumnIfMissing("artifacts", "native_agent", "TEXT");
     this.addColumnIfMissing("artifacts", "content_digest", "TEXT");
     this.addColumnIfMissing("artifacts", "idempotency_key", "TEXT");
+    // Pre-existing retained answers carry no provenance, so they default to
+    // ungrounded: a later save by reference to one of them is Unverified.
+    this.addColumnIfMissing("native_structured_answers", "grounded", "INTEGER NOT NULL DEFAULT 0");
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS artifacts_native_idempotency_unique ON artifacts(native_session_id, idempotency_key) WHERE native_session_id IS NOT NULL AND idempotency_key IS NOT NULL");
     this.addColumnIfMissing("enrichment_operations", "draft", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("enrichment_operations", "change_kind", "TEXT NOT NULL DEFAULT 'knowledge_append'");
@@ -1019,6 +1025,7 @@ export class Store {
     readonly idempotencyKey: string;
     readonly envelopeJson: string;
     readonly digest: string;
+    readonly grounded: boolean;
   }): { readonly row: NativeStructuredAnswerRow; readonly created: boolean } {
     const existing = this.getNativeStructuredAnswerByIdempotency(params.nativeSessionId, params.idempotencyKey);
     if (existing) return { row: existing, created: false };
@@ -1026,9 +1033,9 @@ export class Store {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare(
-        `INSERT INTO native_structured_answers (id, native_session_id, idempotency_key, envelope_json, digest, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      ).run(params.id, params.nativeSessionId, params.idempotencyKey, params.envelopeJson, params.digest, createdAt);
+        `INSERT INTO native_structured_answers (id, native_session_id, idempotency_key, envelope_json, digest, created_at, grounded)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(params.id, params.nativeSessionId, params.idempotencyKey, params.envelopeJson, params.digest, createdAt, boolToInt(params.grounded));
       this.db.prepare(
         `DELETE FROM native_structured_answers
          WHERE id IN (
@@ -1538,14 +1545,14 @@ export class Store {
     id: string; sessionId: string; nativeSessionId: string; name: string; location: string;
     projectIdentity: string; bindingGeneration: number; projectRevision: string;
     vendor: NativeSessionVendor; agent: string; digest: string; idempotencyKey: string;
-    sourceAnswerId?: string;
+    verified: boolean; sourceAnswerId?: string;
   }): { readonly row: ArtifactRow; readonly created: boolean } {
     const existing = this.getNativeArtifactByIdempotency(params.nativeSessionId, params.idempotencyKey);
     if (existing) return { row: existing, created: false };
     const createdAt = new Date().toISOString();
     const row: ArtifactRow = {
       id: params.id, sessionId: params.sessionId, name: params.name, kind: "dashboard", location: params.location,
-      verified: true, createdAt, savedAt: createdAt, nativeSessionId: params.nativeSessionId,
+      verified: params.verified, createdAt, savedAt: createdAt, nativeSessionId: params.nativeSessionId,
       projectIdentity: params.projectIdentity, bindingGeneration: params.bindingGeneration,
       projectRevision: params.projectRevision, nativeVendor: params.vendor, nativeAgent: params.agent,
       contentDigest: params.digest, idempotencyKey: params.idempotencyKey,
@@ -1557,7 +1564,7 @@ export class Store {
         native_session_id, project_identity, binding_generation, project_revision,
         native_vendor, native_agent, content_digest, idempotency_key, source_answer_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(row.id, row.sessionId, row.name, row.kind, row.location, 1, row.createdAt, row.savedAt,
+        .run(row.id, row.sessionId, row.name, row.kind, row.location, boolToInt(row.verified), row.createdAt, row.savedAt,
           row.nativeSessionId, row.projectIdentity, row.bindingGeneration, row.projectRevision,
           row.nativeVendor, row.nativeAgent, row.contentDigest, row.idempotencyKey,
           row.sourceAnswerId);
@@ -2503,6 +2510,7 @@ function rowToNativeStructuredAnswer(row: Record<string, unknown>): NativeStruct
     envelopeJson: str(row, "envelope_json"),
     digest: str(row, "digest"),
     createdAt: str(row, "created_at"),
+    grounded: intToBool(row["grounded"]),
   };
 }
 
