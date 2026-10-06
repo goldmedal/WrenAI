@@ -24,7 +24,7 @@ const bundle: Bundle = { vercel_bundle_version: "0.1", compat: { min_ir_version:
 
 interface Script { calls: { name: string; arguments: Record<string, unknown> }[]; answer: unknown }
 interface Capture {
-  args: string[]; configPath?: string; configStat?: { mode: number; uid: number }; configKeys?: string[];
+  args: string[]; configPath?: string; configRaw?: string; credentialToken?: string; configStat?: { mode: number; uid: number }; configKeys?: string[];
   config?: { name: string; command: string; args: string[]; tools: string[]; instruction?: string }; configError?: string;
   tools?: string[]; results: unknown[];
 }
@@ -175,7 +175,13 @@ describe("agent-sdk answers are grounded against this turn's host query observat
     expect(config.args.slice(1, 3)).toEqual(["--credential-file", path.join(path.dirname(capture.configPath!), "credential.json")]);
     expect(config.args.slice(3, 5)).toEqual(["--", expect.stringMatching(/\/wren$/)]);
     expect(config.args.slice(5)).toEqual(["serve", "mcp", "--project", expect.any(String), "--quiet"]);
-    // The token lives only in the credential file: neither argv nor the config carries it.
+    // The token lives only in the credential file: argv and the config carry its path, never its value.
+    const credentialFile = path.join(path.dirname(capture.configPath!), "credential.json");
+    expect(capture.credentialToken).toEqual(expect.any(String));
+    expect(capture.credentialToken!.length).toBeGreaterThanOrEqual(32);
+    expect(capture.configRaw).toContain(JSON.stringify(credentialFile));
+    expect(capture.configRaw).not.toContain(capture.credentialToken!);
+    expect(capture.args.join("\n")).not.toContain(capture.credentialToken!);
     const service = path.dirname(capture.configPath!);
     expect(path.basename(service)).toMatch(/^genbi-hq-/);
     // The turn's service directory, with the config and credential files, is gone after the turn.
