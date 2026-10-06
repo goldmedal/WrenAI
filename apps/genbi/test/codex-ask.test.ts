@@ -58,7 +58,7 @@ describe("Codex Ask CLI contract", () => {
     );
   });
 
-  it("builds exact tier, project, session-home, and Wren MCP bindings", () => {
+  it("builds exact tier, project, session-home, and proxied Wren MCP bindings", () => {
     const args = buildCodexAskArgs(
       { command: "warble-codex-local", prefixArgs: [] },
       {
@@ -68,6 +68,8 @@ describe("Codex Ask CLI contract", () => {
         codexHome: "/tmp/codex-home",
         models: { orchestrator: "driver", cheap: "cheap", strong: "strong" },
         mcpServer: { command: "/opt/wren", prefixArgs: [] },
+        proxy: { command: "/opt/node", prefixArgs: ["/opt/genbi/codex-wren-proxy.js"] },
+        credentialFile: "/tmp/hq/credential.json",
         timeoutMs: 123,
       },
     );
@@ -76,7 +78,12 @@ describe("Codex Ask CLI contract", () => {
       "--component", "answer_query", "--project", "/tmp/project",
       "--codex-home", "/tmp/codex-home",
       "--orchestrator-model", "driver", "--cheap-model", "cheap", "--strong-model", "strong",
-      "--server", "wren", "--server-command", "/opt/wren",
+      // Codex starts the genbi proxy as its `wren` server; the proxy owns run_sql and starts
+      // the plain `wren serve mcp` behind it for every other tool.
+      "--server", "wren", "--server-command", "/opt/node",
+      "--server-arg", "/opt/genbi/codex-wren-proxy.js",
+      "--server-arg=--credential-file", "--server-arg", "/tmp/hq/credential.json", "--server-arg=--",
+      "--server-arg", "/opt/wren",
       "--server-arg", "serve", "--server-arg", "mcp", "--server-arg=--project",
       "--server-arg", "/tmp/project", "--server-arg=--quiet",
       "--transport", "orchestrate",
@@ -96,6 +103,8 @@ describe("Codex Ask CLI contract", () => {
         codexHome: "/tmp/codex-home",
         models: { orchestrator: "driver", cheap: "cheap", strong: "strong" },
         mcpServer: { command: "/opt/wren", prefixArgs: [] },
+        proxy: { command: "/opt/node", prefixArgs: ["/opt/genbi/codex-wren-proxy.js"] },
+        credentialFile: "/tmp/hq/credential.json",
         timeoutMs: 123,
         component: "generate_dashboard",
       },

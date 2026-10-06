@@ -220,6 +220,11 @@ export interface CodexAskOptions {
 
 export interface CodexAskResult {
   readonly finalText: string;
+  /**
+   * codex:local only: the queries this turn's host query service executed for the model's
+   * `run_sql`, the only evidence its answer may be grounded on. Never persisted.
+   */
+  readonly hostObservations?: readonly import("./codex-host-query.js").HostQueryObservation[];
 }
 
 export type CodexAskExecutor = (options: CodexAskOptions) => Promise<CodexAskResult>;

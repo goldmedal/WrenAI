@@ -14,7 +14,7 @@ const blocks = z.array(z.object({ type: z.string(), fields: z.record(z.string(),
 const capabilities = z.array(z.string());
 type Definition = z.infer<typeof definitionSchema>;
 type Observation = ComponentEvidence["tools"][number];
-interface GroundedQuery { readonly sql: string; readonly queryId?: string; readonly table: z.infer<typeof table>; readonly definition: Definition }
+export interface GroundedQuery { readonly sql: string; readonly queryId?: string; readonly table: z.infer<typeof table>; readonly definition: Definition }
 /** The host-assigned id of an executed query (`q<N>`, see the runner), read from the observed output only. */
 function queryIdOf(output: unknown): string | undefined {
   const id = (output as { query_id?: unknown } | null)?.query_id;
@@ -40,12 +40,30 @@ function groundingDefinition(call: Pick<Observation, "input" | "output">): Defin
 function canGround(call: Pick<Observation, "input" | "output">): boolean {
   return groundingDefinition(call) !== undefined;
 }
-function groundedQuery(call: Pick<Observation, "input" | "output">): GroundedQuery | undefined {
+export function groundedQuery(call: Pick<Observation, "input" | "output">): GroundedQuery | undefined {
   const definition = groundingDefinition(call);
   const parsed = table.safeParse(call.output);
   if (!definition || !parsed.success) return undefined;
   const queryId = queryIdOf(call.output);
   return { sql: definition.sql, ...(queryId !== undefined ? { queryId } : {}), table: parsed.data, definition };
+}
+/**
+ * The executed query a citation names, grounded, else `undefined`. A citation by host-assigned
+ * `query_id` resolves to that observation only: an id no executed query carries is never grounded
+ * on another query or on its SQL text. Otherwise the last observation of the same SQL, compared
+ * whitespace- and terminator-insensitively (the model may reformat the SQL it names). An
+ * observation that cannot ground (see `groundingDefinition`) never matches.
+ */
+export function citedGroundedQuery(
+  observations: readonly Pick<Observation, "input" | "output">[],
+  citation: { readonly queryId?: string | undefined; readonly sql?: string | undefined },
+): GroundedQuery | undefined {
+  const { queryId } = citation;
+  const claimedSql = queryId === undefined ? citation.sql : undefined;
+  const observed = queryId !== undefined ? observations.find((call) => queryIdOf(call.output) === queryId && canGround(call))
+    : claimedSql === undefined ? undefined
+    : [...observations].reverse().find((call) => { const ran = (call.input as { sql?: unknown } | null)?.sql; return typeof ran === "string" && sqlKey(ran) === sqlKey(claimedSql) && canGround(call); });
+  return observed ? groundedQuery(observed) : undefined;
 }
 function refused(): ComponentInvocationResult {
   return { status: "refused", code: "callee_refused", message: "The component did not produce a grounded result." };
@@ -185,16 +203,11 @@ function normalizeBatchTerminal(entries: readonly unknown[], observations: reado
       continue;
     }
     const claimed = item.definition && typeof item.definition === "object" ? item.definition as Record<string, unknown> : undefined;
-    // A query the entry cites by its host-assigned id resolves to that observation only: an id no
-    // executed query carries is unanswerable, never grounded on another query or on its SQL text.
-    const queryId = typeof claimed?.query_id === "string" ? claimed.query_id : undefined;
-    const claimedSql = queryId === undefined && typeof claimed?.sql === "string" ? claimed.sql : undefined;
-    // Whitespace- and terminator-insensitive, like the single-answer selection: the model may reformat the SQL it names.
-    // An observation that cannot ground is skipped, so the entry citing it is unanswerable.
-    const observed = queryId !== undefined ? observations.find((call) => queryIdOf(call.output) === queryId && canGround(call))
-      : claimedSql === undefined ? undefined
-      : [...observations].reverse().find((call) => { const ran = (call.input as { sql?: unknown } | null)?.sql; return typeof ran === "string" && sqlKey(ran) === sqlKey(claimedSql) && canGround(call); });
-    const query = observed ? groundedQuery(observed) : undefined;
+    // An id no executed query carries, or a cited query that cannot ground, is unanswerable.
+    const query = citedGroundedQuery(observations, {
+      queryId: typeof claimed?.query_id === "string" ? claimed.query_id : undefined,
+      sql: typeof claimed?.sql === "string" ? claimed.sql : undefined,
+    });
     if (!query) {
       value.push({ slot_id: item.slot_id, status: "unanswerable", reason: "no executed query backs this answer" });
       continue;

@@ -69,7 +69,7 @@ const ENVELOPE = {
   verified: true,
 };
 
-// codex:local holds no host query evidence, so the model's verified: true is never kept.
+// No host-run query backs this answer (and charts cannot be rebuilt), so the model's verified: true is never kept.
 const STORED_ENVELOPE = { ...ENVELOPE, verified: false };
 
 function event(seq: number, value: AgentEventInput): AgentEvent {
