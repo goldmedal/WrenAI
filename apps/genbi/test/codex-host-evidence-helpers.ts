@@ -5,10 +5,10 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
 import { openWrenComponentAccess } from "../harness/components/wren-access.js";
-import { openCodexHostQueryService, type CodexHostQueryService } from "../harness/route/codex-host-query.js";
+import { openHostQueryService, type HostQueryService } from "../harness/route/host-query.js";
 
 const FIXTURES = path.join(import.meta.dirname, "fixtures");
-export const PROXY_SOURCE = path.join(import.meta.dirname, "..", "harness", "route", "codex-wren-proxy.ts");
+export const PROXY_SOURCE = path.join(import.meta.dirname, "..", "harness", "route", "wren-host-proxy.ts");
 
 /** A scratch directory with a `wren` stand-in (`fixtures/fake-wren.cjs`) and an empty project. */
 export function fakeWrenWorkspace(): { root: string; wren: string; project: string; cleanup(): void } {
@@ -22,8 +22,8 @@ export function fakeWrenWorkspace(): { root: string; wren: string; project: stri
 }
 
 /** A host query service backed by governed access through the `wren` stand-in. */
-export function openTestHostService(wren: string, project: string): Promise<CodexHostQueryService> {
-  return openCodexHostQueryService({
+export function openTestHostService(wren: string, project: string): Promise<HostQueryService> {
+  return openHostQueryService({
     openAccess: async (signal) => openWrenComponentAccess({ executable: wren, project, fingerprint: await hashDirectory(project), signal }),
   });
 }
