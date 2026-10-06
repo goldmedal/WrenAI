@@ -213,6 +213,11 @@ describe("native session query tool", () => {
     const estimated = await f.save(credential, { envelope: { ...cited, estimate: true } });
     expect(estimated.verified).toBe(false);
     expect((await f.content(estimated.id)).envelope).toEqual({ ...cited, estimate: true, verified: false });
+    const extraTable = { type: "table", columns: ["x"], rows: [["model-only"]] };
+    const withExtraTable = { ...cited, blocks: [extraTable, ...cited.blocks] };
+    const uncited = await f.save(credential, { envelope: withExtraTable });
+    expect(uncited.verified).toBe(false);
+    expect((await f.content(uncited.id)).envelope).toEqual({ ...withExtraTable, verified: false });
     const pure = await f.save(credential, { envelope: { ...cited, summary: "There are 42 orders." } });
     expect(pure.verified).toBe(true);
     expect((await f.content(pure.id)).envelope).toEqual({ verified: true, summary: "There are 42 orders.", blocks: [

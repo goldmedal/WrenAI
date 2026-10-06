@@ -528,7 +528,12 @@ export class NativeArtifactService {
     if (envelope.estimate !== undefined && envelope.estimate !== null) return undefined;
     if (!Array.isArray(envelope.blocks) || envelope.blocks.some((block) => !isRecord(block) || (block.type !== "table" && block.type !== "definition"))) return undefined;
     const grounded = groundOnHostEvidence(envelope as RenderEnvelope, envelope, recorder.observations());
-    return grounded.verified === true ? grounded : undefined;
+    if (grounded.verified !== true) return undefined;
+    // The rebuild emits one table and one definition per cited query. If it has fewer of either
+    // than the envelope did (an extra uncited table, say), content would be lost: keep it intact.
+    const count = (value: { blocks?: unknown }, type: string) => Array.isArray(value.blocks) ? value.blocks.filter((block) => isRecord(block) && block.type === type).length : 0;
+    if (count(grounded, "table") !== count(envelope, "table") || count(grounded, "definition") !== count(envelope, "definition")) return undefined;
+    return grounded;
   }
 
   /** Releases opaque credentials when the owning BFF service shuts down. */
