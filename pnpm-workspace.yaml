@@ -6,8 +6,12 @@ allowBuilds:
   '@wrenai/context-loader': false
   '@warble/cli': true
   node-pty: true
+  '@google/genai': false
+  protobufjs: false
 minimumReleaseAgeExclude:
   - '@warble/claude-agent-sdk@0.15.4'
   - '@warble/cli@0.15.4'
   - '@warble/codex-local@0.15.4'
   - '@warble/ir-spec@0.8.0'
+  - '@earendil-works/pi-ai@1.0.4'
+  - '@earendil-works/pi-telemetry@1.0.4'

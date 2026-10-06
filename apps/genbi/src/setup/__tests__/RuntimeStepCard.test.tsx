@@ -117,6 +117,35 @@ describe('RuntimeStepCard — compiled tier bindings', () => {
     expect(screen.getByRole('button', { name: 'Save runtime settings' })).toBeDisabled();
   });
 
+  it('lets the operator pick the org gateway and set provider, base URL and default model', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    useSetupStore.setState({
+      runtimeSettings: { ...fixtureRuntimeSettings, tierModels: [{ tier: 'cheap' }, { tier: 'strong' }] },
+      adapterEnvStatus: { anthropic: false, openaiCompatible: false, gateway: false },
+    });
+    renderWithProviders(<AppRoutes />, { route: '/setup' });
+
+    expect(screen.getByRole('radio', { name: 'API key (BYO)' })).toBeDisabled();
+    await user.click(screen.getByRole('radio', { name: 'Org gateway (pi-ai)' }));
+    expect(useSetupStore.getState().runtimeSettings.authMode).toBe('gateway');
+    expect(screen.queryByRole('combobox', { name: 'Subscription driver model' })).not.toBeInTheDocument();
+    expect(screen.getByText(/GENBI_GATEWAY_API_KEY is not set/)).toBeInTheDocument();
+    const save = screen.getByRole('button', { name: 'Save runtime settings' });
+    expect(save).toBeDisabled();
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Gateway provider' }), { target: { value: 'openrouter' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Default model' }), { target: { value: 'org/model-a' } });
+    expect(useSetupStore.getState().runtimeSettings).toMatchObject({ gatewayProvider: 'openrouter', gatewayModel: 'org/model-a' });
+    // Every tier falls back to the gateway's default model, so the form is saveable.
+    expect(save).toBeEnabled();
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Base URL (optional)' }), { target: { value: 'not a url' } });
+    expect(screen.getByText('Base URL must be an absolute http(s) URL.')).toBeInTheDocument();
+    expect(save).toBeDisabled();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Base URL (optional)' }), { target: { value: 'https://gateway.example.com/v1' } });
+    expect(save).toBeEnabled();
+  });
+
   it('enables saving only after every compiled tier has an explicit model', () => {
     useSetupStore.setState({
       runtimeSettings: {

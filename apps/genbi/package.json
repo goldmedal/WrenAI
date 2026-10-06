@@ -96,5 +96,8 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "optionalDependencies": {
+    "@earendil-works/pi-ai": "1.0.4"
   }
 }

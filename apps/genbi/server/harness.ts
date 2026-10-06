@@ -187,8 +187,10 @@ function runtimeBackendAndLabel(authChoice: RouteOptions["authChoice"]): { backe
       return { backend: "api-key", label: `API key (${authChoice.adapter})` };
     case "local":
       return { backend: "local", label: authChoice.endpoint ? `Local (${authChoice.endpoint})` : "Local" };
-    case "gateway":
-      return { backend: "gateway", label: "Gateway" };
+    case "gateway": {
+      const provider = authChoice.config?.["provider"];
+      return { backend: "gateway", label: typeof provider === "string" && provider.trim() ? `Gateway (pi-ai: ${provider})` : "Gateway" };
+    }
   }
 }
 

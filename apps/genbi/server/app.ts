@@ -34,7 +34,8 @@ import { NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME, NATIVE_MCP_TOOL_NAME, NATIVE_PERSI
 import { sameNativeRuntimeBinding } from "./native-dispatch-registry.js";
 import { ProfileRegistryError, toWarbleProfileDto } from "./profile-registry.js";
 import { DEFAULT_CONVERSATION_PROFILE } from "./native-sessions.js";
-import { detectAdapterEnv } from "./env-detect.js";
+import { detectAdapterEnv, GATEWAY_API_KEY_ENV } from "./env-detect.js";
+import { listPiAiCatalog } from "../harness/providers/index.js";
 import { redactPublicSetupText, redactSetupText, sanitizePublicSetupWorklog } from "./fold.js";
 import { assertHarnessBundlePurpose, buildHarnessDto } from "./harness.js";
 import { requiredInProcessCredentialEnvVars, RuntimeBindingError, runtimeSettingsCorrection, validateRuntimeTierBindings } from "./runtime-binding.js";
@@ -82,7 +83,11 @@ import type {
   SubscriptionLoginStatus,
   ToolStep,
   WarbleProfileListDto,
+  GatewayModelCatalog,
 } from "./wire-types.js";
+
+export const GATEWAY_CATALOG_UNAVAILABLE =
+  "gateway catalog unavailable: the optional dependency @earendil-works/pi-ai is not installed or Node >= 22.19 is required";
 
 /** Only explicit persisted settings can supersede the boot route or require repair. */
 function persistedRuntimeCorrection(deps: Pick<TurnDeps, "store">): string | undefined {
@@ -1689,6 +1694,22 @@ export function createApp(deps: TurnDeps) {
     return c.json(result);
   });
 
+  /** pi-ai's built-in catalog (offline, no credentials) for the gateway option's suggestions. */
+  app.get("/api/harness/gateway-models", async (c) => {
+    const provider = c.req.query("provider")?.trim() || undefined;
+    try {
+      const catalog = await listPiAiCatalog(provider);
+      return c.json<GatewayModelCatalog>({
+        status: "ready",
+        providers: catalog.providers,
+        models: catalog.models.map((model) => ({ model: model.id, displayName: model.name })),
+      });
+    } catch {
+      // A fixed reason: the load error is Node's module-resolution text, which can name local paths.
+      return c.json<GatewayModelCatalog>({ status: "unavailable", reason: GATEWAY_CATALOG_UNAVAILABLE });
+    }
+  });
+
   app.put("/api/config/runtime", async (c) => {
     const patch = await c.req.json().catch(() => ({}) as Partial<RuntimeSettings>);
     const updated: RuntimeSettings = { ...deps.store.getRuntimeSettings(), ...patch };
@@ -1732,7 +1753,10 @@ export function createApp(deps: TurnDeps) {
     if (candidateAuthChoice.mode !== "subscription") {
       const envStatus = detectAdapterEnv();
       for (const envVar of requiredInProcessCredentialEnvVars(updated)) {
-        const present = envVar === "OPENAI_API_KEY" ? envStatus.openaiCompatible : envStatus.anthropic;
+        const present =
+          envVar === "OPENAI_API_KEY" ? envStatus.openaiCompatible
+          : envVar === GATEWAY_API_KEY_ENV ? envStatus.gateway === true
+          : envStatus.anthropic;
         if (!present) return c.json({ error: `${envVar} is not set on the server — required by a configured tier adapter` }, 400);
       }
     }

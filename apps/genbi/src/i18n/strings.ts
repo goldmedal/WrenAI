@@ -412,6 +412,19 @@ export const strings = {
     authSubscriptionCodex: 'ChatGPT / Codex',
     authByo: 'API key (BYO)',
     authLocal: 'Local',
+    authGateway: 'Org gateway (pi-ai)',
+    gatewayDescription:
+      'Routes every tier through pi-ai to the provider your organization chose (a built-in pi-ai provider, or your own OpenAI-compatible endpoint). Runs in-process on the BFF.',
+    gatewayProviderLabel: 'Gateway provider',
+    gatewayProviderPlaceholder: 'pi-ai provider id, e.g. openrouter or amazon-bedrock',
+    gatewayBaseUrlLabel: 'Base URL (optional)',
+    gatewayBaseUrlPlaceholder: 'https://… — only for a custom OpenAI-compatible endpoint',
+    gatewayBaseUrlInvalid: 'Base URL must be an absolute http(s) URL.',
+    gatewayModelLabel: 'Default model',
+    gatewayModelPlaceholder: 'Search the pi-ai catalog or enter a model ID',
+    gatewayCatalogUnavailable: 'The pi-ai catalog is unavailable on this server; enter provider and model IDs manually.',
+    gatewayKeyDetected: 'GENBI_GATEWAY_API_KEY is set on the server.',
+    gatewayKeyMissing: 'GENBI_GATEWAY_API_KEY is not set on the server — set it in the BFF process environment before saving.',
     /** Suffix on options that aren't wired up yet (rendered greyed/disabled). */
     runtimeComingSoon: 'coming soon',
     /** Suffix on a previously available option whose setup path is currently frozen. */

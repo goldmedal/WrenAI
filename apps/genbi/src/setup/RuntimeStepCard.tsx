@@ -1,16 +1,22 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, AutoComplete, Button, Input, Segmented, Space } from 'antd';
 import { Panel } from '@/ui';
 import { t } from '@/i18n/strings';
+import { getGatewayModelCatalog } from '@/bff/client';
+import { isBffEnabled } from '@/bff/env';
 import { useSetupStore } from './useSetupStore';
 import { CLAUDE_TIER_MODELS } from './claude-tier-models';
-import type { AuthMode, SubscriptionModelCatalog, SubscriptionProvider, TierModelSelection } from './types';
+import type { AuthMode, GatewayModelCatalog, SubscriptionModelCatalogEntry, SubscriptionProvider, TierModelSelection } from './types';
 
 const authOptions: { label: string; value: AuthMode; disabled?: boolean }[] = [
   { label: t('setup.authSubscription'), value: 'subscription' },
+  { label: t('setup.authGateway'), value: 'gateway' },
   { label: t('setup.authByo'), value: 'byo', disabled: true },
   { label: t('setup.authLocal'), value: 'local', disabled: true },
 ];
+
+/** Model suggestions from any catalog: a subscription provider's, or pi-ai's built-in one. */
+type ModelSuggestions = { status: 'ready'; models: SubscriptionModelCatalogEntry[] } | { status: 'unavailable' };
 
 const subscriptionProviderOptions: { label: string; value: SubscriptionProvider }[] = [
   { label: 'Claude CLI', value: 'claude' },
@@ -30,7 +36,7 @@ interface ModelInputProps {
   label: string;
   value: string;
   placeholder: string;
-  catalog?: SubscriptionModelCatalog;
+  catalog?: ModelSuggestions;
   /**
    * Restricts the suggestions to a closed set the consumer will actually accept.
    * Without it the account catalog is offered as-is, which is right for a field
@@ -114,6 +120,21 @@ function ModelInput({ label, value, placeholder, catalog, allowedModels, onChang
   );
 }
 
+/** pi-ai's offline catalog for the gateway option; absent in fixture mode or while loading. */
+function useGatewayCatalog(provider: string, enabled: boolean): GatewayModelCatalog | undefined {
+  const [catalog, setCatalog] = useState<GatewayModelCatalog>();
+  useEffect(() => {
+    if (!enabled || !isBffEnabled()) return;
+    let cancelled = false;
+    getGatewayModelCatalog(provider).then(
+      (next) => { if (!cancelled) setCatalog(next); },
+      () => { if (!cancelled) setCatalog({ status: 'unavailable', reason: 'request failed' }); },
+    );
+    return () => { cancelled = true; };
+  }, [provider, enabled]);
+  return catalog;
+}
+
 /** Runtime configuration is bundle-tier-driven; dispatcher driver is separate. */
 export function RuntimeStepCard() {
   const runtimeSettings = useSetupStore((s) => s.runtimeSettings);
@@ -129,6 +150,23 @@ export function RuntimeStepCard() {
   const subscriptionLoginStatus = useSetupStore((s) => s.subscriptionLoginStatus);
   const runtimeSettingsSaving = useSetupStore((s) => s.runtimeSettingsSaving);
   const runtimeSettingsError = useSetupStore((s) => s.runtimeSettingsError);
+  const adapterEnvStatus = useSetupStore((s) => s.adapterEnvStatus);
+
+  // Setup offers subscription and the org gateway. Any other hydrated mode is
+  // projected onto the subscription form without overwriting it until a save.
+  const gateway = runtimeSettings.authMode === 'gateway';
+  const gatewayProvider = runtimeSettings.gatewayProvider ?? '';
+  const gatewayBaseURL = runtimeSettings.gatewayBaseURL ?? '';
+  const gatewayModel = runtimeSettings.gatewayModel ?? '';
+  const gatewayCatalog = useGatewayCatalog(gatewayProvider.trim(), gateway);
+  const gatewayBaseUrlInvalid = gatewayBaseURL.trim().length > 0 && !isAbsoluteHttpUrl(gatewayBaseURL.trim());
+  // A custom endpoint is not in pi-ai's catalog, so its models are never "unverified".
+  const gatewaySuggestions: ModelSuggestions | undefined = gatewayCatalog?.status === 'ready' && gatewayCatalog.models.length > 0 && !gatewayBaseURL.trim()
+    ? { status: 'ready', models: gatewayCatalog.models.map((entry) => ({ model: entry.model, displayName: entry.displayName })) }
+    : undefined;
+  const gatewayProviderOptions = gatewayCatalog?.status === 'ready'
+    ? gatewayCatalog.providers.filter((id) => id.includes(gatewayProvider.trim())).map((id) => ({ value: id }))
+    : [];
 
   const subscriptionProvider: SubscriptionProvider = runtimeSettings.subscriptionProvider ?? 'claude';
   const catalog = subscriptionModelCatalogs[subscriptionProvider];
@@ -145,23 +183,53 @@ export function RuntimeStepCard() {
 
   const rowsValid = runtimeTierNames.length > 0 && runtimeTierNames.every((tier) => {
     const binding = bindingFor(tier);
-    const model = binding.model?.trim();
+    const model = binding.model?.trim() || (gateway ? gatewayModel.trim() : '');
     return !!model && !isAbsoluteHttpUrl(model);
   });
   const subscriptionLoggedIn = subscriptionLoginStatus[subscriptionProvider];
-  const saveDisabled = runtimeSettingsSaving || !rowsValid ||
-    !subscriptionLoggedIn || !runtimeSettings.subscriptionDriverModel?.trim();
+  const saveDisabled = gateway
+    ? runtimeSettingsSaving || !rowsValid || !gatewayProvider.trim() || gatewayBaseUrlInvalid
+    : runtimeSettingsSaving || !rowsValid || !subscriptionLoggedIn || !runtimeSettings.subscriptionDriverModel?.trim();
 
   return (
     <Panel title={t('setup.runtimeTitle')} note={t('setup.runtimeDescription')}>
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <div>
           <div style={{ marginBottom: 8, fontWeight: 500 }}>{t('setup.authModeLabel')}</div>
-          {/* Setup is subscription-only. Do not overwrite an unsaved BYO/local boot binding merely to project this form. */}
-          <Segmented aria-label={t('setup.authModeAriaLabel')} value={'subscription' as AuthMode} options={authOptions} onChange={() => {}} />
+          {/* Do not overwrite an unsaved BYO/local boot binding merely to project this form: only an explicit choice changes authMode. */}
+          <Segmented
+            aria-label={t('setup.authModeAriaLabel')}
+            value={(gateway ? 'gateway' : 'subscription') as AuthMode}
+            options={authOptions}
+            onChange={(value) => {
+              if (value === 'gateway' || value === 'subscription') updateRuntimeSettings({ authMode: value });
+            }}
+          />
         </div>
 
-        <>
+        {gateway ? (
+          <div>
+            <div style={{ opacity: 0.65, fontSize: 12, marginBottom: 8 }}>{t('setup.gatewayDescription')}</div>
+            <Alert style={{ marginBottom: 8 }} type={adapterEnvStatus.gateway ? 'success' : 'warning'} showIcon message={adapterEnvStatus.gateway ? t('setup.gatewayKeyDetected') : t('setup.gatewayKeyMissing')} />
+            {gatewayCatalog?.status === 'unavailable' && <Alert style={{ marginBottom: 8 }} type="info" showIcon message={t('setup.gatewayCatalogUnavailable')} />}
+            <div style={{ marginBottom: 4, fontWeight: 500 }}>{t('setup.gatewayProviderLabel')}</div>
+            <AutoComplete
+              aria-label={t('setup.gatewayProviderLabel')}
+              value={gatewayProvider}
+              options={gatewayProviderOptions}
+              getPopupContainer={(trigger) => trigger.parentElement ?? document.body}
+              onChange={(value: string) => updateRuntimeSettings({ gatewayProvider: value })}
+            >
+              <Input aria-label={t('setup.gatewayProviderLabel')} placeholder={t('setup.gatewayProviderPlaceholder')} />
+            </AutoComplete>
+            <div style={{ marginTop: 12, marginBottom: 4, fontWeight: 500 }}>{t('setup.gatewayBaseUrlLabel')}</div>
+            <Input aria-label={t('setup.gatewayBaseUrlLabel')} value={gatewayBaseURL} placeholder={t('setup.gatewayBaseUrlPlaceholder')} onChange={(event) => updateRuntimeSettings({ gatewayBaseURL: event.target.value })} />
+            {gatewayBaseUrlInvalid && <div role="alert" style={{ color: '#a8071a', fontSize: 12, marginTop: 4 }}>{t('setup.gatewayBaseUrlInvalid')}</div>}
+            <div style={{ marginTop: 12, marginBottom: 4, fontWeight: 500 }}>{t('setup.gatewayModelLabel')}</div>
+            <ModelInput label={t('setup.gatewayModelLabel')} value={gatewayModel} placeholder={t('setup.gatewayModelPlaceholder')} catalog={gatewaySuggestions} onChange={(value) => updateRuntimeSettings({ gatewayModel: value })} />
+            <div style={{ opacity: 0.65, fontSize: 12, marginTop: 4 }}>{t('setup.defaultModelHint')}</div>
+          </div>
+        ) : <>
           <div>
             <div style={{ marginBottom: 8, fontWeight: 500 }}>Interactive CLI target</div>
             <Segmented aria-label="Interactive CLI target" value={subscriptionProvider} options={subscriptionProviderOptions} onChange={(value) => selectSubscriptionProvider(value as SubscriptionProvider)} />
@@ -178,7 +246,7 @@ export function RuntimeStepCard() {
             <ModelInput label={t('setup.subscriptionDriverModelLabel')} value={runtimeSettings.subscriptionDriverModel ?? ''} placeholder={t('setup.subscriptionModelPlaceholder')} catalog={catalog} onChange={(subscriptionDriverModel) => updateRuntimeSettings({ subscriptionDriverModel })} />
             <div style={{ opacity: 0.65, fontSize: 12, marginTop: 4 }}>{t('setup.subscriptionDriverModelHint')}</div>
           </div>
-        </>
+        </>}
 
         <div>
           <div style={{ marginBottom: 8, fontWeight: 500 }}>{t('setup.compiledTiersLabel')}</div>
@@ -189,7 +257,9 @@ export function RuntimeStepCard() {
               const label = `${t('setup.tierModelAriaPrefix')} ${tier} tier`;
               return <div key={tier} style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
                 <div style={{ fontWeight: 500, marginBottom: 8 }}>{tier}</div>
-                <ModelInput label={label} value={binding.model ?? ''} placeholder={t('setup.tierModelPlaceholder')} catalog={catalog} allowedModels={subscriptionProvider === 'claude' ? CLAUDE_TIER_MODELS : undefined} onChange={(model) => updateTier(tier, { model })} />
+                {gateway
+                  ? <ModelInput label={label} value={binding.model ?? ''} placeholder={gatewayModel.trim() ? `${t('setup.tierDefaultModelPrefix')} ${gatewayModel.trim()}` : t('setup.tierModelPlaceholder')} catalog={gatewaySuggestions} onChange={(model) => updateTier(tier, { model })} />
+                  : <ModelInput label={label} value={binding.model ?? ''} placeholder={t('setup.tierModelPlaceholder')} catalog={catalog} allowedModels={subscriptionProvider === 'claude' ? CLAUDE_TIER_MODELS : undefined} onChange={(model) => updateTier(tier, { model })} />}
               </div>;
             })}
           </Space>

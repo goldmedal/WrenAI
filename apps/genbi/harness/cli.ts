@@ -29,11 +29,14 @@ Options:
   --project <dir>         User's wren project directory (required)
   --profile <dir>         Warble profile source directory (default: this package's profiles/genbi-default)
   --mode <mode>           subscription | api-key | local | gateway (default: see policy below)
-  --provider <name>       subscription mode: claude | codex (default: claude)
+  --provider <name>       subscription mode: claude | codex (default: claude);
+                          gateway mode: pi-ai provider id (e.g. openrouter, amazon-bedrock)
   --adapter <name>        api-key mode: provider registry adapter id (e.g. openai, anthropic)
-  --api-key <key>         api-key mode: API key (omit to rely on the adapter's own env var lookup)
-  --model <name>          api-key/local mode: model name
-  --endpoint <url>        local/gateway mode: endpoint URL
+  --api-key <key>         api-key mode: API key (omit to rely on the adapter's own env var lookup);
+                          gateway mode: key sent to the pi-ai provider (never read from its env vars)
+  --model <name>          api-key/local/gateway mode: model name
+  --endpoint <url>        local mode: endpoint URL; gateway mode: optional custom
+                          OpenAI-compatible base URL for the --provider name
   --warble-bin <path>     Explicit warble binary (default: the installed @warble/cli, then PATH)
   --agent-sdk-bin <path>  Explicit warble-agent-sdk CLI (subscription mode only)
   --out <dir>             subscription mode: run output directory

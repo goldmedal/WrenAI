@@ -15,6 +15,7 @@ import {
 import type { RuntimeSettings } from "../server/wire-types.js";
 import { Store } from "../server/db.js";
 import { effectiveRouteOptions } from "../server/turn.js";
+import { toAuthChoiceFromRuntimeSettings } from "../server/auth-choice.js";
 import type { TurnDeps } from "../server/turn.js";
 import { loadLegacyFixture } from "./fixtures.js";
 
@@ -59,6 +60,48 @@ describe("runtime tier binding compiler", () => {
   it("validates credentials for the adapters materialized by tier rows, not an unused global adapter", () => {
     const runtime = settings({ apiKeyAdapter: "openai-compatible" });
     expect(requiredInProcessCredentialEnvVars(runtime)).toEqual(["ANTHROPIC_API_KEY"]);
+  });
+
+  it("materializes gateway tiers as pi-ai specs with the env key injected only in memory", () => {
+    const key = "gateway-key-for-tests";
+    vi.stubEnv("GENBI_GATEWAY_API_KEY", key);
+    try {
+      const runtime = settings({
+        authMode: "gateway",
+        gatewayProvider: "openrouter",
+        gatewayModel: "org/default",
+        tierModels: [{ tier: "cheap" }, { tier: "strong", model: "org/strong", baseURL: "https://gw.example.com/v1" }],
+      });
+      validateRuntimeTierBindings(runtime, tiers);
+      expect(requiredInProcessCredentialEnvVars(runtime)).toEqual(["GENBI_GATEWAY_API_KEY"]);
+      const authChoice = toAuthChoiceFromRuntimeSettings(runtime);
+      expect(authChoice).toEqual({ mode: "gateway", config: { provider: "openrouter", model: "org/default", apiKey: key } });
+      expect(materializeRuntimeRouteOptions(runtime, authChoice).tierBinding).toEqual({
+        cheap: { adapter: "pi-ai", config: { provider: "openrouter", model: "org/default", apiKey: key } },
+        strong: { adapter: "pi-ai", config: { provider: "openrouter", model: "org/strong", baseUrl: "https://gw.example.com/v1", apiKey: key } },
+      });
+      expect(JSON.stringify(runtime)).not.toContain(key);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects a gateway without a provider, a malformed gateway base URL, and pi-ai rows under a subscription dispatcher", () => {
+    const gateway = (overrides: Partial<RuntimeSettings>) => settings({ authMode: "gateway", gatewayProvider: "openrouter", gatewayModel: "m", tierModels: [{ tier: "cheap" }, { tier: "strong" }], ...overrides });
+    expect(() => validateRuntimeTierBindings(gateway({ gatewayProvider: " " }), tiers)).toThrow(/gateway provider is required/);
+    expect(() => validateRuntimeTierBindings(gateway({ gatewayBaseURL: "gw.example.com" }), tiers)).toThrow(/absolute http\(s\) URL/);
+    const subscription = settings({
+      authMode: "subscription",
+      subscriptionDriverModel: "opus",
+      gatewayProvider: "openrouter",
+      tierModels: [{ tier: "cheap", adapter: "pi-ai", model: "sonnet" }, { tier: "strong", model: "opus" }],
+    });
+    expect(() => validateRuntimeTierBindings(subscription, tiers)).toThrow(/cannot be used with a subscription dispatcher/);
+  });
+
+  it("leaves byo and local auth choices unchanged", () => {
+    expect(toAuthChoiceFromRuntimeSettings(settings({ authMode: "local" }))).toEqual({ mode: "local" });
+    expect(toAuthChoiceFromRuntimeSettings(settings({ apiKeyModel: "claude-sonnet" }))).toEqual({ mode: "api-key", adapter: "anthropic", config: { model: "claude-sonnet" } });
   });
 
   it("reads ordered unique tiers from compiled IR and rejects malformed tier contracts", () => {
