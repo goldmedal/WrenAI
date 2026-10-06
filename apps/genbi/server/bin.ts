@@ -142,6 +142,8 @@ import { toAuthChoiceFromRuntimeSettings } from "./auth-choice.js";
 import { Store } from "./db.js";
 import { resolveEnrichmentBinding, resolveProjectIdentity } from "./enrichment.js";
 import type { EnrichmentBinding } from "./enrichment.js";
+import { hashDirectory } from "../harness/compile/fingerprint.js";
+import { openWrenComponentAccess } from "../harness/components/wren-access.js";
 import { createDispatchedEnrichmentDraftRunner } from "./enrichment-runner.js";
 import { dispatchInteractiveArtifacts, getInteractiveTerminalReadiness, InteractiveLaunchError, InteractiveTerminalManager, prepareInteractiveHandoff, unavailableInteractiveReadiness } from "./interactive-terminal.js";
 import type { InteractiveTarget, PtyFactory } from "./interactive-terminal.js";
@@ -599,6 +601,12 @@ async function main(): Promise<void> {
     expectedMcpUrl: nativeMcpUrl,
     mcpUrl: process.env["WREN_HARNESS_NATIVE_MCP_URL"] ?? nativeMcpUrl,
     getBinding: currentInteractiveBinding,
+    // The session `query` tool runs through the same `wren` native sessions are given.
+    ...(nativeWrenExecutable ? {
+      openQueryAccess: async (binding: EnrichmentBinding, signal: AbortSignal) => openWrenComponentAccess({
+        executable: nativeWrenExecutable.executable, project: binding.path, fingerprint: await hashDirectory(binding.path), signal,
+      }),
+    } : {}),
   });
   const nativeTerminalHostAvailable = async (): Promise<boolean> => {
     try { await loadPty(); return true; } catch { return false; }
