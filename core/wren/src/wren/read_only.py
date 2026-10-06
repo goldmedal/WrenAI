@@ -55,3 +55,34 @@ def validate_read_only_query(sql: str, dialect: str | None) -> None:
             "SQL is not supported by the read-only analytical query policy.",
             phase=ErrorPhase.SQL_POLICY_CHECK,
         ) from error
+
+
+def require_source_tables(ast: exp.Expression) -> list[str]:
+    """Return the tables a parsed query reads, refusing one that reads none.
+
+    A query's own CTE names are not sources. They are compared
+    case-insensitively: a reference that differs from a CTE alias only in case
+    or quoting may resolve to that CTE (DuckDB does so), and excluding it can
+    only refuse more queries, never admit one. A table function such as
+    ``generate_series(1, 12)`` parses as a table with an empty name and reads
+    no stored data, so it is not a source either.
+
+    Callers check this before execution: a SELECT over literals alone returns
+    numbers the caller typed, never values read from a model.
+    """
+    aliases = {cte.alias_or_name.casefold() for cte in ast.find_all(exp.CTE)}
+    tables = sorted(
+        {
+            table.name
+            for table in ast.find_all(exp.Table)
+            if table.name and table.name.casefold() not in aliases
+        }
+    )
+    if not tables:
+        raise WrenError(
+            ErrorCode.INVALID_SQL,
+            "The query reads no table, so its values cannot come from the data; "
+            "query at least one model.",
+            phase=ErrorPhase.SQL_POLICY_CHECK,
+        )
+    return tables
