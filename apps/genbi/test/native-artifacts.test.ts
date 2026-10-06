@@ -40,6 +40,9 @@ const STRUCTURED_ANSWER_ENVELOPE = {
     { type: "definition", sql: "SELECT month, orders FROM metrics", source_tables: ["metrics"], filters: [] },
   ],
 } as const;
+// The host, not the caller, owns `verified`: an MCP save is stored unverified.
+const STORED_ENVELOPE = { ...ENVELOPE, verified: false };
+const STORED_ANSWER_ENVELOPE = { ...STRUCTURED_ANSWER_ENVELOPE, verified: false };
 
 function payload(overrides: Record<string, unknown> = {}) {
   return { version: "1", name: "Orders", envelope: ENVELOPE, idempotency_key: "native-save-0001", ...overrides };
@@ -166,7 +169,7 @@ describe("native-session artifact service", () => {
     store.close();
   });
 
-  it.each(["claude", "codex"] as const)("accepts a verified %s dashboard through the MCP contract and retains its source", async (vendor) => {
+  it.each(["claude", "codex"] as const)("accepts a model-typed %s dashboard through the MCP contract, stores it unverified, and retains its source", async (vendor) => {
     const fixture = createFixture(vendor);
     const descriptor = fixture.issue();
     const app = createApp(depsFor(fixture.store, fixture.outDir, fixture.service));
@@ -187,10 +190,10 @@ describe("native-session artifact service", () => {
 
     const artifactId = body.result.structuredContent.artifact_id;
     const listed = await (await app.request("/api/artifacts")).json() as Array<{ id: string; nativeSessionId?: string; savedAt?: string }>;
-    expect(listed).toEqual([expect.objectContaining({ id: artifactId, nativeSessionId: fixture.row.id, savedAt: expect.any(String) })]);
+    expect(listed).toEqual([expect.objectContaining({ id: artifactId, nativeSessionId: fixture.row.id, savedAt: expect.any(String), verified: false })]);
     const content = await (await app.request(`/api/artifacts/${artifactId}/content`)).json() as { form: string; envelope?: unknown };
-    expect(content).toMatchObject({ form: "envelope", envelope: ENVELOPE });
-    expect(JSON.parse(readFileSync(path.join(resolveArtifactsDir(fixture.outDir), "native", `${artifactId}.json`), "utf8"))).toEqual(ENVELOPE);
+    expect(content).toMatchObject({ form: "envelope", envelope: STORED_ENVELOPE });
+    expect(JSON.parse(readFileSync(path.join(resolveArtifactsDir(fixture.outDir), "native", `${artifactId}.json`), "utf8"))).toEqual(STORED_ENVELOPE);
     expect(JSON.stringify({ listed, session: fixture.store.getNativeSession(fixture.row.id) })).not.toContain(descriptor.credential);
 
     expect((await app.request(`/api/artifacts/${artifactId}/unsave`, { method: "POST" })).status).toBe(200);
@@ -217,7 +220,7 @@ describe("native-session artifact service", () => {
     expect(fixture.store.listArtifacts()).toHaveLength(1);
     const artifact = fixture.store.getArtifact(numericBody.result.structuredContent.artifact_id);
     expect(artifact).toMatchObject({ name: "Orders", nativeSessionId: fixture.row.id });
-    expect(JSON.parse(readFileSync(path.join(resolveArtifactsDir(fixture.outDir), artifact!.location), "utf8"))).toEqual(ENVELOPE);
+    expect(JSON.parse(readFileSync(path.join(resolveArtifactsDir(fixture.outDir), artifact!.location), "utf8"))).toEqual(STORED_ENVELOPE);
     fixture.store.close();
   });
 
@@ -232,7 +235,7 @@ describe("native-session artifact service", () => {
 
     expect(persisted).toMatchObject({ answer_ref: expect.stringMatching(/^answer-/), digest: expect.stringMatching(/^sha256:/), persisted_at: expect.any(String) });
     const stored = fixture.store.getNativeStructuredAnswer(persisted.answer_ref);
-    expect(stored).toMatchObject({ nativeSessionId: fixture.row.id, idempotencyKey: "answer-persist-0001", digest: persisted.digest, createdAt: persisted.persisted_at, envelopeJson: JSON.stringify(STRUCTURED_ANSWER_ENVELOPE) });
+    expect(stored).toMatchObject({ nativeSessionId: fixture.row.id, idempotencyKey: "answer-persist-0001", digest: persisted.digest, createdAt: persisted.persisted_at, envelopeJson: JSON.stringify(STORED_ANSWER_ENVELOPE), grounded: false });
 
     const saveResponse = await app.request("/api/native-sessions/mcp", mcpCall(descriptor.credential, {
       version: "1", name: "Saved exact answer", answer_ref: persisted.answer_ref, idempotency_key: "reference-save-0001",
@@ -244,9 +247,66 @@ describe("native-session artifact service", () => {
     const artifact = fixture.store.getArtifact(saved.artifact_id)!;
     const artifactJson = readFileSync(path.join(resolveArtifactsDir(fixture.outDir), artifact.location), "utf8");
     expect(artifactJson).toBe(stored!.envelopeJson);
-    expect(JSON.parse(artifactJson)).toEqual(STRUCTURED_ANSWER_ENVELOPE);
-    expect(artifact).toMatchObject({ nativeSessionId: fixture.row.id, sourceAnswerId: persisted.answer_ref, contentDigest: persisted.digest });
+    expect(JSON.parse(artifactJson)).toEqual(STORED_ANSWER_ENVELOPE);
+    expect(artifact).toMatchObject({ nativeSessionId: fixture.row.id, sourceAnswerId: persisted.answer_ref, contentDigest: persisted.digest, verified: false });
     fixture.store.close();
+  });
+
+  it("records verified only for host-grounded roots and lets reference saves inherit that provenance", () => {
+    const fixture = createFixture();
+    const descriptor = fixture.issue();
+    const artifactJson = (id: string) => JSON.parse(readFileSync(path.join(resolveArtifactsDir(fixture.outDir), fixture.store.getArtifact(id)!.location), "utf8"));
+
+    // A model-typed envelope claiming verified is stored, unverified, in both MCP forms.
+    const typed = fixture.service.save(descriptor.credential, payload({ idempotency_key: "typed-save-0001" }));
+    expect(fixture.store.getArtifact(typed.artifact_id)).toMatchObject({ verified: false });
+    expect(artifactJson(typed.artifact_id)).toEqual(STORED_ENVELOPE);
+    const typedAnswer = fixture.service.persistAnswer(descriptor.credential, structuredAnswerPayload({ idempotency_key: "typed-answer-0001" }));
+    expect(fixture.store.getNativeStructuredAnswer(typedAnswer.answer_ref)).toMatchObject({ grounded: false });
+    // A model envelope that says verified:false is accepted, not rejected.
+    const honest = fixture.service.persistAnswer(descriptor.credential, structuredAnswerPayload({ idempotency_key: "typed-answer-0002", envelope: STORED_ANSWER_ENVELOPE }));
+    expect(fixture.store.getNativeStructuredAnswer(honest.answer_ref)).toMatchObject({ grounded: false });
+    expect(fixture.service.save(descriptor.credential, payload({ idempotency_key: "typed-save-0002", envelope: STORED_ENVELOPE }))).toMatchObject({ artifact_id: expect.any(String) });
+
+    // The host-only grounded entries record verified, for both root kinds.
+    const groundedRender = fixture.service.saveGrounded(descriptor.credential, payload({ idempotency_key: "grounded-save-0001" }));
+    expect(fixture.store.getArtifact(groundedRender.artifact_id)).toMatchObject({ verified: true });
+    expect(artifactJson(groundedRender.artifact_id)).toEqual(ENVELOPE);
+    const groundedAnswer = fixture.service.persistGroundedAnswer(descriptor.credential, structuredAnswerPayload({ idempotency_key: "grounded-answer-0001" }));
+    expect(fixture.store.getNativeStructuredAnswer(groundedAnswer.answer_ref)).toMatchObject({ grounded: true, envelopeJson: JSON.stringify(STRUCTURED_ANSWER_ENVELOPE) });
+
+    // Saves by reference inherit the referenced answer's provenance.
+    const byGroundedRef = fixture.service.save(descriptor.credential, { version: "1", name: "Grounded ref", answer_ref: groundedAnswer.answer_ref, idempotency_key: "ref-save-0001" });
+    expect(fixture.store.getArtifact(byGroundedRef.artifact_id)).toMatchObject({ verified: true, sourceAnswerId: groundedAnswer.answer_ref, contentDigest: groundedAnswer.digest });
+    expect(artifactJson(byGroundedRef.artifact_id)).toEqual(STRUCTURED_ANSWER_ENVELOPE);
+    const byTypedRef = fixture.service.save(descriptor.credential, { version: "1", name: "Typed ref", answer_ref: typedAnswer.answer_ref, idempotency_key: "ref-save-0002" });
+    expect(fixture.store.getArtifact(byTypedRef.artifact_id)).toMatchObject({ verified: false, sourceAnswerId: typedAnswer.answer_ref });
+    expect(artifactJson(byTypedRef.artifact_id)).toEqual(STORED_ANSWER_ENVELOPE);
+    const byLatest = fixture.service.save(descriptor.credential, { version: "1", name: "Latest", answer_selection: "latest", idempotency_key: "ref-save-0003" });
+    expect(fixture.store.getArtifact(byLatest.artifact_id)).toMatchObject({ verified: true, sourceAnswerId: groundedAnswer.answer_ref });
+
+    // A grounded answer from another session still cannot be referenced.
+    const other = fixture.store.createNativeSession({ id: "native-other-grounded", purpose: "analysis", vendor: "codex", agent: "genbi-analysis", scopeKind: "bound_project", scopeId: "scope-other-grounded", projectIdentity: fixture.binding.identity, bindingGeneration: fixture.binding.generation, projectRevision: fixture.binding.revision });
+    fixture.store.transitionNativeSession(other.id, "running", { started: true });
+    const otherCredential = fixture.service.issue(fixture.store.getNativeSession(other.id)!, fixture.binding).credential;
+    expect(() => fixture.service.save(otherCredential, { version: "1", name: "Cross session", answer_ref: groundedAnswer.answer_ref, idempotency_key: "ref-save-0004" })).toThrow(new NativeArtifactError("persisted answer reference does not belong to this native session", 409));
+    fixture.store.close();
+  });
+
+  it("migrates retained answers that predate provenance to ungrounded", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "genbi-native-answer-migration-"));
+    dirs.push(root);
+    const dbPath = path.join(root, "state.sqlite");
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`CREATE TABLE native_structured_answers (
+      id TEXT PRIMARY KEY, native_session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+      envelope_json TEXT NOT NULL, digest TEXT NOT NULL, created_at TEXT NOT NULL,
+      UNIQUE(native_session_id, idempotency_key))`);
+    legacy.prepare("INSERT INTO native_structured_answers VALUES (?, ?, ?, ?, ?, ?)").run("answer-legacy", "native-legacy", "legacy-key-0001", "{}", "sha256:legacy", "2026-01-01T00:00:00.000Z");
+    legacy.close();
+    const store = new Store(dbPath);
+    expect(store.getNativeStructuredAnswer("answer-legacy")).toMatchObject({ grounded: false });
+    store.close();
   });
 
   it("selects the latest retained answer within the active session without recomputing", async () => {
@@ -430,7 +490,7 @@ describe("native-session artifact service", () => {
     const dbPath = path.join(root, "state.sqlite");
     const store = new Store(dbPath);
     const session = store.createNativeSession({ id: "native-answer-owner", purpose: "analysis", vendor: "codex", agent: "genbi-analysis", scopeKind: "bound_project", scopeId: "scope-answer-owner", projectIdentity: "project-identity", bindingGeneration: 4, projectRevision: "sha256:revision" });
-    store.createNativeStructuredAnswer({ id: "answer-00000000-0000-4000-8000-000000000001", nativeSessionId: session.id, idempotencyKey: "answer-lifecycle-0001", envelopeJson: JSON.stringify(STRUCTURED_ANSWER_ENVELOPE), digest: "sha256:test" });
+    store.createNativeStructuredAnswer({ id: "answer-00000000-0000-4000-8000-000000000001", nativeSessionId: session.id, idempotencyKey: "answer-lifecycle-0001", envelopeJson: JSON.stringify(STRUCTURED_ANSWER_ENVELOPE), digest: "sha256:test", grounded: false });
     store.close();
 
     const db = new DatabaseSync(dbPath);

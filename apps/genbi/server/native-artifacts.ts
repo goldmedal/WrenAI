@@ -59,6 +59,8 @@ const POSITIONAL_ROWS_SCHEMA = {
 } as const;
 
 /** The exact public MCP shape advertised to native clients and accepted by the host. */
+const VERIFIED_FIELD_SCHEMA = { type: "boolean", description: "Ignored: the host records verified only for an answer it produced from a grounded component run; anything submitted here is stored as unverified." } as const;
+
 export const NATIVE_SAVE_DASHBOARD_INPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -73,11 +75,11 @@ export const NATIVE_SAVE_DASHBOARD_INPUT_SCHEMA = {
     name: { ...SAFE_TEXT_SCHEMA, minLength: 1, maxLength: MAX_NAME_LENGTH, pattern: "\\S" },
     idempotency_key: { ...SAFE_TEXT_SCHEMA, minLength: 8, maxLength: MAX_IDEMPOTENCY_KEY_LENGTH, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]+$" },
     answer_ref: { ...SAFE_TEXT_SCHEMA, pattern: "^answer-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", description: "Opaque reference returned by persist_answer for this native session." },
-    answer_selection: { const: "latest", description: "Resolve the newest verified answer retained by this native session when its opaque answer_ref is no longer available in the conversation." },
+    answer_selection: { const: "latest", description: "Resolve the newest answer retained by this native session when its opaque answer_ref is no longer available in the conversation." },
     envelope: {
       type: "object", additionalProperties: false, required: ["blocks", "verified"],
       properties: {
-        verified: { const: true }, summary: NULLABLE_SAFE_TEXT_SCHEMA, estimate: { type: ["boolean", "null"] },
+        verified: VERIFIED_FIELD_SCHEMA, summary: NULLABLE_SAFE_TEXT_SCHEMA, estimate: { type: ["boolean", "null"] },
         blocks: {
           type: "array", minItems: 1,
           items: { oneOf: [
@@ -105,7 +107,7 @@ const NATIVE_STRUCTURED_ANSWER_ENVELOPE_SCHEMA = {
   additionalProperties: false,
   required: ["blocks", "verified"],
   properties: {
-    verified: { const: true },
+    verified: VERIFIED_FIELD_SCHEMA,
     blocks: {
       type: "array",
       minItems: 1,
@@ -290,7 +292,7 @@ function validBlock(block: unknown): boolean {
 
 function validateDashboardEnvelope(envelope: unknown): void {
   if (!isRecord(envelope) || !Object.hasOwn(envelope, "blocks") || !Object.hasOwn(envelope, "verified") || !Object.keys(envelope).every((key) => ["blocks", "summary", "verified", "estimate"].includes(key))) throw new NativeArtifactError("invalid dashboard render envelope: expected blocks and verified with optional summary or estimate");
-  if (envelope.verified !== true) throw new NativeArtifactError("invalid dashboard render envelope: verified must be true");
+  if (typeof envelope.verified !== "boolean") throw new NativeArtifactError("invalid dashboard render envelope: verified must be a boolean");
   if (!Array.isArray(envelope.blocks) || envelope.blocks.length === 0) throw new NativeArtifactError("invalid dashboard render envelope: blocks must be a non-empty array");
   const invalidBlock = envelope.blocks.findIndex((block) => !validBlock(block));
   if (invalidBlock !== -1) throw new NativeArtifactError(`invalid dashboard render envelope: block ${invalidBlock + 1} has an unsupported type, field, or row shape`);
@@ -338,6 +340,15 @@ function validatePersistedStructuredAnswer(value: unknown): PersistStructuredAns
   return { version: "1", idempotency_key: value.idempotency_key, envelope: value.envelope };
 }
 
+/**
+ * The stored `verified` flag is host provenance, never the caller's claim: the
+ * persisted envelope carries exactly the flag the host recorded, so its own
+ * badge cannot disagree with the artifact row.
+ */
+function withHostVerified(envelope: unknown, verified: boolean): Record<string, unknown> {
+  return { ...(envelope as Record<string, unknown>), verified };
+}
+
 function structuredAnswerDigest(envelopeJson: string): string {
   return `sha256:${createHash("sha256").update(envelopeJson).digest("hex")}`;
 }
@@ -367,7 +378,7 @@ export interface NativeArtifactServiceOptions {
   /** Test-only seam for a persistence outage; production uses the typed Store method. */
   readonly persistStructuredAnswer?: (input: {
     readonly id: string; readonly nativeSessionId: string; readonly idempotencyKey: string;
-    readonly envelopeJson: string; readonly digest: string;
+    readonly envelopeJson: string; readonly digest: string; readonly grounded: boolean;
   }) => { readonly row: NativeStructuredAnswerRow; readonly created: boolean };
 }
 
@@ -455,10 +466,22 @@ export class NativeArtifactService {
    * a later follow-up can only reference this stored result, never recompute.
    */
   persistAnswer(credential: string | undefined, input: unknown): PersistedStructuredAnswer {
+    return this.persistStructured(credential, input, false);
+  }
+
+  /**
+   * Host-only entry for a grounded component root (never exposed over MCP).
+   * The caller must already have checked the component's verified provenance.
+   */
+  persistGroundedAnswer(credential: string | undefined, input: unknown): PersistedStructuredAnswer {
+    return this.persistStructured(credential, input, true);
+  }
+
+  private persistStructured(credential: string | undefined, input: unknown, grounded: boolean): PersistedStructuredAnswer {
     const session = this.authorize(credential);
     if (session.purpose !== "analysis") throw new NativeArtifactError("structured answer persistence is unavailable for this native session", 409);
     const payload = validatePersistedStructuredAnswer(input);
-    const envelopeJson = JSON.stringify(payload.envelope);
+    const envelopeJson = JSON.stringify(withHostVerified(payload.envelope, grounded));
     const digest = structuredAnswerDigest(envelopeJson);
     const existing = this.options.store.getNativeStructuredAnswerByIdempotency(session.id, payload.idempotency_key);
     if (existing) {
@@ -469,7 +492,7 @@ export class NativeArtifactService {
     }
     try {
       const persisted = (this.options.persistStructuredAnswer ?? ((params) => this.options.store.createNativeStructuredAnswer(params)))({
-        id: newId("answer"), nativeSessionId: session.id, idempotencyKey: payload.idempotency_key, envelopeJson, digest,
+        id: newId("answer"), nativeSessionId: session.id, idempotencyKey: payload.idempotency_key, envelopeJson, digest, grounded,
       });
       if (persisted.row.digest !== digest || persisted.row.envelopeJson !== envelopeJson) {
         throw new NativeArtifactError("structured answer idempotency key is already bound to a different answer", 409);
@@ -485,6 +508,18 @@ export class NativeArtifactService {
   }
 
   save(credential: string | undefined, input: unknown): SavedNativeArtifact {
+    return this.saveArtifact(credential, input, false);
+  }
+
+  /**
+   * Host-only entry for a grounded component render root (never exposed over
+   * MCP). The caller must already have checked verified provenance.
+   */
+  saveGrounded(credential: string | undefined, input: unknown): SavedNativeArtifact {
+    return this.saveArtifact(credential, input, true);
+  }
+
+  private saveArtifact(credential: string | undefined, input: unknown, grounded: boolean): SavedNativeArtifact {
     const context = credential === undefined ? undefined : this.credentials.get(credential);
     if (!context) throw new NativeArtifactError("GenBI MCP bearer credential is invalid. Restart this native session to refresh its GenBI MCP connection.", 401);
     const { session, binding } = context;
@@ -494,7 +529,6 @@ export class NativeArtifactService {
       throw new NativeArtifactError("GenBI MCP session binding is stale. Start a new native session.", 409);
     }
     const payload = validateInput(input);
-    const referenceSave = "answer_ref" in payload || "answer_selection" in payload;
     const source = "answer_ref" in payload
       ? this.options.store.getNativeStructuredAnswer(payload.answer_ref)
       : "answer_selection" in payload
@@ -503,13 +537,16 @@ export class NativeArtifactService {
     if ("answer_ref" in payload && !source) throw new NativeArtifactError("persisted answer reference was not found", 404);
     if ("answer_selection" in payload && !source) throw new NativeArtifactError("no persisted answer is available for this native session", 404);
     if (source) validateStoredStructuredAnswer(source, session.id);
-    const contents = referenceSave ? source!.envelopeJson : JSON.stringify(payload.envelope);
-    const digest = referenceSave ? source!.digest : structuredAnswerDigest(contents);
+    // A reference save inherits the retained answer's provenance; an envelope
+    // save is verified only through the host-only grounded entry.
+    const verified = source ? source.grounded : grounded;
+    const contents = JSON.stringify(withHostVerified(source ? JSON.parse(source.envelopeJson) : "envelope" in payload ? payload.envelope : undefined, verified));
+    const digest = structuredAnswerDigest(contents);
     const sameSaveRequest = (artifact: ReturnType<Store["getNativeArtifactByIdempotency"]>): boolean => artifact !== undefined &&
       artifact.name === payload.name.trim() &&
       artifact.projectIdentity === binding.identity && artifact.bindingGeneration === binding.generation && artifact.projectRevision === binding.revision &&
       artifact.nativeVendor === session.vendor && artifact.nativeAgent === session.agent &&
-      artifact.contentDigest === digest && artifact.sourceAnswerId === (source?.id ?? null);
+      artifact.contentDigest === digest && artifact.sourceAnswerId === (source?.id ?? null) && artifact.verified === verified;
     const existing = this.options.store.getNativeArtifactByIdempotency(session.id, payload.idempotency_key);
     if (existing) {
       if (!sameSaveRequest(existing)) throw new NativeArtifactError("artifact idempotency key is already bound to a different save request", 409);
@@ -521,7 +558,7 @@ export class NativeArtifactService {
     try {
       const safeTarget = assertSafeContainedTarget(this.options.artifactsRoot, target);
       (this.options.writeAtomic ?? writeContainedAtomically)(safeTarget, contents);
-      const inserted = this.options.store.createNativeArtifact({ id, sessionId: session.id, nativeSessionId: session.id, name: payload.name.trim(), location, projectIdentity: binding.identity, bindingGeneration: binding.generation, projectRevision: binding.revision, vendor: session.vendor, agent: session.agent, digest, idempotencyKey: payload.idempotency_key, ...(source ? { sourceAnswerId: source.id } : {}) });
+      const inserted = this.options.store.createNativeArtifact({ id, sessionId: session.id, nativeSessionId: session.id, name: payload.name.trim(), location, projectIdentity: binding.identity, bindingGeneration: binding.generation, projectRevision: binding.revision, vendor: session.vendor, agent: session.agent, digest, idempotencyKey: payload.idempotency_key, verified, ...(source ? { sourceAnswerId: source.id } : {}) });
       if (!inserted.created && !sameSaveRequest(inserted.row)) {
         rmSync(target, { force: true });
         throw new NativeArtifactError("artifact idempotency key is already bound to a different save request", 409);

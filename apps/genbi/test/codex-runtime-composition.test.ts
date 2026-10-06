@@ -49,7 +49,7 @@ function fixture() {
   const store = new Store(":memory:"); stores.push(store);
   store.setRuntimeSettings({ ...store.getRuntimeSettings(), authMode: "subscription", subscriptionProvider: "codex", subscriptionDriverModel: "driver", apiKeyModel: "step" });
   let binding = { identity: "project", path: project, generation: 1, revision: "v1" };
-  const artifacts = { issue: vi.fn(() => ({ credential: "host-only" })), revoke: vi.fn(), save: vi.fn(), persistAnswer: vi.fn() };
+  const artifacts = { issue: vi.fn(() => ({ credential: "host-only" })), revoke: vi.fn(), save: vi.fn(), persistAnswer: vi.fn(), saveGrounded: vi.fn(), persistGroundedAnswer: vi.fn() };
   const composition = createCodexRuntimeComposition({ configuration: readCodexBootConfiguration({ GENBI_CODEX_RUNTIME: "app-server", GENBI_CODEX_EXECUTABLE: executable,
     GENBI_CODEX_SOURCE: "https://example.invalid/codex", WREN_HARNESS_CODEX_HOME: login, GENBI_CODEX_ACCOUNT_EMAIL: "fixture@example.invalid" }),
     packageRoot: root, producerBinary: executable, profileSource: "fixture", store, getBinding: () => binding, sourceWrenHome: () => path.join(root, "wren-home"), artifacts: artifacts as unknown as NativeArtifactService });
@@ -146,9 +146,11 @@ describe("Codex application composition", () => {
     const value = { columns: ["order_count", "revenue"], rows: [row] };
     const result = { status: "ok" as const, output: { kind: "value" as const, value }, provenance: { verified: false } };
     await sink(result, {} as never, f.controller.signal);
-    expect(f.artifacts.persistAnswer).not.toHaveBeenCalled();
+    expect(f.artifacts.persistGroundedAnswer).not.toHaveBeenCalled();
     await sink({ ...result, provenance: { verified: true } }, {} as never, f.controller.signal);
-    expect(f.artifacts.persistAnswer).toHaveBeenCalledWith("host-only", expect.objectContaining({
+    // A grounded root goes only through the host-only grounded entry, never the MCP-facing one.
+    expect(f.artifacts.persistAnswer).not.toHaveBeenCalled();
+    expect(f.artifacts.persistGroundedAnswer).toHaveBeenCalledWith("host-only", expect.objectContaining({
       envelope: { blocks: [{ type: "table", ...value }], verified: true },
     }));
     await prepared.input.tools.close(); await prepared.dispose();
@@ -158,9 +160,10 @@ describe("Codex application composition", () => {
       binding: f.binding, permit: f.input.permit, signal: f.controller.signal, assertActive() {} }); roots.push(path.dirname(prepared.input.spec.workspace));
     const sink = vi.mocked(prepareCapturedCodexDirectTools).mock.calls[0]![2].persistRoot!;
     await sink({ status: "ok", output: { kind: "render", blocks: [] }, provenance: { verified: false } }, {} as never, f.controller.signal);
-    expect(f.artifacts.save).not.toHaveBeenCalled();
+    expect(f.artifacts.saveGrounded).not.toHaveBeenCalled();
     await sink({ status: "ok", output: { kind: "render", blocks: [] }, provenance: { verified: true } }, {} as never, f.controller.signal);
-    expect(f.artifacts.save).toHaveBeenCalledOnce();
+    expect(f.artifacts.saveGrounded).toHaveBeenCalledOnce();
+    expect(f.artifacts.save).not.toHaveBeenCalled();
     await prepared.input.tools.close(); await prepared.dispose(); expect(f.artifacts.revoke).toHaveBeenCalledWith("host-only");
   });
 });
