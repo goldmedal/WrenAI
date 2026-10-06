@@ -1214,7 +1214,7 @@ export function createApp(deps: TurnDeps) {
     };
     const artifactTool = {
       name: NATIVE_MCP_TOOL_NAME,
-      description: "Save a verified dashboard to Artifacts. Use a prior persist_answer reference, or select this session's latest retained answer when the opaque reference is no longer available, without recomputing. The existing payload form remains available for compatibility.",
+      description: "Save a dashboard to Artifacts. Use a prior persist_answer reference, or select this session's latest retained answer when the opaque reference is no longer available, without recomputing. The host marks the artifact verified only when the referenced answer is one it grounded itself; a dashboard built from a payload you write is stored as unverified. The existing payload form remains available for compatibility.",
       inputSchema: NATIVE_SAVE_DASHBOARD_CONTRACT.inputSchema,
     };
     const persistAnswerTool = {
