@@ -69,6 +69,9 @@ const ENVELOPE = {
   verified: true,
 };
 
+// codex:local holds no host query evidence, so the model's verified: true is never kept.
+const STORED_ENVELOPE = { ...ENVELOPE, verified: false };
+
 function event(seq: number, value: AgentEventInput): AgentEvent {
   return { ...value, runId: "codex-dashboard", seq } as AgentEvent;
 }
@@ -141,10 +144,10 @@ describe("Codex dashboard BFF integration", () => {
     expect(artifactFrames).toHaveLength(1);
     const artifactId = (artifactFrames[0]!.data as { artifactId: string }).artifactId;
     const artifact = (await (await app.request(`/api/artifacts/${artifactId}`)).json()) as ArtifactDto;
-    expect(artifact).toMatchObject({ artifactKind: "dashboard", verified: true });
-    expect(JSON.parse(readFileSync(artifact.location!, "utf8"))).toEqual(ENVELOPE);
+    expect(artifact).toMatchObject({ artifactKind: "dashboard", verified: false });
+    expect(JSON.parse(readFileSync(artifact.location!, "utf8"))).toEqual(STORED_ENVELOPE);
     expect(frames.find((frame) => frame.event === "event" && (frame.data as { kind?: string }).kind === "answer")?.data)
-      .toMatchObject({ kind: "answer", answer: { form: "rich", envelope: ENVELOPE } });
+      .toMatchObject({ kind: "answer", answer: { form: "rich", envelope: STORED_ENVELOPE } });
 
     const replay = parseSse(await (await app.request(`/api/sessions/${session.id}/stream?turn=${turnId}`)).text());
     expect(replay.filter((frame) => frame.event === "event" && (frame.data as { kind?: string }).kind === "artifact"))
@@ -236,7 +239,7 @@ describe("Codex dashboard BFF integration", () => {
       expect((await response.json()) as ArtifactDto).toMatchObject({
         sessionId: session.id,
         artifactKind: "dashboard",
-        verified: true,
+        verified: false,
       });
     }
   });

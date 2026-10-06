@@ -16,6 +16,7 @@ from wren.model.data_source import DataSource
 from wren.model.error import ErrorCode, ErrorPhase, WrenError
 from wren.profile import expand_profile_secrets, resolve_profile_for_project
 from wren.query_semantics import query_semantics
+from wren.read_only import require_source_tables
 
 MAX_REQUEST = 65_536
 MAX_RESULT = 1_048_576
@@ -73,18 +74,12 @@ class _ResultTooLarge(ValueError):
     """A well-formed result that does not fit the byte limit."""
 
 
-class _ReadsNoModel(ValueError):
-    """The query reads no table, so its values cannot come from the bound data."""
-
-
 def classify_error(error: BaseException) -> str:
     """Map an exception to one key of ``ERROR_MESSAGES``; never reads its text."""
     if isinstance(error, _RequestError):
         return "invalid_request"
     if isinstance(error, _ResultTooLarge):
         return "result_too_large"
-    if isinstance(error, _ReadsNoModel):
-        return "policy_rejected"
     if isinstance(error, WrenError):
         code, phase = error.error_code, error.phase
         if code is ErrorCode.MODEL_NOT_FOUND:
@@ -152,23 +147,7 @@ def serve(project: Path) -> None:
                         request["sql"],
                         dialect=get_sqlglot_dialect(DataSource(datasource)),
                     )
-                    # Compared case-insensitively: a reference that differs from a CTE alias
-                    # only in case or quoting may resolve to that CTE (DuckDB does so), and
-                    # excluding it can only refuse more queries, never admit one.
-                    aliases = {
-                        cte.alias_or_name.casefold() for cte in ast.find_all(exp.CTE)
-                    }
-                    source_tables = sorted(
-                        {
-                            table.name
-                            for table in ast.find_all(exp.Table)
-                            if table.name and table.name.casefold() not in aliases
-                        }
-                    )
-                    # Checked before execution: a SELECT over literals alone would return
-                    # numbers the caller typed, never values read from a model.
-                    if not source_tables:
-                        raise _ReadsNoModel("Query reads no table")
+                    source_tables = require_source_tables(ast)
                     result = engine.query(
                         request["sql"], limit=request["limit"], read_only=True
                     )

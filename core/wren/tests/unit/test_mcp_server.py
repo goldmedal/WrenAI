@@ -196,6 +196,20 @@ def test_run_sql_negative_limit_rejected(tmp_path):
     engine.query.assert_not_called()
 
 
+def test_run_sql_executes_a_query_that_reads_no_table(tmp_path):
+    """``run_sql`` is a general tool: a table-less query such as ``SELECT 1``
+    is legitimate there and must reach the engine. The table-less refusal
+    belongs to the governed transport only."""
+    engine = Mock()
+    engine.query.return_value = pa.table({"value": [1]})
+    ctx = _make_ctx(tmp_path, engine=engine)
+    mcp = build_server(ctx)
+    run_sql = _get_tool(mcp, "run_sql")
+
+    assert run_sql(sql="SELECT 1")["rows"] == [{"value": 1}]
+    engine.query.assert_called_once_with("SELECT 1", 1001)
+
+
 # ── Cube queries embed truncation probes in generated SQL ──────────────────
 #
 # The generated SQL owns the row cap, and the connector receives `limit=None`.

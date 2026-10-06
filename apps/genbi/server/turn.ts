@@ -52,6 +52,7 @@ import {
   summarizeResult,
   toAnswerOrRefusalEvent,
   toArtifactEvent,
+  withHostVerification,
 } from "./fold.js";
 import type {
   AnswerEvent,
@@ -668,8 +669,9 @@ async function executeTurn(
  * verbatim as JSON to a session-scoped file under the same artifacts root
  * the in-process `write_artifact` tool uses (`resolveArtifactsDir`) — self-
  * contained from the envelope, no dependency on the dispatcher's `htmlPath`
- * (never present in the NDJSON stream today). `verified` comes straight from
- * the envelope's own `verified` field, never hardcoded.
+ * (never present in the NDJSON stream today). `verified` comes from the
+ * envelope after {@link withHostVerification}, so a model-text backend's
+ * artifact is never stored as verified.
  */
 async function maybeCreateDispatchedArtifact(
   deps: TurnDeps,
@@ -685,7 +687,7 @@ async function maybeCreateDispatchedArtifact(
   if (!(await isArtifactProducerAgent(deps, turn.agentId))) return undefined;
 
   assertCurrent();
-  const envelope = terminalEvent.answer.envelope;
+  const envelope = withHostVerification(result.backend, terminalEvent.answer.envelope);
   const artifactKind = artifactKindForAgent(turn.agentId);
   const verified = envelope.verified === true;
 
