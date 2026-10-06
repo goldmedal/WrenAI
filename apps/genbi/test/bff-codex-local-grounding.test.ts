@@ -7,7 +7,7 @@ import { Store } from "../server/db.js";
 import type { AnswerEvent } from "../server/wire-types.js";
 import { route, type Bundle, type CodexAskExecutor, type DispatchedExecutor } from "../harness/index.js";
 import { runCodexAskDefault } from "../harness/route/codex-ask.js";
-import { truncationNote } from "../server/codex-local-grounding.js";
+import { truncationNote } from "../server/host-evidence-grounding.js";
 import type { TurnDeps } from "../server/turn.js";
 import { parseSse } from "./bff-sse-helpers.js";
 import { fakeWrenWorkspace } from "./codex-host-evidence-helpers.js";
@@ -170,8 +170,8 @@ describe("codex:local answers are grounded against this turn's host query observ
   });
 });
 
-describe("agent-sdk answers stay unverified", () => {
-  it("drops the model's verified flag whatever it cites", async () => {
+describe("agent-sdk answers without host evidence stay unverified", () => {
+  it("drops the model's verified flag whatever it cites when the turn recorded no host query", async () => {
     const outDir = mkdtempSync(path.join(os.tmpdir(), "genbi-agent-sdk-"));
     scratch.push(outDir);
     const dispatched: DispatchedExecutor = async () => ({ finalText: JSON.stringify({ ...queryResult(ORDERS_SQL, 42), verified: true }) });

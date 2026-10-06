@@ -1,6 +1,6 @@
 import { citedGroundedQuery } from "../harness/components/normalize.js";
-import type { HostQueryObservation } from "../harness/route/codex-host-query.js";
-import { extractJsonCandidateFromText, type RenderEnvelope } from "../harness/render/envelope.js";
+import type { HostQueryObservation } from "../harness/route/host-query.js";
+import type { RenderEnvelope } from "../harness/render/envelope.js";
 import { namedAnswerQueryId, namedAnswerSql, sqlKey } from "../harness/render/answering-query.js";
 
 /** Blocks whose values the host cannot rebuild from one observed table; their presence leaves an answer unverified. */
@@ -13,13 +13,12 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * The queries a codex:local answer names. A `{blocks}` answer cites through its `definition`
- * blocks; a flat or query-result answer through its own `definition` / top-level fields, read
- * from the raw text because envelope normalization drops a cited `query_id`. A host id wins over
- * SQL, like the component path.
+ * The queries an answer names. A `{blocks}` answer cites through its `definition` blocks; a flat
+ * or query-result answer through its own `definition` / top-level fields, read from `raw` (the
+ * answer as the model wrote it) because envelope normalization drops a cited `query_id`. A host
+ * id wins over SQL, like the component path.
  */
-function citations(envelope: RenderEnvelope, finalText: string): Citation[] {
-  const raw = extractJsonCandidateFromText(finalText);
+function citations(envelope: RenderEnvelope, raw: unknown): Citation[] {
   if (!Array.isArray(record(raw)?.blocks)) {
     const queryId = namedAnswerQueryId(raw);
     if (queryId !== undefined) return [{ queryId }];
@@ -44,28 +43,31 @@ function citations(envelope: RenderEnvelope, finalText: string): Citation[] {
 }
 
 /**
- * Grounds a codex:local answer against the queries this turn's host query service executed,
- * with the component path's predicate (`citedGroundedQuery`: a tool-proven definition that
- * reads at least one table, cited by `query_id`, else by whitespace-insensitive SQL).
+ * Grounds an answer against the queries the host executed for its scope (one codex:local or
+ * agent-sdk Ask turn, or one native session), with the component path's predicate
+ * (`citedGroundedQuery`: a tool-proven definition that reads at least one table, cited by
+ * `query_id`, else by whitespace-insensitive SQL).
  *
  * Verified only when the answer cites at least one query and every citation grounds. The
  * envelope is then rebuilt from the observations alone: one `table` and one `definition` block
  * (carrying the observed `query_id`) per cited query, plus the model's `summary` text as written.
  * A cited result the host saw truncated still grounds the rows it shows; the host then appends
  * a note to `summary`, the only place the render contract carries such text. Anything else stays the model's answer with
- * `verified: false`: no citation, a citation to a query this turn never ran (including one from
- * an earlier turn), a query that read no table, or chart / KPI blocks the host cannot rebuild.
+ * `verified: false`: no citation, a citation to a query this scope never ran (including one from
+ * another turn or session), a query that read no table, or chart / KPI blocks the host cannot rebuild.
+ *
+ * `raw` is the answer as written, before envelope normalization (see `citations`).
  */
-export function groundCodexLocalEnvelope(
+export function groundOnHostEvidence(
   envelope: RenderEnvelope,
-  finalText: string,
+  raw: unknown,
   observations: readonly HostQueryObservation[],
 ): RenderEnvelope {
   const unverified: RenderEnvelope = { ...envelope, verified: false };
   if (observations.length === 0) return unverified;
   const blocks = Array.isArray(envelope.blocks) ? envelope.blocks : [];
   if (blocks.some((block) => UNREBUILDABLE_DATA_BLOCKS.has(String(record(block)?.type)))) return unverified;
-  const cited = citations(envelope, finalText);
+  const cited = citations(envelope, raw);
   if (cited.length === 0) return unverified;
   const rebuilt: Record<string, unknown>[] = [];
   const notes: string[] = [];

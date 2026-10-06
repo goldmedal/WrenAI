@@ -1,8 +1,6 @@
 import { spawn } from "node:child_process";
-import { accessSync, existsSync, constants as fsConstants } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { hashDirectory } from "../compile/fingerprint.js";
 import { openWrenComponentAccess } from "../components/wren-access.js";
 import { enforceCompliance } from "../compliance/index.js";
@@ -10,7 +8,13 @@ import { compileProfile } from "../compile/pipeline.js";
 import { createAgentEventEmitter, type AgentEventInput } from "../events/index.js";
 import type { ResolvedCli } from "./agent-sdk-cli.js";
 import { CodexAskEventMapper } from "./codex-ask-events.js";
-import { openCodexHostQueryService } from "./codex-host-query.js";
+import {
+  defaultWrenHostProxy,
+  openHostQueryService,
+  resolveExecutableOnPath,
+  singleWrenExecutable,
+  wrenHostProxyArgs,
+} from "./host-query.js";
 import { resolveCodexLocalCli } from "./codex-local-cli.js";
 import {
   CODEX_ASK_COMPONENTS,
@@ -41,7 +45,7 @@ export function buildCodexAskArgs(
     readonly codexHome: string;
     readonly models: CodexManifestModels;
     readonly mcpServer: ResolvedCli;
-    /** The genbi stdio proxy Codex starts as its `wren` MCP server (see `codex-wren-proxy.ts`). */
+    /** The genbi stdio proxy Codex starts as its `wren` MCP server (see `wren-host-proxy.ts`). */
     readonly proxy: ResolvedCli;
     /** This turn's host query credential file; the proxy reads it, its path carries no secret. */
     readonly credentialFile: string;
@@ -51,19 +55,7 @@ export function buildCodexAskArgs(
   },
 ): readonly string[] {
   if (!options.question.trim()) throw new Error("Codex Ask question must not be empty");
-  const serverArgs = [
-    ...options.proxy.prefixArgs,
-    "--credential-file",
-    options.credentialFile,
-    "--",
-    options.mcpServer.command,
-    ...options.mcpServer.prefixArgs,
-    "serve",
-    "mcp",
-    "--project",
-    options.userProject,
-    "--quiet",
-  ];
+  const serverArgs = wrenHostProxyArgs(options);
   return [
     ...cli.prefixArgs,
     "dispatch",
@@ -133,9 +125,9 @@ export async function runCodexAskDefault(options: CodexAskOptions): Promise<Code
     // This turn's host query service: the only place codex:local's run_sql executes and the
     // only evidence its answer can be grounded on. Closed (and its observations discarded)
     // when the turn ends, whatever the outcome.
-    const hostQueries = await openCodexHostQueryService({
+    const hostQueries = await openHostQueryService({
       openAccess: async (signal) => openWrenComponentAccess({
-        executable: singleExecutable(mcpServer),
+        executable: singleWrenExecutable(mcpServer),
         project: userProject,
         fingerprint: await hashDirectory(userProject),
         signal,
@@ -150,7 +142,7 @@ export async function runCodexAskDefault(options: CodexAskOptions): Promise<Code
         codexHome,
         models,
         mcpServer,
-        proxy: defaultWrenProxy(),
+        proxy: defaultWrenHostProxy(),
         credentialFile: hostQueries.credentialFile,
         timeoutMs,
         component,
@@ -185,33 +177,6 @@ function resolveModels(value: CodexAskOptions["codexModels"]): CodexManifestMode
     throw new Error("Codex Ask requires orchestrator, cheap, and strong model bindings");
   }
   return models;
-}
-
-/** Governed access spawns one executable with fixed arguments; a prefixed command cannot be bound. */
-function singleExecutable(cli: ResolvedCli): string {
-  if (cli.prefixArgs.length > 0) throw new Error("codex:local host queries need a standalone wren executable");
-  return cli.command;
-}
-
-/** The built proxy next to this module, else its source (Node strips its erasable types). */
-function defaultWrenProxy(): ResolvedCli {
-  const built = fileURLToPath(new URL("./codex-wren-proxy.js", import.meta.url));
-  const script = existsSync(built) ? built : fileURLToPath(new URL("./codex-wren-proxy.ts", import.meta.url));
-  return { command: process.execPath, prefixArgs: [script] };
-}
-
-function resolveExecutableOnPath(name: string): string {
-  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
-    if (!directory) continue;
-    const candidate = path.join(directory, name);
-    try {
-      accessSync(candidate, fsConstants.X_OK);
-      return candidate;
-    } catch {
-      // Keep searching.
-    }
-  }
-  throw new Error(`could not find the "${name}" executable on PATH`);
 }
 
 function sanitizedCodexEnvironment(): NodeJS.ProcessEnv {
