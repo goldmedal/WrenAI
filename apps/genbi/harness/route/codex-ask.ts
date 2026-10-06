@@ -1,12 +1,16 @@
 import { spawn } from "node:child_process";
-import { accessSync, constants as fsConstants } from "node:fs";
+import { accessSync, existsSync, constants as fsConstants } from "node:fs";
 import { createInterface } from "node:readline";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { hashDirectory } from "../compile/fingerprint.js";
+import { openWrenComponentAccess } from "../components/wren-access.js";
 import { enforceCompliance } from "../compliance/index.js";
 import { compileProfile } from "../compile/pipeline.js";
 import { createAgentEventEmitter, type AgentEventInput } from "../events/index.js";
 import type { ResolvedCli } from "./agent-sdk-cli.js";
 import { CodexAskEventMapper } from "./codex-ask-events.js";
+import { openCodexHostQueryService } from "./codex-host-query.js";
 import { resolveCodexLocalCli } from "./codex-local-cli.js";
 import {
   CODEX_ASK_COMPONENTS,
@@ -37,12 +41,29 @@ export function buildCodexAskArgs(
     readonly codexHome: string;
     readonly models: CodexManifestModels;
     readonly mcpServer: ResolvedCli;
+    /** The genbi stdio proxy Codex starts as its `wren` MCP server (see `codex-wren-proxy.ts`). */
+    readonly proxy: ResolvedCli;
+    /** This turn's host query credential file; the proxy reads it, its path carries no secret. */
+    readonly credentialFile: string;
     readonly codexBin?: string;
     readonly timeoutMs: number;
     readonly component?: CodexAskComponent;
   },
 ): readonly string[] {
   if (!options.question.trim()) throw new Error("Codex Ask question must not be empty");
+  const serverArgs = [
+    ...options.proxy.prefixArgs,
+    "--credential-file",
+    options.credentialFile,
+    "--",
+    options.mcpServer.command,
+    ...options.mcpServer.prefixArgs,
+    "serve",
+    "mcp",
+    "--project",
+    options.userProject,
+    "--quiet",
+  ];
   return [
     ...cli.prefixArgs,
     "dispatch",
@@ -63,18 +84,10 @@ export function buildCodexAskArgs(
     "--server",
     "wren",
     "--server-command",
-    options.mcpServer.command,
-    ...options.mcpServer.prefixArgs.flatMap((arg) =>
+    options.proxy.command,
+    ...serverArgs.flatMap((arg) =>
       arg.startsWith("-") ? [`--server-arg=${arg}`] : ["--server-arg", arg],
     ),
-    "--server-arg",
-    "serve",
-    "--server-arg",
-    "mcp",
-    "--server-arg=--project",
-    "--server-arg",
-    options.userProject,
-    "--server-arg=--quiet",
     ...codexAnalysisToolArgs(options.component ?? "answer_query"),
     "--timeout",
     String(options.timeoutMs),
@@ -116,28 +129,48 @@ export async function runCodexAskDefault(options: CodexAskOptions): Promise<Code
     const mcpServer = options.mcpServer ?? { command: resolveExecutableOnPath("wren"), prefixArgs: [] };
     if (options.signal?.aborted) throw new Error("warble-codex-local Ask was cancelled during preparation");
     const timeoutMs = options.timeoutMs ?? DEFAULT_CODEX_ASK_TIMEOUT_MS;
-    const args = buildCodexAskArgs(cli, {
-      irPath,
-      question: options.question,
-      userProject: options.userProject,
-      codexHome,
-      models,
-      mcpServer,
-      timeoutMs,
-      component,
-      ...(options.codexBin !== undefined ? { codexBin: options.codexBin } : {}),
+    const userProject = options.userProject;
+    // This turn's host query service: the only place codex:local's run_sql executes and the
+    // only evidence its answer can be grounded on. Closed (and its observations discarded)
+    // when the turn ends, whatever the outcome.
+    const hostQueries = await openCodexHostQueryService({
+      openAccess: async (signal) => openWrenComponentAccess({
+        executable: singleExecutable(mcpServer),
+        project: userProject,
+        fingerprint: await hashDirectory(userProject),
+        signal,
+      }),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });
-    const mapper = new CodexAskEventMapper(models, component);
-    const finalText = await spawnCodexAsk(
-      cli.command,
-      args,
-      mapper,
-      emitter.emit,
-      options.processTimeoutMs ?? timeoutMs + 5_000,
-      options.signal,
-    );
-    emitter.emit({ kind: "run.finish", status: "answer" });
-    return { finalText };
+    try {
+      const args = buildCodexAskArgs(cli, {
+        irPath,
+        question: options.question,
+        userProject,
+        codexHome,
+        models,
+        mcpServer,
+        proxy: defaultWrenProxy(),
+        credentialFile: hostQueries.credentialFile,
+        timeoutMs,
+        component,
+        ...(options.codexBin !== undefined ? { codexBin: options.codexBin } : {}),
+      });
+      const mapper = new CodexAskEventMapper(models, component);
+      const finalText = await spawnCodexAsk(
+        cli.command,
+        args,
+        mapper,
+        emitter.emit,
+        options.processTimeoutMs ?? timeoutMs + 5_000,
+        options.signal,
+      );
+      const hostObservations = hostQueries.observations();
+      emitter.emit({ kind: "run.finish", status: "answer" });
+      return { finalText, hostObservations };
+    } finally {
+      await hostQueries.close();
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     emitter.emit({ kind: "error", message });
@@ -152,6 +185,19 @@ function resolveModels(value: CodexAskOptions["codexModels"]): CodexManifestMode
     throw new Error("Codex Ask requires orchestrator, cheap, and strong model bindings");
   }
   return models;
+}
+
+/** Governed access spawns one executable with fixed arguments; a prefixed command cannot be bound. */
+function singleExecutable(cli: ResolvedCli): string {
+  if (cli.prefixArgs.length > 0) throw new Error("codex:local host queries need a standalone wren executable");
+  return cli.command;
+}
+
+/** The built proxy next to this module, else its source (Node strips its erasable types). */
+function defaultWrenProxy(): ResolvedCli {
+  const built = fileURLToPath(new URL("./codex-wren-proxy.js", import.meta.url));
+  const script = existsSync(built) ? built : fileURLToPath(new URL("./codex-wren-proxy.ts", import.meta.url));
+  return { command: process.execPath, prefixArgs: [script] };
 }
 
 function resolveExecutableOnPath(name: string): string {

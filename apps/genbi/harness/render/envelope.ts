@@ -472,13 +472,21 @@ function extractJsonObjectText(text: string): string {
  * `form: "text"` instead of fabricating an envelope.
  */
 export function extractEnvelopeFromText(text: string): RenderEnvelope | undefined {
-  let candidate: unknown;
+  const candidate = extractJsonCandidateFromText(text);
+  return candidate === undefined ? undefined : normalizeExtractedCandidate(candidate);
+}
+
+/**
+ * The raw JSON object a model's final text carries (fence- and prose-tolerant, see
+ * `extractJsonObjectText`), before any envelope normalization, else `undefined`. Fields the
+ * normalization drops, such as a cited `query_id`, are still present here.
+ */
+export function extractJsonCandidateFromText(text: string): unknown {
   try {
-    candidate = JSON.parse(extractJsonObjectText(text));
+    return JSON.parse(extractJsonObjectText(text));
   } catch {
     return undefined;
   }
-  return normalizeExtractedCandidate(candidate);
 }
 
 /** Bounded: at most one MCP `CallToolResult` unwrap, so a pathological/self-referential payload can't recurse forever. */

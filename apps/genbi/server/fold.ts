@@ -15,6 +15,7 @@
  */
 import type { AgentEvent, RouteResult, StepTrace } from "../harness/index.js";
 import { BUILD_DASHBOARD_TOOL_NAME, extractEnvelopeFromText, WREN_QUERY_TOOL_NAME } from "../harness/index.js";
+import { groundCodexLocalEnvelope } from "./codex-local-grounding.js";
 import type { AnswerEvent, ArtifactEvent, ArtifactKind, RefusalEvent, RenderEnvelope, ToolStep } from "./wire-types.js";
 
 /**
@@ -58,7 +59,8 @@ export function extractTrace(result: RouteResult): StepTrace | undefined {
  * `verified: false`). `extractEnvelopeFromText` recovers it — including
  * `answer_query`'s flat `{columns, rows}` tool-contract shape, normalized
  * into a `table` block. The recovered envelope's `verified` is model-written,
- * so {@link withHostVerification} forces it to `false` (see there). Only when
+ * so {@link withHostVerification} decides it from host evidence instead (see
+ * there). Only when
  * no envelope can be recovered at all does the raw text fall back to
  * `form: "text"`.
  *
@@ -84,7 +86,7 @@ export function toAnswerOrRefusalEvent(
   if (result.backend === "agent-sdk" || result.backend === "codex-local") {
     const envelope = extractEnvelopeFromText(result.finalText);
     if (envelope !== undefined) {
-      return { id, kind: "answer", answer: { form: "rich", envelope: withHostVerification(result.backend, envelope) } };
+      return { id, kind: "answer", answer: { form: "rich", envelope: withHostVerification(result, envelope) } };
     }
     return {
       id,
@@ -99,21 +101,23 @@ export function toAnswerOrRefusalEvent(
 }
 
 /**
- * Backends whose answer reaches the BFF only as model-written text. The host
- * runs none of their queries itself and holds no query evidence for them, so
- * a `verified` field in that text is the model's own claim, not a grounding
- * check.
+ * The one place a subscription answer's `verified` is decided; a `verified`
+ * field in model-written text is never kept.
+ *
+ * - `codex-local`: the model's `run_sql` executes through this turn's host
+ *   query service, so the answer is grounded against that turn's observations
+ *   ({@link groundCodexLocalEnvelope}): verified only when every query it
+ *   cites is one the host ran this turn and that read a table, and then its
+ *   tables and definitions are the observed ones. Otherwise it stays as
+ *   written, badged "Unverified".
+ * - `agent-sdk`: the host runs none of its queries and holds no evidence, so
+ *   it is always `false`, with the rest of the envelope kept as-is.
+ *
+ * Other backends pass through.
  */
-const MODEL_TEXT_BACKENDS: ReadonlySet<RouteResult["backend"]> = new Set(["agent-sdk", "codex-local"]);
-
-/**
- * The one place a subscription answer's `verified` is decided: for a backend
- * without host-held query evidence it is always `false`, whatever the model
- * wrote. The rest of the envelope (summary, blocks) is kept as-is, so the
- * answer is still shown, badged "Unverified". Other backends pass through.
- */
-export function withHostVerification(backend: RouteResult["backend"], envelope: RenderEnvelope): RenderEnvelope {
-  return MODEL_TEXT_BACKENDS.has(backend) ? { ...envelope, verified: false } : envelope;
+export function withHostVerification(result: RouteResult, envelope: RenderEnvelope): RenderEnvelope {
+  if (result.backend === "codex-local") return groundCodexLocalEnvelope(envelope, result.finalText, result.hostObservations ?? []);
+  return result.backend === "agent-sdk" ? { ...envelope, verified: false } : envelope;
 }
 
 /** In-process's native in-process tool names that constitute an actual data claim — schema browsing / artifact saving don't count. */

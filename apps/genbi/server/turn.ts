@@ -670,8 +670,9 @@ async function executeTurn(
  * the in-process `write_artifact` tool uses (`resolveArtifactsDir`) — self-
  * contained from the envelope, no dependency on the dispatcher's `htmlPath`
  * (never present in the NDJSON stream today). `verified` comes from the
- * envelope after {@link withHostVerification}, so a model-text backend's
- * artifact is never stored as verified.
+ * envelope after {@link withHostVerification}, so an artifact is stored as
+ * verified only when host evidence grounds it (a codex:local answer citing
+ * this turn's host-run queries), never on the model's own claim.
  */
 async function maybeCreateDispatchedArtifact(
   deps: TurnDeps,
@@ -687,7 +688,7 @@ async function maybeCreateDispatchedArtifact(
   if (!(await isArtifactProducerAgent(deps, turn.agentId))) return undefined;
 
   assertCurrent();
-  const envelope = withHostVerification(result.backend, terminalEvent.answer.envelope);
+  const envelope = withHostVerification(result, terminalEvent.answer.envelope);
   const artifactKind = artifactKindForAgent(turn.agentId);
   const verified = envelope.verified === true;
 
