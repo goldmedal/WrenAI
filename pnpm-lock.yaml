@@ -40,14 +40,14 @@ importers:
         specifier: ^2.0.10
         version: 2.1.1(hono@4.13.5)
       '@warble/claude-agent-sdk':
-        specifier: 0.15.4
-        version: 0.15.4(@warble/ir-spec@0.8.0)
+        specifier: 0.16.0
+        version: 0.16.0(@warble/ir-spec@0.8.0)
       '@warble/cli':
-        specifier: 0.15.4
-        version: 0.15.4(@warble/ir-spec@0.8.0)
+        specifier: 0.16.0
+        version: 0.16.0(@warble/ir-spec@0.8.0)
       '@warble/codex-local':
-        specifier: 0.15.4
-        version: 0.15.4(@warble/ir-spec@0.8.0)
+        specifier: 0.16.0
+        version: 0.16.0(@warble/ir-spec@0.8.0)
       '@warble/ir-spec':
         specifier: 0.8.0
         version: 0.8.0
@@ -1101,22 +1101,22 @@ packages:
   '@vitest/utils@4.1.11':
     resolution: {integrity: sha512-zTCVGpyFsGWBhllOyKlTw/vnr6D9qxsfSDyfbyZmTyjHw5N/VuvzHpHoQjm2ZJzn4RJgx5w4r7V0er69CmLgPQ==}
 
-  '@warble/claude-agent-sdk@0.15.4':
-    resolution: {integrity: sha512-zDshoAG5A85+M8Ynir7maNrC4C8Ah5N1bo96H3dC9oaJ+fWS67u1q8yfjHRfcIWYUmuTKEloQVUEJ7w76fL9VA==}
+  '@warble/claude-agent-sdk@0.16.0':
+    resolution: {integrity: sha512-Z5TOLY/Os2BK4nOT3gxAJJSLLR7cd9aiSqmr0UPmhR6nABxJV0xV8bPVmvuqeIPUu/QuAxzi1iHEaKM4BCfmMA==}
     engines: {node: '>=18'}
     hasBin: true
     peerDependencies:
       '@warble/ir-spec': 0.8.x
 
-  '@warble/cli@0.15.4':
-    resolution: {integrity: sha512-x1/0VQUQE4XCGOSAxyNVIhGSEpgE8yAhbeOrLmQ06n4TmXP5qMZCDaz8wZTPS/P2zN9+DEJWGPQZXpT4ox0y7Q==}
+  '@warble/cli@0.16.0':
+    resolution: {integrity: sha512-MVKKBkcGPgCcwveQ5U//ExuQKWoKqqFkBYVTSggmKBF86bmEyaYGzLvP0kQA5V7W+DN+YHPTSpGQGFQmJ3WXGg==}
     engines: {node: '>=14.14', npm: '>=6'}
     hasBin: true
     peerDependencies:
       '@warble/ir-spec': 0.8.x
 
-  '@warble/codex-local@0.15.4':
-    resolution: {integrity: sha512-g1aR2EfThJ7TpYssdQSep5uW9a4lLk+Xo3ZEwKMx1O+MPmxBssoLCf4BOlxgRIarGd/6qPCXsfUkrD3xgMK2UA==}
+  '@warble/codex-local@0.16.0':
+    resolution: {integrity: sha512-BMH80YJfILRws1OHTDIDBUb7K7tHwGq7sO79EDbCRD3ZZHHS6gwC7YX2Czj+FAHt0LSCjdDp+WFl/BG98YjzjA==}
     engines: {node: '>=18'}
     hasBin: true
     peerDependencies:
@@ -2960,19 +2960,19 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.1
 
-  '@warble/claude-agent-sdk@0.15.4(@warble/ir-spec@0.8.0)':
+  '@warble/claude-agent-sdk@0.16.0(@warble/ir-spec@0.8.0)':
     dependencies:
       '@anthropic-ai/claude-agent-sdk': 0.1.77(zod@4.5.4)
       '@warble/ir-spec': 0.8.0
       yaml: 2.9.0
       zod: 4.5.4
 
-  '@warble/cli@0.15.4(@warble/ir-spec@0.8.0)':
+  '@warble/cli@0.16.0(@warble/ir-spec@0.8.0)':
     dependencies:
       '@warble/ir-spec': 0.8.0
       detect-libc: 2.1.2
 
-  '@warble/codex-local@0.15.4(@warble/ir-spec@0.8.0)':
+  '@warble/codex-local@0.16.0(@warble/ir-spec@0.8.0)':
     dependencies:
       '@warble/ir-spec': 0.8.0
 
