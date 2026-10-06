@@ -15,7 +15,8 @@
  */
 import type { AgentEvent, RouteResult, StepTrace } from "../harness/index.js";
 import { BUILD_DASHBOARD_TOOL_NAME, extractEnvelopeFromText, WREN_QUERY_TOOL_NAME } from "../harness/index.js";
-import { groundCodexLocalEnvelope } from "./codex-local-grounding.js";
+import { extractJsonCandidateFromText } from "../harness/render/envelope.js";
+import { groundOnHostEvidence } from "./host-evidence-grounding.js";
 import type { AnswerEvent, ArtifactEvent, ArtifactKind, RefusalEvent, RenderEnvelope, ToolStep } from "./wire-types.js";
 
 /**
@@ -104,20 +105,23 @@ export function toAnswerOrRefusalEvent(
  * The one place a subscription answer's `verified` is decided; a `verified`
  * field in model-written text is never kept.
  *
- * - `codex-local`: the model's `run_sql` executes through this turn's host
- *   query service, so the answer is grounded against that turn's observations
- *   ({@link groundCodexLocalEnvelope}): verified only when every query it
- *   cites is one the host ran this turn and that read a table, and then its
- *   tables and definitions are the observed ones. Otherwise it stays as
- *   written, badged "Unverified".
- * - `agent-sdk`: the host runs none of its queries and holds no evidence, so
- *   it is always `false`, with the rest of the envelope kept as-is.
+ * - `codex-local` and `agent-sdk`: the model's host query tool (codex:local's
+ *   `run_sql`, the agent-sdk host MCP's `run_sql`) executes through this turn's
+ *   host query service, so the answer is grounded against that turn's
+ *   observations ({@link groundOnHostEvidence}): verified only when every
+ *   query it cites is one the host ran this turn and that read a table, and
+ *   then its tables and definitions are the observed ones. Otherwise it stays
+ *   as written, badged "Unverified" — including any answer whose data came
+ *   another way (agent-sdk's Bash `wren` stays available and yields no host
+ *   evidence).
  *
  * Other backends pass through.
  */
 export function withHostVerification(result: RouteResult, envelope: RenderEnvelope): RenderEnvelope {
-  if (result.backend === "codex-local") return groundCodexLocalEnvelope(envelope, result.finalText, result.hostObservations ?? []);
-  return result.backend === "agent-sdk" ? { ...envelope, verified: false } : envelope;
+  if (result.backend === "codex-local" || result.backend === "agent-sdk") {
+    return groundOnHostEvidence(envelope, extractJsonCandidateFromText(result.finalText), result.hostObservations ?? []);
+  }
+  return envelope;
 }
 
 /** In-process's native in-process tool names that constitute an actual data claim — schema browsing / artifact saving don't count. */
@@ -125,6 +129,8 @@ const DATA_ACCESS_TOOL_NAMES = new Set<string>([
   WREN_QUERY_TOOL_NAME,
   BUILD_DASHBOARD_TOOL_NAME,
   "wren.run_sql",
+  // The agent-sdk Ask's host MCP query tool (see `harness/route/dispatched.ts`).
+  "mcp__wren_host__run_sql",
 ]);
 
 /**

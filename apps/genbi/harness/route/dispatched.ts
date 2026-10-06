@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import os from "node:os";
 import path from "node:path";
 import { enforceCompliance } from "../compliance/index.js";
+import { hashDirectory } from "../compile/fingerprint.js";
 import { compileProfile } from "../compile/pipeline.js";
+import { openWrenComponentAccess } from "../components/wren-access.js";
 import { resolveWarbleBinary } from "../compile/resolve-binary.js";
 import { createAgentEventEmitter } from "../events/index.js";
 import type { AgentEventInput } from "../events/index.js";
@@ -15,7 +17,22 @@ import {
 } from "./chat-event-mapper.js";
 import { resolveAgentSdkCli } from "./agent-sdk-cli.js";
 import type { ResolvedCli } from "./agent-sdk-cli.js";
+import {
+  defaultWrenHostProxy,
+  openHostQueryService,
+  resolveExecutableOnPath,
+  wrenHostProxyArgs,
+  type HostQueryService,
+} from "./host-query.js";
 import type { DispatchedOptions, DispatchedResult } from "./types.js";
+
+/** The host MCP server's name; warble allows exactly `mcp__wren_host__run_sql` from it. */
+export const HOST_MCP_SERVER_NAME = "wren_host";
+export const HOST_MCP_TOOLS = Object.freeze(["run_sql"] as const);
+/** Appended once to the dispatched system prompt by warble (single line, at most 300 characters). */
+export const HOST_MCP_INSTRUCTION =
+  "Run data queries with mcp__wren_host__run_sql (sql, optional limit): it returns the rows plus a query_id; " +
+  "cite that query_id in your answer's definition.";
 
 const MODE_B_AGENT_ID = "answer_query";
 
@@ -60,6 +77,8 @@ export interface BuildAgentSdkChatArgsOptions {
    * `DispatchedOptions.resumeSessionId`.
    */
   readonly resume?: string;
+  /** This turn's host MCP config file (see `writeHostMcpConfig`), forwarded as `--host-mcp-config <path>`. */
+  readonly hostMcpConfig?: string;
 }
 
 /**
@@ -111,6 +130,7 @@ export function buildAgentSdkChatArgs(
       ...(options.modelsConfig !== undefined ? ["--models-config", options.modelsConfig] : []),
       ...(options.maxTurns !== undefined ? ["--max-turns", String(options.maxTurns)] : []),
       ...(options.resume !== undefined ? ["--resume", options.resume] : []),
+      ...(options.hostMcpConfig !== undefined ? ["--host-mcp-config", options.hostMcpConfig] : []),
       "--stream-json",
     ],
     input: `${encodeQuestionForStdin(options.question)}\n`,
@@ -229,43 +249,116 @@ export async function runDispatchedDefault(options: DispatchedOptions): Promise<
     const outDir = options.outDir ?? (await mkdtemp(path.join(os.tmpdir(), "wren-harness-agent-sdk-")));
     if (options.signal?.aborted) throw new Error("warble-agent-sdk chat was cancelled during preparation");
 
-    const command = buildAgentSdkChatArgs(cli, {
-      irPath,
-      userProject: options.userProject,
-      question: options.question,
-      outDir,
-      warbleBin,
-      agentId,
-      ...(options.modelsConfig !== undefined ? { modelsConfig: options.modelsConfig } : {}),
-      ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
-      ...(options.resumeSessionId !== undefined ? { resume: options.resumeSessionId } : {}),
-    });
+    // This turn's host query service, when the caller asked for one: the only place the host MCP's
+    // run_sql executes and the only evidence the answer can be grounded on. Closed (and its
+    // observations discarded) when the turn ends, whatever the outcome.
+    const host = await openAskHostQueries(options);
+    try {
+      const command = buildAgentSdkChatArgs(cli, {
+        irPath,
+        userProject: options.userProject,
+        question: options.question,
+        outDir,
+        warbleBin,
+        agentId,
+        ...(options.modelsConfig !== undefined ? { modelsConfig: options.modelsConfig } : {}),
+        ...(options.maxTurns !== undefined ? { maxTurns: options.maxTurns } : {}),
+        ...(options.resumeSessionId !== undefined ? { resume: options.resumeSessionId } : {}),
+        ...(host !== undefined ? { hostMcpConfig: host.configFile } : {}),
+      });
 
-    const { finalText, sessionId } = await spawnChat(
-      command,
-      (event) => emitter.emit(event),
-      options.chatTimeoutMs ?? CHAT_TIMEOUT_MS,
-      options.signal,
-    );
-    // `spawnChat` resolves with whatever trimmed final-answer text
-    // the process produced, even if that's empty — e.g. the CLI exits 0 but
-    // never printed a terminal answer line (a dispatcher bug, an unexpected
-    // output-format change, or a turn that produced no text). Treat that as
-    // a failure rather than a silent empty "answer".
-    if (finalText.length === 0) {
-      throw new Error(
-        "warble-agent-sdk chat exited successfully but produced no stdout — expected the turn's " +
-          "final answer text; got empty output",
+      const { finalText, sessionId } = await spawnChat(
+        command,
+        (event) => emitter.emit(event),
+        options.chatTimeoutMs ?? CHAT_TIMEOUT_MS,
+        options.signal,
       );
+      // `spawnChat` resolves with whatever trimmed final-answer text
+      // the process produced, even if that's empty — e.g. the CLI exits 0 but
+      // never printed a terminal answer line (a dispatcher bug, an unexpected
+      // output-format change, or a turn that produced no text). Treat that as
+      // a failure rather than a silent empty "answer".
+      if (finalText.length === 0) {
+        throw new Error(
+          "warble-agent-sdk chat exited successfully but produced no stdout — expected the turn's " +
+            "final answer text; got empty output",
+        );
+      }
+      const hostObservations = host?.service.observations();
+      emitter.emit({ kind: "answer", text: finalText });
+      emitter.emit({ kind: "run.finish", status: "answer" });
+      return {
+        finalText,
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(hostObservations !== undefined ? { hostObservations } : {}),
+      };
+    } finally {
+      await host?.service.close();
     }
-    emitter.emit({ kind: "answer", text: finalText });
-    emitter.emit({ kind: "run.finish", status: "answer" });
-    return { finalText, ...(sessionId !== undefined ? { sessionId } : {}) };
   } catch (error) {
     emitter.emit({ kind: "error", message: describeDispatchedError(error) });
     emitter.emit({ kind: "run.finish", status: "error" });
     throw error;
   }
+}
+
+/**
+ * Opens an Ask turn's host query service and writes its host MCP config, or returns `undefined`
+ * when the turn runs without one (not requested, a models config, or no `wren` on PATH).
+ */
+async function openAskHostQueries(options: DispatchedOptions): Promise<{ service: HostQueryService; configFile: string } | undefined> {
+  if (options.hostQueries === undefined || options.modelsConfig !== undefined) return undefined;
+  let wren: string;
+  try {
+    wren = options.hostQueries.wren ?? resolveExecutableOnPath("wren");
+  } catch {
+    return undefined;
+  }
+  const userProject = options.userProject;
+  const service = await openHostQueryService({
+    openAccess: async (signal) => openWrenComponentAccess({
+      executable: wren,
+      project: userProject,
+      fingerprint: await hashDirectory(userProject),
+      signal,
+    }),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
+  });
+  try {
+    const configFile = await writeHostMcpConfig(service, {
+      proxy: defaultWrenHostProxy(),
+      mcpServer: { command: wren, prefixArgs: [] },
+      userProject,
+    });
+    return { service, configFile };
+  } catch (error) {
+    await service.close();
+    throw error;
+  }
+}
+
+/**
+ * Writes the turn's `--host-mcp-config` file into the host query service's private 0700
+ * directory, as warble 0.16 reads it: a 0600 file owned by this user holding exactly
+ * `{name, command, args, tools, instruction}`, `command` absolute. The server is the Wren host
+ * proxy in front of `wren serve mcp`; the file names the credential file by path only, never its
+ * token. It is removed with the directory when the service closes.
+ */
+export async function writeHostMcpConfig(
+  service: Pick<HostQueryService, "directory" | "credentialFile">,
+  options: { readonly proxy: ResolvedCli; readonly mcpServer: ResolvedCli; readonly userProject: string },
+): Promise<string> {
+  if (!path.isAbsolute(options.proxy.command)) throw new Error("the host MCP command must be an absolute path");
+  const file = path.join(service.directory, "host-mcp.json");
+  const config = {
+    name: HOST_MCP_SERVER_NAME,
+    command: options.proxy.command,
+    args: wrenHostProxyArgs({ ...options, credentialFile: service.credentialFile }),
+    tools: [...HOST_MCP_TOOLS],
+    instruction: HOST_MCP_INSTRUCTION,
+  };
+  await writeFile(file, JSON.stringify(config), { encoding: "utf8", mode: 0o600, flag: "wx" });
+  return file;
 }
 
 function describeDispatchedError(error: unknown): string {

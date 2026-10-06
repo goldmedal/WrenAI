@@ -92,6 +92,9 @@ export async function route(options: RouteOptions): Promise<RouteResult> {
       ...(options.agentId !== undefined ? { agentId: options.agentId } : {}),
       ...(options.chatTimeoutMs !== undefined ? { chatTimeoutMs: options.chatTimeoutMs } : {}),
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      // An Ask turn: its data queries can run through a per-turn host query service, so the
+      // answer can be grounded on host evidence (see `withHostVerification`).
+      hostQueries: {},
     });
     return { backend: "agent-sdk", warnings, ...result };
   }

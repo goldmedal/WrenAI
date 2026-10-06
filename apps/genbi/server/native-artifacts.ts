@@ -8,6 +8,10 @@ import { lstatSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync }
 import path from "node:path";
 import { newId, type NativeSessionRow, type NativeStructuredAnswerRow, type Store } from "./db.js";
 import type { EnrichmentBinding } from "./enrichment.js";
+import type { ComponentAccess } from "../harness/components/broker.js";
+import type { RenderEnvelope } from "../harness/render/envelope.js";
+import { createHostQueryRecorder, type HostQueryOutcome, type HostQueryRecorder } from "../harness/route/host-query.js";
+import { groundOnHostEvidence } from "./host-evidence-grounding.js";
 
 const MAX_DASHBOARD_BYTES = 256 * 1024;
 const MAX_NAME_LENGTH = 120;
@@ -16,6 +20,7 @@ const ANSWER_REFERENCE_PATTERN = /^answer-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{
 export const NATIVE_MCP_CREDENTIAL_ENV_VAR = "WARBLE_MCP_CONNECTION_CREDENTIAL";
 export const NATIVE_MCP_TOOL_NAME = "save_dashboard";
 export const NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME = "persist_answer";
+export const NATIVE_MCP_QUERY_TOOL_NAME = "query";
 export const NATIVE_MCP_SERVER_LABEL = "GenBI MCP";
 export const NATIVE_MCP_ARTIFACTS_LABEL = "GenBI Artifacts";
 
@@ -59,7 +64,8 @@ const POSITIONAL_ROWS_SCHEMA = {
 } as const;
 
 /** The exact public MCP shape advertised to native clients and accepted by the host. */
-const VERIFIED_FIELD_SCHEMA = { type: "boolean", description: "Ignored: the host records verified only for an answer it produced from a grounded component run; anything submitted here is stored as unverified." } as const;
+const VERIFIED_FIELD_SCHEMA = { type: "boolean", description: "Ignored: the host decides verified itself. It records verified only for an answer it grounded: a grounded component run, or an answer whose every definition cites a query this session ran through the query tool. Anything submitted here is not a claim the host keeps." } as const;
+const QUERY_ID_SCHEMA = { ...SAFE_TEXT_SCHEMA, minLength: 1, maxLength: 64, description: "Optional: the query_id the query tool returned for the query this definition describes." } as const;
 
 export const NATIVE_SAVE_DASHBOARD_INPUT_SCHEMA = {
   type: "object",
@@ -86,7 +92,7 @@ export const NATIVE_SAVE_DASHBOARD_INPUT_SCHEMA = {
             { type: "object", additionalProperties: false, required: ["type", "label", "value"], properties: { type: { const: "kpi_card" }, label: SAFE_TEXT_SCHEMA, value: SAFE_TEXT_OR_NUMBER_SCHEMA, unit: NULLABLE_SAFE_TEXT_SCHEMA, delta: { type: ["number", "null"] } } },
             { type: "object", additionalProperties: false, required: ["type", "columns", "rows"], properties: { type: { const: "table" }, columns: { type: "array", minItems: 1, uniqueItems: true, items: { ...SAFE_TEXT_SCHEMA, minLength: 1 } }, rows: { ...POSITIONAL_ROWS_SCHEMA, description: NATIVE_SAVE_DASHBOARD_SEMANTIC_CONSTRAINTS.table.positionalRows } } },
             { type: "object", additionalProperties: false, required: ["type", "chart_type", "x", "series", "rows"], properties: { type: { const: "chart" }, chart_type: { enum: ["bar", "line", "pie", "area", "scatter"] }, x: { ...SAFE_TEXT_SCHEMA, minLength: 1, description: NATIVE_SAVE_DASHBOARD_SEMANTIC_CONSTRAINTS.chart.x }, series: { type: "array", minItems: 1, uniqueItems: true, description: NATIVE_SAVE_DASHBOARD_SEMANTIC_CONSTRAINTS.chart.series, items: { ...SAFE_TEXT_SCHEMA, minLength: 1 } }, rows: { ...POSITIONAL_ROWS_SCHEMA, description: NATIVE_SAVE_DASHBOARD_SEMANTIC_CONSTRAINTS.chart.positionalRows } } },
-            { type: "object", additionalProperties: false, required: ["type", "sql", "source_tables", "filters"], properties: { type: { const: "definition" }, sql: { ...SAFE_TEXT_SCHEMA, minLength: 1 }, source_tables: { type: "array", minItems: 1, items: { ...SAFE_TEXT_SCHEMA, minLength: 1 } }, filters: { type: "array", items: SAFE_TEXT_SCHEMA } } },
+            { type: "object", additionalProperties: false, required: ["type", "sql", "source_tables", "filters"], properties: { type: { const: "definition" }, sql: { ...SAFE_TEXT_SCHEMA, minLength: 1 }, source_tables: { type: "array", minItems: 1, items: { ...SAFE_TEXT_SCHEMA, minLength: 1 } }, filters: { type: "array", items: SAFE_TEXT_SCHEMA }, query_id: QUERY_ID_SCHEMA } },
             { type: "object", additionalProperties: false, required: ["type", "text"], properties: { type: { const: "narrative" }, text: { ...SAFE_TEXT_SCHEMA, minLength: 1 }, title: NULLABLE_SAFE_TEXT_SCHEMA } },
           ] },
         },
@@ -243,6 +249,38 @@ export const NATIVE_PERSIST_ANSWER_CONTRACT = {
   semanticConstraint: "The envelope contains exactly one typed table block and at most one typed definition block, with no presentation-only fields.",
 } as const;
 
+/** The session `query` tool: one read-only SQL query run by the host through governed access. */
+export const NATIVE_QUERY_INPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["sql"],
+  properties: {
+    sql: { type: "string", minLength: 1, description: "One read-only SELECT over the bound semantic models." },
+    limit: { type: "integer", minimum: 1, description: "Maximum rows to return (default 1000)." },
+  },
+} as const;
+
+/** The sentence the model sees per host error class; nothing from the governed transport is forwarded. */
+const NATIVE_QUERY_ERROR_TEXT: Readonly<Record<string, string>> = {
+  invalid_request: "The request did not match the query contract: pass a non-empty sql string and an optional positive integer limit.",
+  model_not_found: "The query references a table that is not a model in the bound semantic context; query only the models it defines.",
+  policy_rejected: "The read-only analytical policy rejected the query: use one SELECT that reads at least one bound model.",
+  invalid_sql: "The SQL could not be parsed or planned against the semantic context.",
+  execution_failed: "The data source rejected the query at execution time, for example an unknown column or a type mismatch.",
+  timeout: "The query exceeded the statement time limit.",
+  datasource_unavailable: "The bound data source could not be reached.",
+  result_too_large: "The result exceeded the governed byte limit; narrow the query.",
+  budget_exhausted: "This session's query budget is exhausted; answer from the results you already have.",
+  internal: "The governed query failed for an unclassified reason.",
+  transport: "The host query service is unavailable.",
+};
+
+export interface NativeQueryResult {
+  readonly isError: boolean;
+  readonly text: string;
+  readonly result?: unknown;
+}
+
 function rejectsExecutableText(value: unknown): boolean {
   if (typeof value === "string") return /<\s*\/?(?:script|html)\b|javascript\s*:/i.test(value);
   if (Array.isArray(value)) return value.some(rejectsExecutableText);
@@ -282,7 +320,7 @@ function validBlock(block: unknown): boolean {
         // Existing object rows remain exactly bound to x + series.
         : isRecord(row) && scalar(row[x]) && series.every((item) => scalar(row[item])) && Object.keys(row).every((key) => key === x || series.includes(key)));
     case "definition":
-      return onlyKeys(block, ["type", "sql", "source_tables", "filters"]) && typeof block.sql === "string" && block.sql.length > 0 && Array.isArray(block.source_tables) && block.source_tables.length > 0 && block.source_tables.every((source) => typeof source === "string" && source.length > 0) && Array.isArray(block.filters) && block.filters.every((filter) => typeof filter === "string");
+      return (onlyKeys(block, ["type", "sql", "source_tables", "filters"]) || (onlyKeys(block, ["type", "sql", "source_tables", "filters", "query_id"]) && typeof block.query_id === "string" && block.query_id.length > 0 && block.query_id.length <= 64)) && typeof block.sql === "string" && block.sql.length > 0 && Array.isArray(block.source_tables) && block.source_tables.length > 0 && block.source_tables.every((source) => typeof source === "string" && source.length > 0) && Array.isArray(block.filters) && block.filters.every((filter) => typeof filter === "string");
     case "narrative":
       return (onlyKeys(block, ["type", "text"]) || onlyKeys(block, ["type", "text", "title"])) && typeof block.text === "string" && block.text.length > 0 && (block.title === undefined || block.title === null || typeof block.title === "string");
     default:
@@ -325,6 +363,14 @@ function validateInput(value: unknown): SaveDashboardInput {
   }
   if (value.answer_selection !== "latest") throw new NativeArtifactError("invalid Save to Artifacts payload: answer_selection must be latest");
   return { version: "1", name: value.name, answer_selection: "latest", idempotency_key: value.idempotency_key };
+}
+
+function isValidSaveInput(value: unknown): boolean {
+  try { validateInput(value); return true; } catch { return false; }
+}
+
+function isValidPersistedStructuredAnswer(value: unknown): boolean {
+  try { validatePersistedStructuredAnswer(value); return true; } catch { return false; }
 }
 
 function validatePersistedStructuredAnswer(value: unknown): PersistStructuredAnswerInput {
@@ -373,6 +419,11 @@ export interface NativeArtifactServiceOptions {
   /** Optional override, accepted only when it is the expected local endpoint. */
   readonly mcpUrl: string;
   readonly getBinding: () => EnrichmentBinding | undefined;
+  /**
+   * Opens governed Wren access for one native analysis session's `query` tool, against the
+   * session's bound project. Without it, the tool is not offered.
+   */
+  readonly openQueryAccess?: (binding: EnrichmentBinding, signal: AbortSignal) => Promise<ComponentAccess>;
   /** Test-only seam; production writes one contained JSON file atomically. */
   readonly writeAtomic?: (target: string, contents: string) => void;
   /** Test-only seam for a persistence outage; production uses the typed Store method. */
@@ -384,6 +435,9 @@ export interface NativeArtifactServiceOptions {
 
 export class NativeArtifactService {
   private readonly credentials = new Map<string, NativeArtifactContext>();
+  /** One host query recorder per native session: its observations are never shared across sessions. */
+  private readonly queryRecorders = new Map<string, HostQueryRecorder>();
+  private readonly queryClosing = new Set<Promise<void>>();
   constructor(private readonly options: NativeArtifactServiceOptions) {}
 
   /** Validate the exact local BFF endpoint before advertising or issuing it. */
@@ -413,7 +467,73 @@ export class NativeArtifactService {
 
   revoke(credential: string | undefined): void {
     if (!credential) return;
+    const context = this.credentials.get(credential);
     this.credentials.delete(credential);
+    // A session can hold more than one credential (a Codex session's terminal and its component
+    // runtime each get one). Its query recorder lives until the session ends: the last credential
+    // for the session is revoked, which every session end and `dispose()` do.
+    if (context && ![...this.credentials.values()].some((other) => other.session.id === context.session.id)) this.closeQueries(context.session.id);
+  }
+
+  /** Whether native analysis sessions are offered the host `query` tool. */
+  queryAvailable(): boolean { return this.options.openQueryAccess !== undefined; }
+
+  /** Resolves once every session query recorder closed so far has released its governed access. */
+  async queriesClosed(): Promise<void> { await Promise.allSettled([...this.queryClosing]); }
+
+  private closeQueries(sessionId: string): void {
+    const recorder = this.queryRecorders.get(sessionId);
+    if (!recorder) return;
+    this.queryRecorders.delete(sessionId);
+    const closing = recorder.close();
+    this.queryClosing.add(closing);
+    void closing.finally(() => this.queryClosing.delete(closing));
+  }
+
+  /**
+   * The session `query` tool: runs one read-only query through governed access against the
+   * session's bound project, records it as this session's observation and returns its rows with
+   * a session-tagged host `query_id` that a later persist_answer or save_dashboard may cite.
+   */
+  async query(credential: string | undefined, input: unknown): Promise<NativeQueryResult> {
+    const session = this.authorize(credential);
+    const binding = this.credentials.get(credential!)?.binding;
+    const openQueryAccess = this.options.openQueryAccess;
+    if (session.purpose !== "analysis" || !binding || !openQueryAccess) throw new NativeArtifactError("the query tool is unavailable for this native session", 409);
+    const args = isRecord(input) ? input : {};
+    if (!isRecord(input) || !Object.keys(input).every((key) => key === "sql" || key === "limit")) return { isError: true, text: NATIVE_QUERY_ERROR_TEXT.invalid_request! };
+    let recorder = this.queryRecorders.get(session.id);
+    if (!recorder) {
+      recorder = createHostQueryRecorder({ openAccess: (signal) => openQueryAccess(binding, signal) });
+      this.queryRecorders.set(session.id, recorder);
+    }
+    const outcome: HostQueryOutcome = await recorder.execute(args.sql, args.limit);
+    if ("error" in outcome) return { isError: true, text: `Governed Wren query failed [${outcome.error}]: ${NATIVE_QUERY_ERROR_TEXT[outcome.error] ?? NATIVE_QUERY_ERROR_TEXT.internal}` };
+    return { isError: false, text: JSON.stringify(outcome.result), result: outcome.result };
+  }
+
+  /**
+   * The host's grounding decision for a model-written envelope: the same envelope rebuilt from
+   * this session's query observations when every query it cites grounds on them (see
+   * `groundOnHostEvidence`), else `undefined`. Only this decision reaches a grounded entry from
+   * the MCP surface.
+   */
+  private groundedEnvelope(credential: string | undefined, envelope: unknown): RenderEnvelope | undefined {
+    const context = credential === undefined ? undefined : this.credentials.get(credential);
+    const recorder = context ? this.queryRecorders.get(context.session.id) : undefined;
+    if (!recorder || !isRecord(envelope)) return undefined;
+    // The host rebuilds only table and definition blocks. Any other block (narrative, chart, KPI)
+    // or an `estimate` flag would be dropped by the rebuild, so such an envelope is never grounded:
+    // it is kept intact and stored unverified rather than losing content silently.
+    if (envelope.estimate !== undefined && envelope.estimate !== null) return undefined;
+    if (!Array.isArray(envelope.blocks) || envelope.blocks.some((block) => !isRecord(block) || (block.type !== "table" && block.type !== "definition"))) return undefined;
+    const grounded = groundOnHostEvidence(envelope as RenderEnvelope, envelope, recorder.observations());
+    if (grounded.verified !== true) return undefined;
+    // The rebuild emits one table and one definition per cited query. If it has fewer of either
+    // than the envelope did (an extra uncited table, say), content would be lost: keep it intact.
+    const count = (value: { blocks?: unknown }, type: string) => Array.isArray(value.blocks) ? value.blocks.filter((block) => isRecord(block) && block.type === type).length : 0;
+    if (count(grounded, "table") !== count(envelope, "table") || count(grounded, "definition") !== count(envelope, "definition")) return undefined;
+    return grounded;
   }
 
   /** Releases opaque credentials when the owning BFF service shuts down. */
@@ -466,6 +586,18 @@ export class NativeArtifactService {
    * a later follow-up can only reference this stored result, never recompute.
    */
   persistAnswer(credential: string | undefined, input: unknown): PersistedStructuredAnswer {
+    // Authorize before validating, as `persistStructured` does: a bad credential is a 401 and a
+    // non-analysis session a 409 whatever the payload.
+    const session = this.authorize(credential);
+    if (session.purpose !== "analysis") throw new NativeArtifactError("structured answer persistence is unavailable for this native session", 409);
+    const payload = validatePersistedStructuredAnswer(input);
+    const grounded = this.groundedEnvelope(credential, payload.envelope);
+    if (grounded) {
+      const candidate = { ...payload, envelope: grounded };
+      // A rebuilt envelope the persist contract cannot hold (a truncation note needs a summary,
+      // which this contract has no field for) is persisted unverified, as written.
+      if (isValidPersistedStructuredAnswer(candidate)) return this.persistStructured(credential, candidate, true);
+    }
     return this.persistStructured(credential, input, false);
   }
 
@@ -508,6 +640,15 @@ export class NativeArtifactService {
   }
 
   save(credential: string | undefined, input: unknown): SavedNativeArtifact {
+    // Authorize before validating, as `saveArtifact` does.
+    this.authorizeSave(credential);
+    const payload = validateInput(input);
+    // Only an envelope save is grounded here; a save by reference inherits the retained answer's provenance.
+    const grounded = "envelope" in payload ? this.groundedEnvelope(credential, payload.envelope) : undefined;
+    if (grounded) {
+      const candidate = { ...payload, envelope: grounded };
+      if (isValidSaveInput(candidate)) return this.saveArtifact(credential, candidate, true);
+    }
     return this.saveArtifact(credential, input, false);
   }
 
@@ -519,7 +660,8 @@ export class NativeArtifactService {
     return this.saveArtifact(credential, input, true);
   }
 
-  private saveArtifact(credential: string | undefined, input: unknown, grounded: boolean): SavedNativeArtifact {
+  /** The credential, session and binding checks every save runs before it reads its payload. */
+  private authorizeSave(credential: string | undefined): { session: NativeSessionRow; binding: EnrichmentBinding } {
     const context = credential === undefined ? undefined : this.credentials.get(credential);
     if (!context) throw new NativeArtifactError("GenBI MCP bearer credential is invalid. Restart this native session to refresh its GenBI MCP connection.", 401);
     const { session, binding } = context;
@@ -528,6 +670,11 @@ export class NativeArtifactService {
       this.revoke(credential);
       throw new NativeArtifactError("GenBI MCP session binding is stale. Start a new native session.", 409);
     }
+    return { session, binding };
+  }
+
+  private saveArtifact(credential: string | undefined, input: unknown, grounded: boolean): SavedNativeArtifact {
+    const { session, binding } = this.authorizeSave(credential);
     const payload = validateInput(input);
     const source = "answer_ref" in payload
       ? this.options.store.getNativeStructuredAnswer(payload.answer_ref)

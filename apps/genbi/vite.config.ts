@@ -92,6 +92,8 @@ export default defineConfig(({ mode }) => {
           name: 'backend',
           environment: 'node',
           include: ['test/**/*.test.ts'],
+          // Fails the run if a host query service directory is left behind.
+          globalSetup: ['./test/host-query-leak-teardown.ts'],
         },
       },
     ],

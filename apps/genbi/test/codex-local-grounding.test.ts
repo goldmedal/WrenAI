@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RouteResult } from "../harness/index.js";
-import type { HostQueryObservation } from "../harness/route/codex-host-query.js";
-import { truncationNote } from "../server/codex-local-grounding.js";
+import type { HostQueryObservation } from "../harness/route/host-query.js";
+import { truncationNote } from "../server/host-evidence-grounding.js";
 import { toAnswerOrRefusalEvent, withHostVerification } from "../server/fold.js";
 import type { AnswerEvent } from "../server/wire-types.js";
 

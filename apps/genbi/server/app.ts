@@ -30,7 +30,7 @@ import { INTERACTIVE_TARGETS, InteractiveLaunchError } from "./interactive-termi
 import type { InteractiveTarget, InteractiveTerminalSession } from "./interactive-terminal.js";
 import { nativeSessionLaunchErrorCode, nativeSessionLaunchFailure, nativeSessionLifecycle, NATIVE_PURPOSES, NATIVE_SETUP_RECOVERY_MCP_TOOL_NAME, NativeSetupRecoveryError } from "./native-sessions.js";
 import type { NativePurpose, NativeSessionResumeAvailability } from "./native-sessions.js";
-import { NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME, NATIVE_MCP_TOOL_NAME, NATIVE_PERSIST_ANSWER_CONTRACT, NATIVE_SAVE_DASHBOARD_CONTRACT, NativeArtifactError } from "./native-artifacts.js";
+import { NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME, NATIVE_MCP_QUERY_TOOL_NAME, NATIVE_MCP_TOOL_NAME, NATIVE_PERSIST_ANSWER_CONTRACT, NATIVE_QUERY_INPUT_SCHEMA, NATIVE_SAVE_DASHBOARD_CONTRACT, NativeArtifactError } from "./native-artifacts.js";
 import { sameNativeRuntimeBinding } from "./native-dispatch-registry.js";
 import { ProfileRegistryError, toWarbleProfileDto } from "./profile-registry.js";
 import { DEFAULT_CONVERSATION_PROFILE } from "./native-sessions.js";
@@ -1214,13 +1214,18 @@ export function createApp(deps: TurnDeps) {
     };
     const artifactTool = {
       name: NATIVE_MCP_TOOL_NAME,
-      description: "Save a dashboard to Artifacts. Use a prior persist_answer reference, or select this session's latest retained answer when the opaque reference is no longer available, without recomputing. The host marks the artifact verified only when the referenced answer is one it grounded itself; a dashboard built from a payload you write is stored as unverified. The existing payload form remains available for compatibility.",
+      description: "Save a dashboard to Artifacts. Use a prior persist_answer reference, or select this session's latest retained answer when the opaque reference is no longer available, without recomputing. The host marks the artifact verified only when the referenced answer is one it grounded itself, or when a payload you write holds only table and definition blocks (plus an optional summary) and every definition cites a query this session ran through the query tool (by its query_id, else its SQL); its tables and definitions are then rebuilt from those query results and your summary is kept. A payload with any other block (narrative, chart, KPI) or an estimate flag is stored intact and unverified, as is any other payload. The existing payload form remains available for compatibility.",
       inputSchema: NATIVE_SAVE_DASHBOARD_CONTRACT.inputSchema,
     };
     const persistAnswerTool = {
       name: NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME,
-      description: "Persist this answer's exact typed table and optional definition result before conversational presentation. idempotency_key is retry authority only; the host returns canonical provenance. On success, later save_dashboard calls should use its opaque answer_ref, with the session-scoped latest selector available if that ref leaves the conversation; on failure, present the answer but report that reference saving is unavailable.",
+      description: "Persist this answer's exact typed table and optional definition result before conversational presentation. idempotency_key is retry authority only; the host returns canonical provenance. On success, later save_dashboard calls should use its opaque answer_ref, with the session-scoped latest selector available if that ref leaves the conversation; on failure, present the answer but report that reference saving is unavailable. The host records the answer as verified only when its definition cites a query this session ran through the query tool (by its query_id, else its SQL); its table and definition are then rebuilt from that query's result. Any other answer is stored as written and unverified.",
       inputSchema: NATIVE_PERSIST_ANSWER_CONTRACT.inputSchema,
+    };
+    const queryTool = {
+      name: NATIVE_MCP_QUERY_TOOL_NAME,
+      description: "Run one read-only SQL query through the host and return its rows plus a query_id. Cite that query_id in the definition block of the answer you persist or save; only answers whose every definition cites a query this session ran here can be recorded as verified.",
+      inputSchema: NATIVE_QUERY_INPUT_SCHEMA,
     };
     const enrichmentSubmitTool = {
       name: NATIVE_ENRICHMENT_SUBMIT_MCP_TOOL_NAME,
@@ -1231,10 +1236,10 @@ export function createApp(deps: TurnDeps) {
     // purpose, not a widened "else" -- a purpose this switch doesn't name
     // fails to compile (via the `never` check below) instead of silently
     // inheriting whichever tool an else arm happened to name.
-    const nativeToolsForPurpose = (purpose: NativePurpose): readonly (typeof setupTool | typeof artifactTool | typeof persistAnswerTool | typeof enrichmentSubmitTool)[] => {
+    const nativeToolsForPurpose = (purpose: NativePurpose): readonly (typeof setupTool | typeof artifactTool | typeof persistAnswerTool | typeof queryTool | typeof enrichmentSubmitTool)[] => {
       switch (purpose) {
         case "setup": return [setupTool];
-        case "analysis": return [persistAnswerTool, artifactTool];
+        case "analysis": return deps.nativeArtifacts?.queryAvailable() ? [queryTool, persistAnswerTool, artifactTool] : [persistAnswerTool, artifactTool];
         case "context_enrichment": return [enrichmentSubmitTool];
         default: { const exhaustive: never = purpose; throw new Error(`unhandled native purpose: ${String(exhaustive)}`); }
       }
@@ -1256,6 +1261,10 @@ export function createApp(deps: TurnDeps) {
       if (nativeSession.purpose === "analysis" && request.params.name === NATIVE_MCP_TOOL_NAME) {
         const saved = deps.nativeArtifacts.save(credential, request.params.arguments);
         return c.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(saved) }], structuredContent: saved } });
+      }
+      if (nativeSession.purpose === "analysis" && request.params.name === NATIVE_MCP_QUERY_TOOL_NAME && deps.nativeArtifacts.queryAvailable()) {
+        const queried = await deps.nativeArtifacts.query(credential, request.params.arguments);
+        return c.json({ jsonrpc: "2.0", id, result: { isError: queried.isError, content: [{ type: "text", text: queried.text }], ...(queried.result !== undefined ? { structuredContent: queried.result } : {}) } });
       }
       if (nativeSession.purpose === "analysis" && request.params.name === NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME) {
         const persisted = deps.nativeArtifacts.persistAnswer(credential, request.params.arguments);

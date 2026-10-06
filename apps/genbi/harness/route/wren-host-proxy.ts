@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * codex:local's Wren MCP server: a stdio proxy in front of `wren serve mcp`.
+ * The Wren MCP server of a subscription Ask turn (codex:local, and the Claude agent-sdk host MCP):
+ * a stdio proxy in front of `wren serve mcp`.
  *
- *   node codex-wren-proxy.js --credential-file <abs path> -- <wren> serve mcp --project <p> --quiet
+ *   node wren-host-proxy.js --credential-file <abs path> -- <wren> serve mcp --project <p> --quiet
  *
  * Every JSON-RPC line passes through to the child `wren serve mcp` unchanged, so the model sees
  * the same tool names and schemas, except a `tools/call` of `run_sql`: that goes to this turn's
- * host query service (see `codex-host-query.ts`), which executes it through governed access and
+ * host query service (see `host-query.ts`), which executes it through governed access and
  * records it as host evidence. The credential file (0600, owned by this user) names the turn's
  * unix socket and token; without a valid one, `run_sql` is refused rather than run elsewhere.
  *
@@ -142,7 +143,7 @@ export class HostConnection {
 function parseArgs(argv: readonly string[]): { credentialFile?: string; command: string; args: string[] } {
   const separator = argv.indexOf("--");
   if (separator < 0 || separator === argv.length - 1) {
-    process.stderr.write("codex wren proxy: usage: --credential-file <path> -- <command> [args...]\n");
+    process.stderr.write("wren host proxy: usage: --credential-file <path> -- <command> [args...]\n");
     process.exit(2);
   }
   const own = argv.slice(0, separator);
@@ -158,7 +159,7 @@ function main(): void {
 
   const child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "inherit"] });
   child.on("error", (error) => {
-    process.stderr.write(`codex wren proxy: could not start the Wren MCP server: ${error.message}\n`);
+    process.stderr.write(`wren host proxy: could not start the Wren MCP server: ${error.message}\n`);
     process.exit(1);
   });
   child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
