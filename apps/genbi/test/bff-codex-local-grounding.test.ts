@@ -7,6 +7,7 @@ import { Store } from "../server/db.js";
 import type { AnswerEvent } from "../server/wire-types.js";
 import { route, type Bundle, type CodexAskExecutor, type DispatchedExecutor } from "../harness/index.js";
 import { runCodexAskDefault } from "../harness/route/codex-ask.js";
+import { truncationNote } from "../server/codex-local-grounding.js";
 import type { TurnDeps } from "../server/turn.js";
 import { parseSse } from "./bff-sse-helpers.js";
 import { fakeWrenWorkspace } from "./codex-host-evidence-helpers.js";
@@ -107,6 +108,19 @@ describe("codex:local answers are grounded against this turn's host query observ
       { type: "table", columns: ["order_count"], rows: [{ order_count: 42 }] },
       { type: "definition", sql: ORDERS_SQL, source_tables: ["orders"], filters: [], query_id: expect.stringMatching(/^q1-/) },
     ]);
+  });
+
+  it("verifies a cited truncated result for the rows shown, with a host truncation note", async () => {
+    const bff = codexBff();
+    const sql = "SELECT id FROM customers";
+    const envelope = envelopeOf(await bff.ask({ calls: [{ name: "run_sql", arguments: { sql, limit: 2 } }],
+      answer: { columns: ["id"], rows: [[1], [2]], summary: "There are 2 customers.", definition: { query_id: "$QID0" } } }));
+    expect(envelope.verified).toBe(true);
+    expect(envelope.blocks).toEqual([
+      { type: "table", columns: ["id"], rows: [{ id: 1 }, { id: 2 }] },
+      { type: "definition", sql, source_tables: ["customers"], filters: [], query_id: expect.stringMatching(/^q1-/) },
+    ]);
+    expect(envelope.summary).toBe(`There are 2 customers.\n\n${truncationNote(2)}`);
   });
 
   it("leaves an answer citing nothing unverified, even after a host-run query", async () => {

@@ -15,6 +15,14 @@ if (mode === "governed-stdio") {
       // A host that failed to refuse a query reading no table: the definition proves no source.
       return write({ id: request.id, result: { columns: ["n"], rows: [{ n: 424 }], definition: { sql, source_tables: [], filters: [] } } });
     }
+    if (/\bfrom\s+customers\b/i.test(sql)) {
+      // Five customers in all: a limit below that returns exactly `limit` rows.
+      const count = Math.min(request.limit, 5);
+      return write({ id: request.id, result: {
+        columns: ["id"], rows: Array.from({ length: count }, (_, index) => ({ id: index + 1 })),
+        definition: { sql, source_tables: ["customers"], filters: [] },
+      } });
+    }
     if (!/\bfrom\s+orders\b/i.test(sql)) {
       // Like the real transport: a query that reads no model is refused before execution.
       return write({ id: request.id, error: { class: "policy_rejected", message: "x" } });

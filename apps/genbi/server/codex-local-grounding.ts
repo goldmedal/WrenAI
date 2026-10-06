@@ -50,7 +50,9 @@ function citations(envelope: RenderEnvelope, finalText: string): Citation[] {
  *
  * Verified only when the answer cites at least one query and every citation grounds. The
  * envelope is then rebuilt from the observations alone: one `table` and one `definition` block
- * (carrying the observed `query_id`) per cited query, plus the model's `summary` text. Anything else stays the model's answer with
+ * (carrying the observed `query_id`) per cited query, plus the model's `summary` text as written.
+ * A cited result the host saw truncated still grounds the rows it shows; the host then appends
+ * a note to `summary`, the only place the render contract carries such text. Anything else stays the model's answer with
  * `verified: false`: no citation, a citation to a query this turn never ran (including one from
  * an earlier turn), a query that read no table, or chart / KPI blocks the host cannot rebuild.
  */
@@ -66,17 +68,29 @@ export function groundCodexLocalEnvelope(
   const cited = citations(envelope, finalText);
   if (cited.length === 0) return unverified;
   const rebuilt: Record<string, unknown>[] = [];
+  const notes: string[] = [];
   for (const citation of cited) {
     const query = citedGroundedQuery(observations, citation);
     if (!query) return unverified;
+    const observation = observations.find((call) => (call.output as { query_id?: unknown } | null)?.query_id === query.queryId);
+    if ((observation?.output as { truncated?: unknown } | undefined)?.truncated === true) notes.push(truncationNote(query.table.rows.length));
     // The definition keeps the observed query's host id, so grounding the rebuilt envelope
     // again (the artifact path does) resolves to the very same observation.
     rebuilt.push({ type: "table", columns: query.table.columns, rows: query.table.rows },
       { type: "definition", ...query.definition, ...(query.queryId !== undefined ? { query_id: query.queryId } : {}) });
   }
-  return {
-    blocks: rebuilt,
-    ...(typeof envelope.summary === "string" ? { summary: envelope.summary } : {}),
-    verified: true,
-  };
+  const summary = withNotes(typeof envelope.summary === "string" ? envelope.summary : undefined, notes);
+  return { blocks: rebuilt, ...(summary !== undefined ? { summary } : {}), verified: true };
+}
+
+/** Host-written, never model-written: a cited table that is only the first rows of its result. */
+export function truncationNote(shown: number): string {
+  return `Host note: this query returned more than ${shown} rows; the table shows only the first ${shown}.`;
+}
+
+/** Appends each host note once, so grounding an already-grounded envelope again changes nothing. */
+function withNotes(summary: string | undefined, notes: readonly string[]): string | undefined {
+  const missing = [...new Set(notes)].filter((note) => !summary?.includes(note));
+  if (missing.length === 0) return summary;
+  return [summary, ...missing].filter((part) => part !== undefined && part.length > 0).join("\n\n");
 }

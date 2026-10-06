@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RouteResult } from "../harness/index.js";
 import type { HostQueryObservation } from "../harness/route/codex-host-query.js";
+import { truncationNote } from "../server/codex-local-grounding.js";
 import { toAnswerOrRefusalEvent, withHostVerification } from "../server/fold.js";
 import type { AnswerEvent } from "../server/wire-types.js";
 
@@ -66,6 +67,17 @@ describe("codex:local grounding", () => {
       { type: "kpi_card", label: "order_count", value: 42 },
       { type: "definition", sql: SQL },
     ], verified: false });
+  });
+
+  it("grounds the rows a truncated result shows and appends a host note to the model's summary, once", () => {
+    const truncated: HostQueryObservation = { tool: "run_sql", input: { sql: SQL, limit: 1 },
+      output: { columns: ["order_count"], rows: [{ order_count: 42 }], row_count: 1, truncated: true, definition: { sql: SQL, source_tables: ["orders"], filters: [] }, query_id: "q1-aa" } };
+    const result = codex({ columns: ["order_count"], rows: [[42]], summary: "There are 42.", definition: { sql: SQL } }, [truncated]);
+    const grounded = envelope(result);
+    expect(grounded.verified).toBe(true);
+    expect(grounded.summary).toBe(`There are 42.\n\n${truncationNote(1)}`);
+    expect(withHostVerification(result, grounded)).toEqual(grounded);
+    expect(envelope(codex({ columns: ["order_count"], rows: [[42]], definition: { sql: SQL } }, [observed(SQL, "q1-aa")])).summary).toBeUndefined();
   });
 
   it("keeps agent-sdk unverified whatever its text claims", () => {

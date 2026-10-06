@@ -13,10 +13,11 @@
  * Node builtins only, and erasable TypeScript only, so it also runs from source.
  */
 import { spawn } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 
 const RUN_SQL = "run_sql";
 const MAX_SQL_BYTES = 65_536;
@@ -38,8 +39,105 @@ const ERROR_TEXT: Readonly<Record<string, string>> = {
 };
 const NO_CREDENTIAL = "run_sql is unavailable: no valid host query credential was provided for this turn.";
 
-interface Credential { readonly socket: string; readonly token: string }
-interface Pending { resolve(value: { result?: unknown; error?: string }): void }
+export interface Credential { readonly socket: string; readonly token: string }
+export interface HostOutcome { readonly result?: unknown; readonly error?: string }
+
+/**
+ * Accepts only an absolute, regular, user-owned file no one else can read or write. The file is
+ * opened without following a symlink and checked and read through that one descriptor, so what
+ * is checked is what is read.
+ */
+export function readCredential(file: string | undefined): Credential | undefined {
+  if (!file || !path.isAbsolute(file)) return undefined;
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0) return undefined;
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return undefined;
+    const value = JSON.parse(readFileSync(fd, "utf8")) as Record<string, unknown>;
+    if (typeof value.socket !== "string" || !path.isAbsolute(value.socket)) return undefined;
+    if (typeof value.token !== "string" || value.token.length < 32) return undefined;
+    return { socket: value.socket, token: value.token };
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * One connection at a time to the turn's host query service, reconnecting after a drop. Only
+ * the current socket's failure fails the pending requests (all of which were sent on it): a
+ * stale socket closing late never fails a request pending on its replacement. Each socket has
+ * its own read buffer.
+ */
+export class HostConnection {
+  private readonly credential: Credential;
+  private readonly open: (socketPath: string) => Socket;
+  private readonly pending = new Map<number, (outcome: HostOutcome) => void>();
+  private socket: Socket | undefined;
+  private nextId = 1;
+
+  constructor(credential: Credential, open: (socketPath: string) => Socket = connect) {
+    this.credential = credential;
+    this.open = open;
+  }
+
+  request(sql: string, limit: number | undefined): Promise<HostOutcome> {
+    return new Promise((resolve) => {
+      const id = this.nextId++;
+      try {
+        const socket = this.current();
+        this.pending.set(id, resolve);
+        socket.write(`${JSON.stringify({ token: this.credential.token, id, sql, ...(limit !== undefined ? { limit } : {}) })}\n`);
+      } catch {
+        this.pending.delete(id);
+        resolve({ error: "transport" });
+      }
+    });
+  }
+
+  close(): void {
+    this.socket?.end();
+  }
+
+  private current(): Socket {
+    if (this.socket && !this.socket.destroyed) return this.socket;
+    const socket = this.open(this.credential.socket);
+    let buffer = "";
+    const fail = (): void => {
+      if (this.socket !== socket) return;
+      this.socket = undefined;
+      for (const waiter of this.pending.values()) waiter({ error: "transport" });
+      this.pending.clear();
+    };
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+        try {
+          const frame = JSON.parse(line) as { id?: unknown; result?: unknown; error?: { class?: unknown } };
+          const waiter = typeof frame.id === "number" ? this.pending.get(frame.id) : undefined;
+          if (!waiter || typeof frame.id !== "number") continue;
+          this.pending.delete(frame.id);
+          if (frame.error !== undefined) waiter({ error: typeof frame.error?.class === "string" ? frame.error.class : "internal" });
+          else waiter({ result: frame.result });
+        } catch {
+          socket.destroy();
+        }
+      }
+    });
+    socket.on("error", fail);
+    socket.on("close", fail);
+    this.socket = socket;
+    return socket;
+  }
+}
 
 function parseArgs(argv: readonly string[]): { credentialFile?: string; command: string; args: string[] } {
   const separator = argv.indexOf("--");
@@ -53,122 +151,66 @@ function parseArgs(argv: readonly string[]): { credentialFile?: string; command:
   return { ...(credentialFile !== undefined ? { credentialFile } : {}), command: argv[separator + 1]!, args: argv.slice(separator + 2) };
 }
 
-/** Accepts only an absolute, regular, user-owned file no one else can read or write. */
-function readCredential(file: string | undefined): Credential | undefined {
-  if (!file || !path.isAbsolute(file)) return undefined;
-  try {
-    const stat = statSync(file);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0) return undefined;
-    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) return undefined;
-    const value = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
-    if (typeof value.socket !== "string" || !path.isAbsolute(value.socket)) return undefined;
-    if (typeof value.token !== "string" || value.token.length < 32) return undefined;
-    return { socket: value.socket, token: value.token };
-  } catch {
-    return undefined;
-  }
-}
+function main(): void {
+  const options = parseArgs(process.argv.slice(2));
+  const credential = readCredential(options.credentialFile);
+  const host = credential ? new HostConnection(credential) : undefined;
 
-const options = parseArgs(process.argv.slice(2));
-const credential = readCredential(options.credentialFile);
-
-const child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "inherit"] });
-child.on("error", (error) => {
-  process.stderr.write(`codex wren proxy: could not start the Wren MCP server: ${error.message}\n`);
-  process.exit(1);
-});
-child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
-createInterface({ input: child.stdout, crlfDelay: Infinity }).on("line", (line) => send(line));
-
-function send(line: string): void {
-  process.stdout.write(`${line}\n`);
-}
-
-function toolResult(id: unknown, text: string, isError: boolean, structured?: unknown): void {
-  send(JSON.stringify({ jsonrpc: "2.0", id, result: {
-    content: [{ type: "text", text }],
-    ...(structured !== undefined ? { structuredContent: structured } : {}),
-    isError,
-  } }));
-}
-
-let host: Socket | undefined;
-let hostBuffer = "";
-let nextHostId = 1;
-const pending = new Map<number, Pending>();
-
-function failAll(): void {
-  for (const waiter of pending.values()) waiter.resolve({ error: "transport" });
-  pending.clear();
-  host = undefined;
-}
-
-function hostSocket(target: Credential): Socket {
-  if (host && !host.destroyed) return host;
-  const socket = connect(target.socket);
-  socket.setEncoding("utf8");
-  socket.on("data", (chunk: string) => {
-    hostBuffer += chunk;
-    let newline = hostBuffer.indexOf("\n");
-    while (newline >= 0) {
-      const line = hostBuffer.slice(0, newline);
-      hostBuffer = hostBuffer.slice(newline + 1);
-      newline = hostBuffer.indexOf("\n");
-      try {
-        const frame = JSON.parse(line) as { id?: unknown; result?: unknown; error?: { class?: unknown } };
-        const waiter = typeof frame.id === "number" ? pending.get(frame.id) : undefined;
-        if (!waiter || typeof frame.id !== "number") continue;
-        pending.delete(frame.id);
-        if (frame.error !== undefined) waiter.resolve({ error: typeof frame.error?.class === "string" ? frame.error.class : "internal" });
-        else waiter.resolve({ result: frame.result });
-      } catch {
-        socket.destroy();
-      }
-    }
+  const child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "inherit"] });
+  child.on("error", (error) => {
+    process.stderr.write(`codex wren proxy: could not start the Wren MCP server: ${error.message}\n`);
+    process.exit(1);
   });
-  socket.on("error", failAll);
-  socket.on("close", failAll);
-  host = socket;
-  return socket;
-}
+  child.on("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 
-async function runSql(id: unknown, input: unknown): Promise<void> {
-  if (!credential) { toolResult(id, NO_CREDENTIAL, true); return; }
-  const args = typeof input === "object" && input !== null && !Array.isArray(input) ? input as Record<string, unknown> : {};
-  const { sql, limit } = args;
-  if (typeof sql !== "string" || !sql.trim() || Buffer.byteLength(sql) > MAX_SQL_BYTES
-    || (limit !== undefined && limit !== null && (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1))) {
-    toolResult(id, ERROR_TEXT.invalid_request!, true);
-    return;
-  }
-  const requestId = nextHostId++;
-  const outcome = await new Promise<{ result?: unknown; error?: string }>((resolve) => {
-    pending.set(requestId, { resolve });
-    try {
-      hostSocket(credential).write(`${JSON.stringify({ token: credential.token, id: requestId, sql, ...(typeof limit === "number" ? { limit } : {}) })}\n`);
-    } catch {
-      pending.delete(requestId);
-      resolve({ error: "transport" });
-    }
-  });
-  if (outcome.error !== undefined) {
-    toolResult(id, `Governed Wren query failed [${outcome.error in ERROR_TEXT ? outcome.error : "internal"}]: ${ERROR_TEXT[outcome.error] ?? ERROR_TEXT.internal}`, true);
-    return;
-  }
-  toolResult(id, JSON.stringify(outcome.result), false, outcome.result);
-}
+  const send = (line: string): void => { process.stdout.write(`${line}\n`); };
+  createInterface({ input: child.stdout, crlfDelay: Infinity }).on("line", send);
 
-createInterface({ input: process.stdin, crlfDelay: Infinity })
-  .on("line", (line) => {
-    let message: { id?: unknown; method?: unknown; params?: { name?: unknown; arguments?: unknown } } | undefined;
-    try { message = JSON.parse(line) as typeof message; } catch { message = undefined; }
-    if (message && message.method === "tools/call" && message.id !== undefined && message.params?.name === RUN_SQL) {
-      void runSql(message.id, message.params.arguments);
+  const toolResult = (id: unknown, text: string, isError: boolean, structured?: unknown): void => {
+    send(JSON.stringify({ jsonrpc: "2.0", id, result: {
+      content: [{ type: "text", text }],
+      ...(structured !== undefined ? { structuredContent: structured } : {}),
+      isError,
+    } }));
+  };
+
+  const runSql = async (id: unknown, input: unknown): Promise<void> => {
+    if (!host) { toolResult(id, NO_CREDENTIAL, true); return; }
+    const args = typeof input === "object" && input !== null && !Array.isArray(input) ? input as Record<string, unknown> : {};
+    const { sql, limit } = args;
+    if (typeof sql !== "string" || !sql.trim() || Buffer.byteLength(sql) > MAX_SQL_BYTES
+      || (limit !== undefined && limit !== null && (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1))) {
+      toolResult(id, ERROR_TEXT.invalid_request!, true);
       return;
     }
-    child.stdin.write(`${line}\n`);
-  })
-  .on("close", () => {
-    child.stdin.end();
-    host?.end();
-  });
+    const outcome = await host.request(sql, typeof limit === "number" ? limit : undefined);
+    if (outcome.error !== undefined) {
+      const known = outcome.error in ERROR_TEXT ? outcome.error : "internal";
+      toolResult(id, `Governed Wren query failed [${known}]: ${ERROR_TEXT[known]}`, true);
+      return;
+    }
+    toolResult(id, JSON.stringify(outcome.result), false, outcome.result);
+  };
+
+  createInterface({ input: process.stdin, crlfDelay: Infinity })
+    .on("line", (line) => {
+      let message: { id?: unknown; method?: unknown; params?: { name?: unknown; arguments?: unknown } } | undefined;
+      try { message = JSON.parse(line) as typeof message; } catch { message = undefined; }
+      if (message && message.method === "tools/call" && message.id !== undefined && message.params?.name === RUN_SQL) {
+        void runSql(message.id, message.params.arguments);
+        return;
+      }
+      child.stdin.write(`${line}\n`);
+    })
+    .on("close", () => {
+      child.stdin.end();
+      host?.close();
+    });
+}
+
+function invokedDirectly(): boolean {
+  if (process.argv[1] === undefined) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
+}
+
+if (invokedDirectly()) main();

@@ -21,7 +21,8 @@ export interface HostQueryObservation {
 /**
  * Per-turn bounds. Count, request and per-result bytes reuse the component runner's limits;
  * the total caps what the host keeps in memory for one turn until its answer is grounded.
- * Row defaults mirror `run_sql` (1000 by default, 10000 at most), which governed-stdio also caps.
+ * Rows default to 1000 like `run_sql`. Like `run_sql`, the host probes one row past the limit to
+ * report truncation; the cap is 9999 so the probe stays within governed-stdio's 10000-row bound.
  */
 export const CODEX_HOST_QUERY_LIMITS = Object.freeze({
   queries: COMPONENT_LIMITS.calls,
@@ -29,7 +30,7 @@ export const CODEX_HOST_QUERY_LIMITS = Object.freeze({
   resultBytes: COMPONENT_LIMITS.resultBytes,
   totalResultBytes: 8 * COMPONENT_LIMITS.resultBytes,
   defaultRows: 1000,
-  maxRows: 10_000,
+  maxRows: 9_999,
   timeoutMs: COMPONENT_LIMITS.timeoutMs,
 });
 
@@ -99,15 +100,21 @@ export async function openCodexHostQueryService(options: CodexHostQueryServiceOp
     try {
       access ??= options.openAccess(signal);
       const governed = await access;
-      result = await governed.query({ sql, limit: rows }, AbortSignal.any([signal, AbortSignal.timeout(CODEX_HOST_QUERY_LIMITS.timeoutMs)]));
+      result = await governed.query({ sql, limit: rows + 1 }, AbortSignal.any([signal, AbortSignal.timeout(CODEX_HOST_QUERY_LIMITS.timeoutMs)]));
     } catch (error) {
       return { error: error instanceof GovernedWrenError ? error.errorClass : "transport" };
     }
     if (closed) return { error: "transport" };
     if (typeof result !== "object" || result === null || Array.isArray(result)) return { error: "internal" };
-    // Assigned here, once, so the observation and the model's copy carry the same id. The tag
-    // makes ids unique per turn: an id copied from an earlier turn never names this turn's query.
-    const output = { ...(result as Record<string, unknown>), query_id: `q${attempts}-${turnTag}` };
+    const probed = (result as Record<string, unknown>).rows;
+    if (!Array.isArray(probed)) return { error: "internal" };
+    // The N+1 probe, as plain `run_sql` reports it: more rows than asked means the shown rows
+    // are not the whole result. Only `rows` rows are returned and recorded.
+    const truncated = probed.length > rows;
+    const shown = truncated ? probed.slice(0, rows) : probed;
+    // The id is assigned here, once, so the observation and the model's copy carry the same id. The
+    // tag makes ids unique per turn: an id copied from an earlier turn never names this turn's query.
+    const output = { ...(result as Record<string, unknown>), rows: shown, row_count: shown.length, truncated, query_id: `q${attempts}-${turnTag}` };
     const bytes = Buffer.byteLength(JSON.stringify(output));
     if (bytes > CODEX_HOST_QUERY_LIMITS.resultBytes) return { error: "result_too_large" };
     if (recordedBytes + bytes > CODEX_HOST_QUERY_LIMITS.totalResultBytes) return { error: "budget_exhausted" };

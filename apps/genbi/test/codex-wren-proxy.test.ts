@@ -1,7 +1,10 @@
-import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import type { Socket } from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CodexHostQueryService } from "../harness/route/codex-host-query.js";
+import { HostConnection } from "../harness/route/codex-wren-proxy.js";
 import { fakeWrenWorkspace, openTestHostService, startProxy } from "./codex-host-evidence-helpers.js";
 
 const ORDERS_SQL = "SELECT COUNT(*) AS order_count FROM orders";
@@ -61,6 +64,38 @@ describe("codex:local Wren MCP proxy", () => {
     expect(service.observations()).toHaveLength(0);
   });
 
+  it("reports truncation like plain run_sql: probes one row past the limit and returns only the limit", async () => {
+    const { wren, project, service } = await setup();
+    const client = proxy(["--credential-file", service.credentialFile], wren, project);
+    const sql = "SELECT id FROM customers";
+    const cut = (await client.call("tools/call", { name: "run_sql", arguments: { sql, limit: 3 } })).result?.structuredContent as Record<string, unknown>;
+    expect(cut).toMatchObject({ rows: [{ id: 1 }, { id: 2 }, { id: 3 }], row_count: 3, truncated: true });
+    const whole = (await client.call("tools/call", { name: "run_sql", arguments: { sql, limit: 10 } })).result?.structuredContent as Record<string, unknown>;
+    expect(whole).toMatchObject({ row_count: 5, truncated: false });
+    expect(service.observations().map((call) => [call.input.limit, (call.output as { rows: unknown[]; truncated: boolean }).rows.length, (call.output as { truncated: boolean }).truncated]))
+      .toEqual([[3, 3, true], [10, 5, false]]);
+  });
+
+  it("returns clear tool errors for table-less SQL and limit 0, recording neither", async () => {
+    const { wren, project, service } = await setup();
+    const client = proxy(["--credential-file", service.credentialFile], wren, project);
+    const literal = await client.call("tools/call", { name: "run_sql", arguments: { sql: "SELECT 42 AS n" } });
+    expect(literal.result).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("[policy_rejected]: The read-only analytical policy rejected the query") }] });
+    const zero = await client.call("tools/call", { name: "run_sql", arguments: { sql: ORDERS_SQL, limit: 0 } });
+    expect(zero.result).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("optional positive integer limit") }] });
+    expect(service.observations()).toHaveLength(0);
+  });
+
+  it("refuses a symlinked credential file, even one pointing at the turn's real credential", async () => {
+    const { wren, project, root, service } = await setup();
+    const link = path.join(root, "linked-credential.json");
+    symlinkSync(service.credentialFile, link);
+    const client = proxy(["--credential-file", link], wren, project);
+    const reply = await client.call("tools/call", { name: "run_sql", arguments: { sql: ORDERS_SQL } });
+    expect(reply.result).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("no valid host query credential") }] });
+    expect(service.observations()).toHaveLength(0);
+  });
+
   it("refuses a credential file that others can read", async () => {
     const { wren, project, root, service } = await setup();
     const copy = path.join(root, "shared-credential.json");
@@ -102,5 +137,31 @@ describe("codex:local Wren MCP proxy", () => {
     const after = await client.call("tools/call", { name: "run_sql", arguments: { sql: ORDERS_SQL } });
     expect(after.result).toMatchObject({ isError: true });
     expect(service.observations()).toHaveLength(0);
+  });
+});
+
+class FakeSocket extends EventEmitter {
+  destroyed = false;
+  readonly written: string[] = [];
+  setEncoding(): this { return this; }
+  write(line: string): boolean { this.written.push(line); return true; }
+  end(): this { return this; }
+}
+
+describe("codex:local proxy host connection", () => {
+  it("a stale socket closing late does not fail a request pending on its replacement", async () => {
+    const sockets = [new FakeSocket(), new FakeSocket()];
+    let opened = 0;
+    const connection = new HostConnection({ socket: "/unused", token: "t".repeat(43) }, () => sockets[opened++] as unknown as Socket);
+    const first = connection.request("SELECT 1 FROM orders", undefined);
+    sockets[0]!.emit("error", new Error("reset"));
+    await expect(first).resolves.toEqual({ error: "transport" });
+    sockets[0]!.destroyed = true;
+    const second = connection.request("SELECT 2 FROM orders", undefined);
+    expect(opened).toBe(2);
+    sockets[0]!.emit("close");
+    const id = (JSON.parse(sockets[1]!.written[0]!) as { id: number }).id;
+    sockets[1]!.emit("data", `${JSON.stringify({ id, result: { columns: ["n"], rows: [] } })}\n`);
+    await expect(second).resolves.toEqual({ result: { columns: ["n"], rows: [] } });
   });
 });
