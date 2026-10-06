@@ -151,7 +151,8 @@ describe("pi-ai adapter", () => {
     vi.stubEnv("GROQ_API_KEY", envKey);
     const gateway = fakePiGateway([{ text: "ok" }]);
     const model = createPiAiAdapter({ provider: "groq", model: "llama-3.1-8b-instant", fetch: gateway.fetch });
-    await generateText({ model, prompt: "hi" }).catch(() => undefined);
+    await expect(generateText({ model, prompt: "hi", maxRetries: 0 })).rejects.toThrow(/Provider is not configured: groq/);
+    expect(gateway.requests).toHaveLength(0);
     for (const request of gateway.requests) {
       expect(request.headers.get("authorization") ?? "").not.toContain(envKey);
     }

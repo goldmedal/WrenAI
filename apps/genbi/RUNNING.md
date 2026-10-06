@@ -294,6 +294,9 @@ of your own OpenAI-compatible endpoint. pi-ai is an optional dependency that
 needs Node.js >= 22.19 and is loaded only when a gateway model is called. It
 never reads provider environment variables, `~/.pi` or OAuth sign-ins: the BFF
 passes `GENBI_GATEWAY_API_KEY` with each request, and the CLI passes `--api-key`.
+Only credentials are sealed: pi-ai still reads non-secret provider settings from
+the environment, such as `AZURE_OPENAI_BASE_URL` / `AZURE_OPENAI_RESOURCE_NAME`
+for Azure and `AWS_PROFILE` / `AWS_REGION` for Bedrock.
 A gateway tier binding is `{ "adapter": "pi-ai", "config": { "provider": ..., "model": ... } }`.
 
 `extraBody` is merged into every request the `openai-compatible` adapter sends,

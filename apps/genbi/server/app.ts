@@ -86,6 +86,9 @@ import type {
   GatewayModelCatalog,
 } from "./wire-types.js";
 
+export const GATEWAY_CATALOG_UNAVAILABLE =
+  "gateway catalog unavailable: the optional dependency @earendil-works/pi-ai is not installed or Node >= 22.19 is required";
+
 /** Only explicit persisted settings can supersede the boot route or require repair. */
 function persistedRuntimeCorrection(deps: Pick<TurnDeps, "store">): string | undefined {
   return deps.store.hasExplicitRuntimeSettings() ? runtimeSettingsCorrection(deps.store.getRuntimeSettings()) : undefined;
@@ -1701,9 +1704,9 @@ export function createApp(deps: TurnDeps) {
         providers: catalog.providers,
         models: catalog.models.map((model) => ({ model: model.id, displayName: model.name })),
       });
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      return c.json<GatewayModelCatalog>({ status: "unavailable", reason });
+    } catch {
+      // A fixed reason: the load error is Node's module-resolution text, which can name local paths.
+      return c.json<GatewayModelCatalog>({ status: "unavailable", reason: GATEWAY_CATALOG_UNAVAILABLE });
     }
   });
 
