@@ -469,7 +469,10 @@ export class NativeArtifactService {
     if (!credential) return;
     const context = this.credentials.get(credential);
     this.credentials.delete(credential);
-    if (context) this.closeQueries(context.session.id);
+    // A session can hold more than one credential (a Codex session's terminal and its component
+    // runtime each get one). Its query recorder lives until the session ends: the last credential
+    // for the session is revoked, which every session end and `dispose()` do.
+    if (context && ![...this.credentials.values()].some((other) => other.session.id === context.session.id)) this.closeQueries(context.session.id);
   }
 
   /** Whether native analysis sessions are offered the host `query` tool. */
@@ -519,6 +522,11 @@ export class NativeArtifactService {
     const context = credential === undefined ? undefined : this.credentials.get(credential);
     const recorder = context ? this.queryRecorders.get(context.session.id) : undefined;
     if (!recorder || !isRecord(envelope)) return undefined;
+    // The host rebuilds only table and definition blocks. Any other block (narrative, chart, KPI)
+    // or an `estimate` flag would be dropped by the rebuild, so such an envelope is never grounded:
+    // it is kept intact and stored unverified rather than losing content silently.
+    if (envelope.estimate !== undefined && envelope.estimate !== null) return undefined;
+    if (!Array.isArray(envelope.blocks) || envelope.blocks.some((block) => !isRecord(block) || (block.type !== "table" && block.type !== "definition"))) return undefined;
     const grounded = groundOnHostEvidence(envelope as RenderEnvelope, envelope, recorder.observations());
     return grounded.verified === true ? grounded : undefined;
   }
@@ -573,6 +581,10 @@ export class NativeArtifactService {
    * a later follow-up can only reference this stored result, never recompute.
    */
   persistAnswer(credential: string | undefined, input: unknown): PersistedStructuredAnswer {
+    // Authorize before validating, as `persistStructured` does: a bad credential is a 401 and a
+    // non-analysis session a 409 whatever the payload.
+    const session = this.authorize(credential);
+    if (session.purpose !== "analysis") throw new NativeArtifactError("structured answer persistence is unavailable for this native session", 409);
     const payload = validatePersistedStructuredAnswer(input);
     const grounded = this.groundedEnvelope(credential, payload.envelope);
     if (grounded) {
@@ -623,6 +635,8 @@ export class NativeArtifactService {
   }
 
   save(credential: string | undefined, input: unknown): SavedNativeArtifact {
+    // Authorize before validating, as `saveArtifact` does.
+    this.authorizeSave(credential);
     const payload = validateInput(input);
     // Only an envelope save is grounded here; a save by reference inherits the retained answer's provenance.
     const grounded = "envelope" in payload ? this.groundedEnvelope(credential, payload.envelope) : undefined;
@@ -641,7 +655,8 @@ export class NativeArtifactService {
     return this.saveArtifact(credential, input, true);
   }
 
-  private saveArtifact(credential: string | undefined, input: unknown, grounded: boolean): SavedNativeArtifact {
+  /** The credential, session and binding checks every save runs before it reads its payload. */
+  private authorizeSave(credential: string | undefined): { session: NativeSessionRow; binding: EnrichmentBinding } {
     const context = credential === undefined ? undefined : this.credentials.get(credential);
     if (!context) throw new NativeArtifactError("GenBI MCP bearer credential is invalid. Restart this native session to refresh its GenBI MCP connection.", 401);
     const { session, binding } = context;
@@ -650,6 +665,11 @@ export class NativeArtifactService {
       this.revoke(credential);
       throw new NativeArtifactError("GenBI MCP session binding is stale. Start a new native session.", 409);
     }
+    return { session, binding };
+  }
+
+  private saveArtifact(credential: string | undefined, input: unknown, grounded: boolean): SavedNativeArtifact {
+    const { session, binding } = this.authorizeSave(credential);
     const payload = validateInput(input);
     const source = "answer_ref" in payload
       ? this.options.store.getNativeStructuredAnswer(payload.answer_ref)
