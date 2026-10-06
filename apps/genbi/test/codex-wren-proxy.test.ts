@@ -3,15 +3,15 @@ import { EventEmitter } from "node:events";
 import type { Socket } from "node:net";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { CodexHostQueryService } from "../harness/route/codex-host-query.js";
-import { HostConnection } from "../harness/route/codex-wren-proxy.js";
+import type { HostQueryService } from "../harness/route/host-query.js";
+import { HostConnection } from "../harness/route/wren-host-proxy.js";
 import { fakeWrenWorkspace, openTestHostService, startProxy } from "./codex-host-evidence-helpers.js";
 
 const ORDERS_SQL = "SELECT COUNT(*) AS order_count FROM orders";
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-async function setup(): Promise<{ wren: string; project: string; root: string; service: CodexHostQueryService }> {
+async function setup(): Promise<{ wren: string; project: string; root: string; service: HostQueryService }> {
   const workspace = fakeWrenWorkspace();
   cleanups.push(workspace.cleanup);
   const service = await openTestHostService(workspace.wren, workspace.project);

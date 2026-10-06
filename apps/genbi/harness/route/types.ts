@@ -174,6 +174,16 @@ export interface DispatchedOptions {
    * flag) when unset, which is the pre-existing behavior.
    */
   readonly resumeSessionId?: string;
+  /**
+   * Ask turns only (`route()` sets it; the setup and enrichment runners do not): open a per-turn
+   * host query service and hand the dispatcher a host MCP server (`--host-mcp-config`) whose
+   * `run_sql` executes through it, so the answer can be grounded on what the host ran. `wren` is
+   * the standalone Wren executable for both governed access and `wren serve mcp`; when unset it
+   * is resolved on PATH, and when none is found the turn runs without host queries (and its
+   * answer stays unverified). Ignored under `modelsConfig`: warble refuses a host MCP for a
+   * hybrid-staged plan, which a models config can produce.
+   */
+  readonly hostQueries?: { readonly wren?: string };
   /** Cancels the owned dispatcher process without falling back to another vendor. */
   readonly signal?: AbortSignal;
 }
@@ -189,6 +199,11 @@ export interface DispatchedResult {
    * the SDK itself never produced a session id to report.
    */
   readonly sessionId?: string | null;
+  /**
+   * Ask turns with host queries only: the queries this turn's host query service executed for
+   * the model's host `run_sql`, the only evidence its answer may be grounded on. Never persisted.
+   */
+  readonly hostObservations?: readonly import("./host-query.js").HostQueryObservation[];
 }
 
 export type DispatchedExecutor = (options: DispatchedOptions) => Promise<DispatchedResult>;
@@ -224,7 +239,7 @@ export interface CodexAskResult {
    * codex:local only: the queries this turn's host query service executed for the model's
    * `run_sql`, the only evidence its answer may be grounded on. Never persisted.
    */
-  readonly hostObservations?: readonly import("./codex-host-query.js").HostQueryObservation[];
+  readonly hostObservations?: readonly import("./host-query.js").HostQueryObservation[];
 }
 
 export type CodexAskExecutor = (options: CodexAskOptions) => Promise<CodexAskResult>;
