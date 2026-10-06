@@ -13,7 +13,7 @@ import type { ComponentAccess } from "../harness/components/broker.js";
 import { resolveArtifactsDir, type RouteOptions, type RouteResult } from "../harness/index.js";
 import { createApp } from "../server/app.js";
 import { Store } from "../server/db.js";
-import { NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME, NATIVE_MCP_QUERY_TOOL_NAME, NATIVE_MCP_TOOL_NAME, NativeArtifactService } from "../server/native-artifacts.js";
+import { NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME, NATIVE_MCP_QUERY_TOOL_NAME, NATIVE_MCP_TOOL_NAME, NativeArtifactError, NativeArtifactService } from "../server/native-artifacts.js";
 import type { TurnDeps } from "../server/turn.js";
 
 const NATIVE_MCP_URL = "http://127.0.0.1:4787/api/native-sessions/mcp";
@@ -93,7 +93,8 @@ function createFixture(options: { query?: boolean } = {}) {
     if (!id) throw new Error(`save failed: ${JSON.stringify(body)}`);
     return store.listArtifacts().find((artifact) => artifact.id === id)!;
   };
-  return { store, service, opened, session, mcp, query, persist, save };
+  const content = async (artifactId: string) => (await (await app.request(`/api/artifacts/${artifactId}/content`)).json()) as { envelope?: unknown };
+  return { store, service, binding, opened, session, mcp, query, persist, save, content };
 }
 
 const answer = (definition: Record<string, unknown> | undefined, value = 41) => ({
@@ -197,5 +198,55 @@ describe("native session query tool", () => {
     expect(f.opened[1]!.access.close).toHaveBeenCalledOnce();
     expect((await f.mcp(b, "tools/call", { name: NATIVE_MCP_QUERY_TOOL_NAME, arguments: { sql: ORDERS_SQL } })).status).toBe(401);
     expect(vi.mocked(mkdtemp).mock.calls.filter(([prefix]) => String(prefix).includes("genbi-hq-"))).toEqual([]);
+  });
+
+  it("keeps a cited envelope with a block the host does not rebuild intact and unverified, never dropping it", async () => {
+    const f = createFixture();
+    const credential = f.session("native-a");
+    const queryId = (await f.query(credential, ORDERS_SQL)).structuredContent!.query_id as string;
+    const cited = answer({ sql: ORDERS_SQL, query_id: queryId });
+    const narrative = { type: "narrative", text: "Orders held steady." };
+    const withNarrative = { ...cited, blocks: [...cited.blocks, narrative] };
+    const saved = await f.save(credential, { envelope: withNarrative });
+    expect(saved.verified).toBe(false);
+    expect((await f.content(saved.id)).envelope).toEqual({ ...withNarrative, verified: false });
+    const estimated = await f.save(credential, { envelope: { ...cited, estimate: true } });
+    expect(estimated.verified).toBe(false);
+    expect((await f.content(estimated.id)).envelope).toEqual({ ...cited, estimate: true, verified: false });
+    const pure = await f.save(credential, { envelope: { ...cited, summary: "There are 42 orders." } });
+    expect(pure.verified).toBe(true);
+    expect((await f.content(pure.id)).envelope).toEqual({ verified: true, summary: "There are 42 orders.", blocks: [
+      { type: "table", columns: ["order_count"], rows: [{ order_count: 42 }] },
+      { type: "definition", sql: ORDERS_SQL, source_tables: ["orders"], filters: [], query_id: queryId },
+    ] });
+  });
+
+  it("authorizes before validating: a revoked credential is 401 and a non-analysis session 409, whatever the payload", () => {
+    const f = createFixture();
+    const credential = f.session("native-a");
+    f.service.revoke(credential);
+    const status = (run: () => unknown) => { try { run(); return "ok"; } catch (error) { return error instanceof NativeArtifactError ? error.status : String(error); } };
+    expect(status(() => f.service.save(credential, { malformed: true }))).toBe(401);
+    expect(status(() => f.service.persistAnswer(credential, { malformed: true }))).toBe(401);
+    f.store.createNativeSession({ id: "native-setup", purpose: "setup", vendor: "claude", agent: "setup", scopeKind: "bootstrap", scopeId: "scope-setup" });
+    f.store.transitionNativeSession("native-setup", "running", { started: true });
+    const setup = f.service.issue(f.store.getNativeSession("native-setup")!, undefined).credential;
+    expect(status(() => f.service.persistAnswer(setup, { malformed: true }))).toBe(409);
+    expect(status(() => f.service.save(setup, { malformed: true }))).toBe(409);
+  });
+
+  it("keeps a session's recorder until its last credential is revoked", async () => {
+    const f = createFixture();
+    const terminal = f.session("native-a");
+    // A Codex session's component runtime holds a second credential for the same session.
+    const runtime = f.service.issue(f.store.getNativeSession("native-a")!, f.binding).credential;
+    const queryId = (await f.query(terminal, ORDERS_SQL)).structuredContent!.query_id as string;
+    f.service.revoke(runtime);
+    await f.service.queriesClosed();
+    expect(f.opened[0]!.access.close).not.toHaveBeenCalled();
+    expect((await f.persist(terminal, answer({ sql: ORDERS_SQL, query_id: queryId }))).grounded).toBe(true);
+    f.service.revoke(terminal);
+    await f.service.queriesClosed();
+    expect(f.opened[0]!.access.close).toHaveBeenCalledOnce();
   });
 });

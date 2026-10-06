@@ -16,11 +16,15 @@ const scriptPath = [...question.matchAll(/script:(\S+?\.json)/g)].at(-1)?.[1];
 const script = JSON.parse(readFileSync(scriptPath, "utf8"));
 
 const configStat = configPath !== undefined ? (({ mode, uid }) => ({ mode: mode & 0o777, uid }))(lstatSync(configPath)) : undefined;
-const configKeys = configPath !== undefined ? Object.keys(JSON.parse(readFileSync(configPath, "utf8"))) : undefined;
+const configRaw = configPath !== undefined ? readFileSync(configPath, "utf8") : undefined;
+const configKeys = configRaw !== undefined ? Object.keys(JSON.parse(configRaw)) : undefined;
 let config;
 let configError;
 try { config = configPath !== undefined ? loadHostMcpConfig(configPath) : undefined; } catch (error) { configError = error.message; }
 
+// Test-only: the token the credential file holds, so a test can prove argv and the config never carry it.
+const credentialArg = config ? config.args[config.args.indexOf("--credential-file") + 1] : undefined;
+const credentialToken = credentialArg ? JSON.parse(readFileSync(credentialArg, "utf8")).token : undefined;
 const results = [];
 let listed;
 if (config) {
@@ -60,7 +64,7 @@ const substitute = (value) => {
 };
 const answer = substitute(script.answer);
 if (script.capture) {
-  writeFileSync(script.capture, JSON.stringify({ args, configPath, configStat, configKeys, config, configError, tools: listed?.result?.tools?.map((tool) => tool.name), results, answer }));
+  writeFileSync(script.capture, JSON.stringify({ args, configPath, configRaw, credentialToken, configStat, configKeys, config, configError, tools: listed?.result?.tools?.map((tool) => tool.name), results, answer }));
 }
 process.stdout.write(`${JSON.stringify({ t: "session", id: "fake-session" })}\n`);
 process.stdout.write(`${JSON.stringify({ t: "answer", text: typeof answer === "string" ? answer : JSON.stringify(answer) })}\n`);
