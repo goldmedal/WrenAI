@@ -15,7 +15,7 @@
  */
 import type { AgentEvent, RouteResult, StepTrace } from "../harness/index.js";
 import { BUILD_DASHBOARD_TOOL_NAME, extractEnvelopeFromText, WREN_QUERY_TOOL_NAME } from "../harness/index.js";
-import type { AnswerEvent, ArtifactEvent, ArtifactKind, RefusalEvent, ToolStep } from "./wire-types.js";
+import type { AnswerEvent, ArtifactEvent, ArtifactKind, RefusalEvent, RenderEnvelope, ToolStep } from "./wire-types.js";
 
 /**
  * Canned remediation text for a refusal. `RefusalAgentEvent`/`RefusalResult`
@@ -57,9 +57,10 @@ export function extractTrace(result: RouteResult): StepTrace | undefined {
  * on the floor and the raw text always went out as `form: "text"`,
  * `verified: false`). `extractEnvelopeFromText` recovers it — including
  * `answer_query`'s flat `{columns, rows}` tool-contract shape, normalized
- * into a `table` block — and `verified` is whatever the recovered envelope
- * actually carries, never hardcoded. Only when no envelope can be recovered
- * at all does the raw text fall back to `form: "text"`.
+ * into a `table` block. The recovered envelope's `verified` is model-written,
+ * so {@link withHostVerification} forces it to `false` (see there). Only when
+ * no envelope can be recovered at all does the raw text fall back to
+ * `form: "text"`.
  *
  * That `form: "text"` fallback is the one case where "verified: false" is
  * ambiguous between two very different situations: a pure conversational
@@ -83,7 +84,7 @@ export function toAnswerOrRefusalEvent(
   if (result.backend === "agent-sdk" || result.backend === "codex-local") {
     const envelope = extractEnvelopeFromText(result.finalText);
     if (envelope !== undefined) {
-      return { id, kind: "answer", answer: { form: "rich", envelope } };
+      return { id, kind: "answer", answer: { form: "rich", envelope: withHostVerification(result.backend, envelope) } };
     }
     return {
       id,
@@ -95,6 +96,24 @@ export function toAnswerOrRefusalEvent(
     return { id, kind: "answer", answer: { form: "rich", envelope: result.envelope } };
   }
   return { id, kind: "refusal", reason: result.reason, fix: REFUSAL_FIX_HINT };
+}
+
+/**
+ * Backends whose answer reaches the BFF only as model-written text. The host
+ * runs none of their queries itself and holds no query evidence for them, so
+ * a `verified` field in that text is the model's own claim, not a grounding
+ * check.
+ */
+const MODEL_TEXT_BACKENDS: ReadonlySet<RouteResult["backend"]> = new Set(["agent-sdk", "codex-local"]);
+
+/**
+ * The one place a subscription answer's `verified` is decided: for a backend
+ * without host-held query evidence it is always `false`, whatever the model
+ * wrote. The rest of the envelope (summary, blocks) is kept as-is, so the
+ * answer is still shown, badged "Unverified". Other backends pass through.
+ */
+export function withHostVerification(backend: RouteResult["backend"], envelope: RenderEnvelope): RenderEnvelope {
+  return MODEL_TEXT_BACKENDS.has(backend) ? { ...envelope, verified: false } : envelope;
 }
 
 /** In-process's native in-process tool names that constitute an actual data claim — schema browsing / artifact saving don't count. */

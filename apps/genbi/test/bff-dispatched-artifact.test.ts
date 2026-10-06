@@ -121,7 +121,7 @@ describe("dispatched dashboard/report turns persist an artifact from the recover
     // ordering (artifact frame first) covered in bff-artifact-publish.test.ts.
     expect(frames.map((f) => f.event)).toEqual(["worklog", "event", "event", "done"]);
     expect(frames[1]?.data).toMatchObject({ kind: "artifact", artifactKind: "dashboard" });
-    expect(frames[2]?.data).toMatchObject({ kind: "answer", answer: { form: "rich", envelope } });
+    expect(frames[2]?.data).toMatchObject({ kind: "answer", answer: { form: "rich", envelope: { ...envelope, verified: false } } });
 
     // A dispatched-created artifact doesn't appear on the Artifacts page until explicitly saved.
     expect((await (await app.request("/api/artifacts")).json()) as ArtifactDto[]).toHaveLength(0);
@@ -130,15 +130,14 @@ describe("dispatched dashboard/report turns persist an artifact from the recover
     const artifact = (await (await app.request(`/api/artifacts/${artifactId}`)).json()) as ArtifactDto;
     expect(artifact.sessionId).toBe(session.id);
     expect(artifact.artifactKind).toBe("dashboard");
-    // Verified comes from the envelope's own field, never hardcoded —
-    // In-process defaults a freshly-produced artifact to unverified; dispatched doesn't.
-    expect(artifact.verified).toBe(true);
+    // The model wrote verified: true, but this backend has no host-held query evidence.
+    expect(artifact.verified).toBe(false);
 
     // Self-contained persisted representation: the envelope JSON, verbatim, on disk.
     expect(artifact.location).toBeDefined();
     const location = artifact.location;
     expect(existsSync(location)).toBe(true);
-    expect(JSON.parse(readFileSync(location, "utf8"))).toEqual(envelope);
+    expect(JSON.parse(readFileSync(location, "utf8"))).toEqual({ ...envelope, verified: false });
     expect(location.startsWith(path.join(outDir, session.id))).toBe(true);
 
     await app.request(`/api/sessions/${session.id}/artifacts/${artifactId}/save`, { method: "POST" });
@@ -180,11 +179,11 @@ describe("dispatched dashboard/report turns persist an artifact from the recover
     );
     expect(artifactFrames).toHaveLength(1);
     expect(first.find((frame) => frame.event === "event" && (frame.data as { kind?: string }).kind === "answer")?.data)
-      .toMatchObject({ kind: "answer", answer: { form: "rich", envelope } });
+      .toMatchObject({ kind: "answer", answer: { form: "rich", envelope: { ...envelope, verified: false } } });
     const artifactId = (artifactFrames[0]!.data as { artifactId: string }).artifactId;
     expect((await (await app.request(`/api/artifacts/${artifactId}`)).json()) as ArtifactDto).toMatchObject({
       artifactKind: "dashboard",
-      verified: true,
+      verified: false,
     });
 
     const replay = parseSse(await (await app.request(`/api/sessions/${session.id}/stream?turn=${turnId}`)).text());
@@ -224,6 +223,28 @@ describe("dispatched dashboard/report turns persist an artifact from the recover
     const artifacts = (await (await app.request("/api/artifacts")).json()) as ArtifactDto[];
     expect(artifacts).toHaveLength(1);
     expect(artifacts[0]?.artifactKind).toBe("report");
+  });
+
+  it.each([
+    ["Claude subscription (agent-sdk)", dispatchedRoute],
+    ["Codex subscription (codex-local)", codexRoute],
+  ] as const)("a %s Ask answer whose model text says verified: true is emitted and stored unverified", async (_label, makeRoute) => {
+    const envelope = { blocks: [{ type: "table", columns: ["revenue"], rows: [[424]] }], summary: "Revenue is 424.", verified: true };
+    const app = createApp(buildDeps(makeRoute(fencedEnvelope(envelope))));
+
+    const session = (await (await app.request("/api/sessions", { method: "POST", body: "{}" })).json()) as { id: string };
+    const { turnId } = (await (
+      await app.request(`/api/sessions/${session.id}/turns`, { method: "POST", body: JSON.stringify({ question: "What is total revenue?" }) })
+    ).json()) as { turnId: string };
+
+    const unverifiedAnswer = { kind: "answer", answer: { form: "rich", envelope: { ...envelope, verified: false } } };
+    const live = parseSse(await (await app.request(`/api/sessions/${session.id}/stream?turn=${turnId}`)).text());
+    expect(live.find((f) => f.event === "event")?.data).toMatchObject(unverifiedAnswer);
+    const worklog = live.find((f) => f.event === "worklog")?.data as { label: string }[];
+    expect(worklog.some((step) => step.label === "Verify gate")).toBe(false);
+
+    const replay = parseSse(await (await app.request(`/api/sessions/${session.id}/stream?turn=${turnId}`)).text());
+    expect(replay.find((f) => f.event === "event")?.data).toMatchObject(unverifiedAnswer);
   });
 
   it("a plain answer_query rich answer on dispatched does NOT create an artifact", async () => {

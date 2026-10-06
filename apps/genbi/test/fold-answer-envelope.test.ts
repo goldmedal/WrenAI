@@ -9,10 +9,10 @@ import type { RouteResult } from "../harness/index.js";
  * results, never attempting to recover the render envelope the dispatched
  * agent actually produced in its `finalText`. These tests cover the fix:
  * extracting that envelope (via `extractEnvelopeFromText`) into `form:
- * "rich"`, with `verified` coming from whatever the recovered envelope
- * actually carries — plus the flat `{columns, rows}` and MCP
- * `CallToolResult` shapes that must normalize into a `table` block instead
- * of falling back to raw-JSON text.
+ * "rich"` — plus the flat `{columns, rows}` and MCP `CallToolResult` shapes
+ * that must normalize into a `table` block instead of falling back to
+ * raw-JSON text. Neither backend has host-held query evidence, so the
+ * recovered envelope is always `verified: false`, whatever the model wrote.
  */
 function agentSdkResult(finalText: string): RouteResult {
   return { backend: "agent-sdk", warnings: [], finalText };
@@ -23,7 +23,7 @@ function codexResult(finalText: string): RouteResult {
 }
 
 describe("toAnswerOrRefusalEvent (dispatched / agent-sdk backend): recovers a render envelope from finalText", () => {
-  it("extracts a fenced ```json {blocks} envelope into form: 'rich', with verified from the envelope itself", () => {
+  it("extracts a fenced ```json {blocks} envelope into form: 'rich', keeping its blocks but never its model-written verified", () => {
     const envelope = {
       blocks: [
         { type: "kpi_card", label: "Revenue", value: 42000 },
@@ -39,8 +39,7 @@ describe("toAnswerOrRefusalEvent (dispatched / agent-sdk backend): recovers a re
     expect(event.kind).toBe("answer");
     expect(event.answer.form).toBe("rich");
     if (event.answer.form !== "rich") throw new Error("expected rich form");
-    expect(event.answer.envelope).toEqual(envelope);
-    expect(event.answer.envelope.verified).toBe(true);
+    expect(event.answer.envelope).toEqual({ ...envelope, verified: false });
   });
 
   it("normalizes answer_query's flat {columns, rows, verified} tool-contract shape into a table block", () => {
@@ -59,18 +58,18 @@ describe("toAnswerOrRefusalEvent (dispatched / agent-sdk backend): recovers a re
     expect(event.answer.form).toBe("rich");
     if (event.answer.form !== "rich") throw new Error("expected rich form");
     expect(event.answer.envelope.blocks).toEqual([{ type: "table", columns: flat.columns, rows: flat.rows }]);
-    expect(event.answer.envelope.verified).toBe(true);
+    expect(event.answer.envelope.verified).toBe(false);
   });
 
-  it("normalizes the same verified flat answer from codex:local", () => {
+  it("normalizes the same flat answer from codex:local and drops its model-written verified", () => {
     const flat = { columns: ["orders"], rows: [[42]], verified: true };
     const event = toAnswerOrRefusalEvent("evt-codex", codexResult(JSON.stringify(flat))) as AnswerEvent;
     if (event.answer.form !== "rich") throw new Error("expected rich form");
     expect(event.answer.envelope.blocks).toEqual([{ type: "table", columns: flat.columns, rows: flat.rows }]);
-    expect(event.answer.envelope.verified).toBe(true);
+    expect(event.answer.envelope.verified).toBe(false);
   });
 
-  it("normalizes codex:local's validated query-result evidence into a verified table and definition", () => {
+  it("normalizes codex:local's self-reported query-result shape into a table and definition, still unverified", () => {
     const queryResult = {
       result_set: {
         columns: ["status", "order_count"],
@@ -106,7 +105,7 @@ describe("toAnswerOrRefusalEvent (dispatched / agent-sdk backend): recovers a re
           filters: queryResult.filters,
         },
       ],
-      verified: true,
+      verified: false,
     });
   });
 
@@ -161,7 +160,7 @@ describe("toAnswerOrRefusalEvent (dispatched / agent-sdk backend): recovers a re
     expect(event.answer.form).toBe("rich");
     if (event.answer.form !== "rich") throw new Error("expected rich form");
     expect(event.answer.envelope.blocks).toEqual([{ type: "table", columns: flat.columns, rows: flat.rows }]);
-    expect(event.answer.envelope.verified).toBe(true);
+    expect(event.answer.envelope.verified).toBe(false);
   });
 
   it("unwraps an MCP CallToolResult's structuredContent field directly", () => {
@@ -171,7 +170,7 @@ describe("toAnswerOrRefusalEvent (dispatched / agent-sdk backend): recovers a re
     const event = toAnswerOrRefusalEvent("evt-5", agentSdkResult(JSON.stringify(callToolResult))) as AnswerEvent;
 
     if (event.answer.form !== "rich") throw new Error("expected rich form");
-    expect(event.answer.envelope).toEqual(envelope);
+    expect(event.answer.envelope).toEqual({ ...envelope, verified: false });
   });
 
   it("falls back to form: 'text', verified: false only when no envelope can be recovered at all", () => {
@@ -241,12 +240,12 @@ describe("toAnswerOrRefusalEvent (dispatched / agent-sdk backend): recovers a re
     expect(event.answer).toEqual({ form: "text", text: finalText, verified: false, dataAnswer: true });
   });
 
-  it("does not treat an envelope with verified: false (or absent) as verified — never forced true either", () => {
+  it("marks an envelope with no verified field explicitly unverified", () => {
     const flat = { columns: ["n"], rows: [[1]] }; // no verified field at all
     const event = toAnswerOrRefusalEvent("evt-7", agentSdkResult(JSON.stringify(flat))) as AnswerEvent;
 
     if (event.answer.form !== "rich") throw new Error("expected rich form");
-    expect(event.answer.envelope.verified).toBeUndefined();
+    expect(event.answer.envelope.verified).toBe(false);
   });
 });
 
