@@ -1,12 +1,13 @@
 import type { LanguageModelV4CallOptions, LanguageModelV4GenerateResult, LanguageModelV4Usage } from "@ai-sdk/provider";
 import { describe, expect, it } from "vitest";
-import { MOCK_ADAPTER_ID } from "../harness/providers/index.js";
+import { MOCK_ADAPTER_ID, PI_AI_ADAPTER_ID } from "../harness/providers/index.js";
 import { buildHybridTierBinding } from "../harness/route/index.js";
 import { filterTierBindingForAgent } from "../harness/route/in-process.js";
 import { route } from "../harness/route/index.js";
 import type { AuthChoice } from "../harness/auth/index.js";
 import { mockWrenServerConfig } from "./mock-mcp-server.js";
 import { loadLegacyFixture } from "./fixtures.js";
+import { fakePiGateway } from "./pi-ai-fake-gateway.js";
 
 const EMPTY_USAGE: LanguageModelV4Usage = {
   inputTokens: { total: undefined, noCache: undefined, cacheRead: undefined, cacheWrite: undefined },
@@ -131,6 +132,40 @@ describe("hybrid in-process: route() with a non-uniform tierBinding", () => {
     // the query tool-call turn and its finishing text hit strong; the direct
     // fast path skips the render-envelope synthesis call entirely.
     expect(strongCalls).toHaveLength(2);
+  });
+
+  it("routes a gateway tier through the pi-ai adapter while another tier stays on its own adapter", async () => {
+    const bundle = loadLegacyFixture("genbi-default.bundle.json");
+    const { calls: cheapCalls, doGenerate: cheapGenerate } = scriptedTurns([textResult("intent: top customer by revenue")]);
+    const gateway = fakePiGateway([
+      { toolCall: { id: "call_1", name: "query", input: { sql: "select * from customers" } } },
+      { text: VERIFIED_QUERY_RESULT_TEXT },
+    ]);
+    const authChoice: AuthChoice = { mode: "gateway", config: { provider: "org-gateway", model: "org/model-a" } };
+
+    const result = await route({
+      authChoice,
+      profileSource: "/unused/profile",
+      userProject: "/unused/project",
+      question: "who is our top customer?",
+      bundle,
+      mcpServers: { sample: mockWrenServerConfig() },
+      tierBinding: {
+        cheap: { adapter: MOCK_ADAPTER_ID, config: { doGenerate: cheapGenerate } },
+        strong: {
+          adapter: PI_AI_ADAPTER_ID,
+          config: { provider: "org-gateway", model: "org/model-a", baseUrl: "https://gateway.test/v1", apiKey: "fake-gateway-key", fetch: gateway.fetch },
+        },
+      },
+    });
+
+    if (result.backend !== "agent") throw new Error("expected the agent backend (in-process)");
+    expect(result.kind).toBe("answer");
+    expect(cheapCalls).toHaveLength(1);
+    // The strong tier's tool-call turn and its finishing turn both went through the gateway.
+    expect(gateway.requests).toHaveLength(2);
+    expect(JSON.stringify(gateway.requests[0]!.body["tools"])).toContain("query");
+    expect(JSON.stringify(gateway.requests[1]!.body["messages"])).toContain("call_1");
   });
 
   it("loud-fails before running anything when a declared tier is left unbound", async () => {

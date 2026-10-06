@@ -759,11 +759,73 @@ describe("config/runtime + setup wizard endpoints", () => {
     it("GET /api/config/env-detect reports only booleans, reflecting whether each adapter's env var is a non-empty string", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-something");
       vi.stubEnv("OPENAI_API_KEY", "");
+      vi.stubEnv("GENBI_GATEWAY_API_KEY", "");
       const { app } = buildApp();
 
       const res = await app.request("/api/config/env-detect");
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ anthropic: true, openaiCompatible: false });
+      expect(await res.json()).toEqual({ anthropic: true, openaiCompatible: false, gateway: false });
+    });
+
+    it("PUT gateway without GENBI_GATEWAY_API_KEY is rejected naming that variable, and nothing is persisted", async () => {
+      vi.stubEnv("GENBI_GATEWAY_API_KEY", "");
+      const { app, store } = buildApp();
+      const before = store.getRuntimeSettings();
+
+      const res = await app.request("/api/config/runtime", {
+        method: "PUT",
+        body: JSON.stringify({ authMode: "gateway", gatewayProvider: "openrouter", gatewayModel: "org/model-a" }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toMatch(/GENBI_GATEWAY_API_KEY is not set/);
+      expect(store.getRuntimeSettings()).toEqual(before);
+    });
+
+    it("PUT gateway without a provider is rejected before anything is bound", async () => {
+      vi.stubEnv("GENBI_GATEWAY_API_KEY", "gateway-key-for-tests");
+      const setAuthChoice = vi.fn();
+      const { app } = buildApp(undefined, { setAuthChoice });
+
+      const res = await app.request("/api/config/runtime", {
+        method: "PUT",
+        body: JSON.stringify({ authMode: "gateway", gatewayModel: "org/model-a" }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toMatch(/gateway provider is required/);
+      expect(setAuthChoice).not.toHaveBeenCalled();
+    });
+
+    it("PUT gateway binds a pi-ai AuthChoice with the env key injected, while settings and the response never carry it", async () => {
+      const key = "gateway-key-for-tests";
+      vi.stubEnv("GENBI_GATEWAY_API_KEY", key);
+      let bound: AuthChoice | undefined;
+      const { app, store } = buildApp(undefined, { setAuthChoice: (choice) => { bound = choice; } });
+
+      const res = await app.request("/api/config/runtime", {
+        method: "PUT",
+        body: JSON.stringify({ authMode: "gateway", deployment: "hosted", gatewayProvider: "openrouter", gatewayModel: "org/model-a", tierModels: [{ tier: "cheap" }, { tier: "strong" }] }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.text();
+      expect(body).not.toContain(key);
+      expect(bound).toEqual({ mode: "gateway", config: { provider: "openrouter", model: "org/model-a", apiKey: key } });
+      expect(store.getRuntimeSettings()).toMatchObject({ authMode: "gateway", gatewayProvider: "openrouter", gatewayModel: "org/model-a" });
+      expect(JSON.stringify(store.getRuntimeSettings())).not.toContain(key);
+    });
+
+    it("GET /api/harness/gateway-models lists pi-ai's offline catalog without OAuth-only providers", async () => {
+      const { app } = buildApp();
+
+      const res = await app.request("/api/harness/gateway-models?provider=groq");
+      expect(res.status).toBe(200);
+      const catalog = (await res.json()) as { status: string; providers: string[]; models: { model: string }[] };
+      expect(catalog.status).toBe("ready");
+      expect(catalog.providers).toEqual(expect.arrayContaining(["groq", "openrouter", "amazon-bedrock"]));
+      expect(catalog.providers).not.toContain("openai-codex");
+      expect(catalog.models.map((entry) => entry.model)).toContain("llama-3.1-8b-instant");
     });
 
     it("reports boolean-only subscription login availability and allows a logged-in Codex selection", async () => {

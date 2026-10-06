@@ -1,6 +1,6 @@
 import type { AuthChoice } from "../auth/index.js";
 import type { AdapterSpec } from "../providers/index.js";
-import { OPENAI_COMPATIBLE_ADAPTER_ID } from "../providers/index.js";
+import { OPENAI_COMPATIBLE_ADAPTER_ID, PI_AI_ADAPTER_ID } from "../providers/index.js";
 
 /** Default local endpoint used when a `LocalAuthChoice` omits `endpoint` (Ollama's default OpenAI-compatible port). */
 export const DEFAULT_LOCAL_ENDPOINT = "http://localhost:11434/v1";
@@ -30,15 +30,14 @@ export interface DeriveAdapterSpecOptions {
  *   exactly what that adapter targets. `endpoint` becomes `baseURL`; `model`
  *   comes from `options.model` (falling back to `DEFAULT_LOCAL_MODEL`) since
  *   `LocalAuthChoice` itself carries no model field.
- * - `gateway` — also mapped onto `openai-compatible` (an operator-managed
- *   gateway is, from this adapter's point of view, just another OpenAI-compatible
- *   endpoint); `authChoice.config` must already carry `baseURL`/`model`
- *   (and optionally `apiKey`) matching `OpenAICompatibleAdapterConfig` — 70a
- *   leaves this config shape unspecified, so this is this ticket's own
- *   assumption, not a contract 70a promises. Unlike `local` (which defaults
- *   endpoint/model), `gateway` has no sensible default, so a missing/empty
- *   `baseURL`/`model` is a loud `wren-harness`-level error here rather than a
- *   bare "Invalid URL" deep inside the adapter.
+ * - `gateway` — mapped onto the `pi-ai` adapter, pi-ai's unified client for
+ *   an operator-chosen provider (a built-in pi-ai provider id such as
+ *   `openrouter` or `amazon-bedrock`, or a custom OpenAI-compatible endpoint
+ *   when `baseUrl` is set). `authChoice.config` must carry `provider` and
+ *   `model`, and may carry `apiKey`, `baseUrl` and `headers`
+ *   (`PiAiAdapterConfig`). `gateway` has no sensible default, so a
+ *   missing/empty `provider`/`model` is a loud `wren-harness`-level error here
+ *   rather than a failure deep inside the adapter on the first call.
  */
 export function deriveAdapterSpec(
   authChoice: Extract<AuthChoice, { mode: "api-key" | "local" | "gateway" }>,
@@ -58,14 +57,14 @@ export function deriveAdapterSpec(
     case "gateway": {
       const config = authChoice.config ?? {};
       const missing: string[] = [];
-      if (!isNonEmptyString(config["baseURL"])) missing.push("baseURL");
+      if (!isNonEmptyString(config["provider"])) missing.push("provider");
       if (!isNonEmptyString(config["model"])) missing.push("model");
       if (missing.length > 0) {
         throw new Error(
-          `gateway mode requires ${missing.join(" and ")} in config (pass --endpoint and --model)`,
+          `gateway mode requires provider and model in config, missing ${missing.join(" and ")} (pass --provider and --model)`,
         );
       }
-      return { adapter: OPENAI_COMPATIBLE_ADAPTER_ID, config };
+      return { adapter: PI_AI_ADAPTER_ID, config };
     }
   }
 }

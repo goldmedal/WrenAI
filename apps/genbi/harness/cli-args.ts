@@ -220,10 +220,11 @@ export function buildApiKeyConfig(flags: CliFlags): Record<string, unknown> | un
   return Object.keys(config).length > 0 ? config : undefined;
 }
 
-/** gateway config from `--endpoint`/`--model`/`--api-key`; `undefined` when none are set (so `deriveAdapterSpec` loud-fails). */
+/** gateway (pi-ai) config from `--provider`/`--model`/`--endpoint`/`--api-key`; `undefined` when none are set (so `deriveAdapterSpec` loud-fails). */
 export function buildGatewayConfig(flags: CliFlags): Record<string, unknown> | undefined {
   const config: Record<string, unknown> = {};
-  if (flags.endpoint !== undefined) config["baseURL"] = flags.endpoint;
+  if (flags.provider !== undefined) config["provider"] = flags.provider;
+  if (flags.endpoint !== undefined) config["baseUrl"] = flags.endpoint;
   if (flags.model !== undefined) config["model"] = flags.model;
   if (flags.apiKey !== undefined) config["apiKey"] = flags.apiKey;
   return Object.keys(config).length > 0 ? config : undefined;
@@ -234,13 +235,13 @@ interface ParsedTierAdapterFlag {
   /** A bare tier name or a mount-qualified `<mount>/<tier>` key. */
   readonly tier: string;
   readonly mode: string;
-  readonly fields: Pick<CliFlags, "adapter" | "apiKey" | "model" | "endpoint">;
+  readonly fields: Pick<CliFlags, "adapter" | "apiKey" | "model" | "endpoint" | "provider">;
   /** The deployment zone declared for this tier, when the entry carries `zone=`. */
   readonly zone?: Zone;
 }
 
 const TIER_ADAPTER_ALLOWED_MODES = new Set(["api-key", "local", "gateway"]);
-const TIER_ADAPTER_ALLOWED_FIELDS = new Set(["adapter", "apiKey", "model", "endpoint", "zone"]);
+const TIER_ADAPTER_ALLOWED_FIELDS = new Set(["adapter", "apiKey", "model", "endpoint", "provider", "zone"]);
 
 /**
  * Parses one hybrid-mode `--tier-adapter <tier>=<mode>[:<field>=<value>,...]`
@@ -285,7 +286,7 @@ export function parseTierAdapterFlag(raw: string): ParsedTierAdapterFlag {
       const key = pair.slice(0, pairEq);
       if (!TIER_ADAPTER_ALLOWED_FIELDS.has(key)) {
         throw new CliUsageError(
-          `--tier-adapter "${raw}": unknown field "${key}" (allowed: adapter, apiKey, model, endpoint, zone)`,
+          `--tier-adapter "${raw}": unknown field "${key}" (allowed: adapter, apiKey, model, endpoint, provider, zone)`,
         );
       }
       const value = pair.slice(pairEq + 1);

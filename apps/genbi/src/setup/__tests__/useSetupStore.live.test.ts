@@ -218,6 +218,35 @@ describe('useSetupStore (live mode) — saveRuntimeSettings step advance is mode
     }));
   });
 
+  it('submits the org gateway choice with trimmed non-secret fields and tier rows that fall back to its default model', async () => {
+    putRuntimeSettings.mockResolvedValueOnce({ ...fixtureRuntimeSettings, warnings: [] });
+    useSetupStore.setState({
+      steps: fixtureSetupSteps,
+      selectedStepKey: 'runtime',
+      runtimeTierNames: ['cheap', 'strong'],
+      runtimeSettings: {
+        ...fixtureRuntimeSettings,
+        authMode: 'gateway',
+        gatewayProvider: ' openrouter ',
+        gatewayModel: 'org/model-a ',
+        gatewayBaseURL: '',
+        tierModels: [{ tier: 'cheap', model: '  ' }, { tier: 'strong', model: 'org/model-b' }],
+      },
+    }, false);
+
+    useSetupStore.getState().saveRuntimeSettings();
+
+    await vi.waitFor(() => expect(putRuntimeSettings).toHaveBeenCalledTimes(1));
+    expect(putRuntimeSettings).toHaveBeenCalledWith(expect.objectContaining({
+      authMode: 'gateway',
+      gatewayProvider: 'openrouter',
+      gatewayModel: 'org/model-a',
+      gatewayBaseURL: '',
+      hybrid: false,
+      tierModels: [{ tier: 'cheap' }, { tier: 'strong', model: 'org/model-b' }],
+    }));
+  });
+
   it('create mode: advances runtime → connect (steps + selectedStepKey)', async () => {
     putRuntimeSettings.mockResolvedValueOnce({ ...fixtureRuntimeSettings, warnings: [] });
     useSetupStore.setState({ steps: fixtureSetupSteps, selectedStepKey: 'runtime' }, false);

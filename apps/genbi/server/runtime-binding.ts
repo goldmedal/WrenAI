@@ -11,6 +11,7 @@ import path from "node:path";
 import { resolveHubDir, resolveWarbleBinary, runWarble } from "../harness/index.js";
 import type { AuthChoice, AdapterSpec, RouteOptions } from "../harness/index.js";
 import type { CodexManifestModels } from "../harness/route/codex-local-manifest.js";
+import { GATEWAY_API_KEY_ENV } from "./env-detect.js";
 import type { RuntimeSettings, RuntimeTierAdapter, TierModelBinding } from "./wire-types.js";
 
 export class RuntimeBindingError extends Error {}
@@ -49,9 +50,13 @@ function bindingByTier(settings: RuntimeSettings): Map<string, TierModelBinding>
   return bindings;
 }
 
-/** The old single Model field is the default for every tier without a model override. */
+/**
+ * The old single Model field is the default for every tier without a model
+ * override; in gateway mode the gateway's own default model comes first.
+ */
 export function effectiveTierModel(binding: TierModelBinding, settings: RuntimeSettings): string | undefined {
-  return nonEmpty(binding.model) ?? nonEmpty(settings.apiKeyModel);
+  const gatewayDefault = settings.authMode === "gateway" ? nonEmpty(settings.gatewayModel) : undefined;
+  return nonEmpty(binding.model) ?? gatewayDefault ?? nonEmpty(settings.apiKeyModel);
 }
 
 /**
@@ -105,7 +110,23 @@ function requireBaseUrl(tier: string, binding: TierModelBinding, settings: Runti
 function effectiveAdapter(binding: TierModelBinding, settings: RuntimeSettings): RuntimeTierAdapter {
   if (binding.adapter) return binding.adapter;
   if (settings.authMode === "local") return "local";
+  if (settings.authMode === "gateway") return "pi-ai";
   return settings.apiKeyAdapter ?? "anthropic";
+}
+
+function requireGatewayProvider(tier: string, settings: RuntimeSettings): string {
+  const provider = nonEmpty(settings.gatewayProvider);
+  if (!provider) throw new RuntimeBindingError(`A gateway provider is required for the pi-ai adapter on tier "${tier}".`);
+  return provider;
+}
+
+/** The pi-ai base URL is optional: without one the provider's own catalogued endpoint is used. */
+function optionalGatewayBaseUrl(tier: string, binding: TierModelBinding, settings: RuntimeSettings): string | undefined {
+  const baseURL = nonEmpty(binding.baseURL) ?? nonEmpty(settings.gatewayBaseURL);
+  if (baseURL !== undefined && !absoluteHttpUrl(baseURL)) {
+    throw new RuntimeBindingError(`Tier "${tier}": gateway Base URL must be an absolute http(s) URL — got "${baseURL}".`);
+  }
+  return baseURL;
 }
 
 /** Credential env vars used by the materialized in-process rows (local rows need none). */
@@ -115,6 +136,7 @@ export function requiredInProcessCredentialEnvVars(settings: RuntimeSettings): s
     const adapter = effectiveAdapter(binding, settings);
     if (adapter === "anthropic") required.add("ANTHROPIC_API_KEY");
     if (adapter === "openai-compatible") required.add("OPENAI_API_KEY");
+    if (adapter === "pi-ai") required.add(GATEWAY_API_KEY_ENV);
   }
   return [...required];
 }
@@ -139,6 +161,14 @@ export function validateRuntimeTierBindings(settings: RuntimeSettings, bundleTie
     requireModel(tier, binding, settings);
     const adapter = effectiveAdapter(binding, settings);
     if (adapter === "openai-compatible" || adapter === "local") requireBaseUrl(tier, binding, settings);
+    if (adapter === "pi-ai") {
+      // The subscription dispatchers have no pi-ai backend; gateway rows run in-process only.
+      if (settings.authMode === "subscription") {
+        throw new RuntimeBindingError(`Tier "${tier}": the pi-ai adapter runs in-process only and cannot be used with a subscription dispatcher.`);
+      }
+      requireGatewayProvider(tier, settings);
+      optionalGatewayBaseUrl(tier, binding, settings);
+    }
   }
 
   if (settings.authMode === "subscription" && !nonEmpty(settings.subscriptionDriverModel)) {
@@ -159,6 +189,21 @@ function inProcessSpec(tier: string, binding: TierModelBinding, settings: Runtim
       return { adapter: "openai-compatible", config: { model, baseURL: requireBaseUrl(tier, binding, settings), apiKey: process.env["OPENAI_API_KEY"] ?? "" } };
     case "local":
       return { adapter: "openai-compatible", config: { model, baseURL: requireBaseUrl(tier, binding, settings) } };
+    case "pi-ai": {
+      // Like openai-compatible: the env-backed key lives only in this
+      // transient spec, never in the persisted settings.
+      const baseUrl = optionalGatewayBaseUrl(tier, binding, settings);
+      const apiKey = nonEmpty(process.env[GATEWAY_API_KEY_ENV]);
+      return {
+        adapter: "pi-ai",
+        config: {
+          provider: requireGatewayProvider(tier, settings),
+          model,
+          ...(baseUrl !== undefined ? { baseUrl } : {}),
+          ...(apiKey !== undefined ? { apiKey } : {}),
+        },
+      };
+    }
   }
 }
 
@@ -166,6 +211,7 @@ function dispatchedTierYaml(tier: string, binding: TierModelBinding, settings: R
   const model = requireModel(tier, binding, settings);
   const adapter = effectiveAdapter(binding, settings);
   const key = JSON.stringify(tier);
+  if (adapter === "pi-ai") throw new RuntimeBindingError(`Tier "${tier}": the pi-ai adapter has no subscription dispatcher equivalent.`);
   if (adapter === "anthropic") return [`  ${key}: ${JSON.stringify(model)}`];
   return [
     `  ${key}:`,

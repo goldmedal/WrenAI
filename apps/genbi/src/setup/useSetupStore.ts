@@ -903,9 +903,12 @@ export const useSetupStore = create<SetupStoreState>()((set, get) => {
     // step advance on its success instead of applying it optimistically, and
     // surface a rejection as `runtimeSettingsError` rather than swallowing it.
     const current = get();
+    // Setup saves either the subscription dispatcher or the org gateway (pi-ai, in-process).
+    const gateway = current.runtimeSettings.authMode === 'gateway';
     const tierModels = current.runtimeTierNames.map((tier) => {
       const binding = current.runtimeSettings.tierModels.find((entry) => entry.tier === tier);
-      return { tier, ...(binding?.model !== undefined ? { model: binding.model } : {}) };
+      const model = gateway ? binding?.model?.trim() || undefined : binding?.model;
+      return { tier, ...(model !== undefined ? { model } : {}) };
     });
     set((s) => ({
       runtimeSettingsSaving: true,
@@ -915,7 +918,14 @@ export const useSetupStore = create<SetupStoreState>()((set, get) => {
     }));
     putRuntimeSettings({
       ...current.runtimeSettings,
-      authMode: 'subscription',
+      authMode: gateway ? 'gateway' : 'subscription',
+      ...(gateway
+        ? {
+            gatewayProvider: current.runtimeSettings.gatewayProvider?.trim() ?? '',
+            gatewayModel: current.runtimeSettings.gatewayModel?.trim() ?? '',
+            gatewayBaseURL: current.runtimeSettings.gatewayBaseURL?.trim() ?? '',
+          }
+        : {}),
       hybrid: false,
       // Setup requires an explicit model on every compiled tier. Clear any
       // hidden legacy default so it cannot silently influence runtime routing;

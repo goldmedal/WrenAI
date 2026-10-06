@@ -24,14 +24,14 @@ export interface SetupStep {
   state: StepState;
 }
 
-export type AuthMode = 'subscription' | 'byo' | 'local';
+export type AuthMode = 'subscription' | 'byo' | 'local' | 'gateway';
 export type SubscriptionProvider = 'claude' | 'codex';
 
 export type Deployment = 'personal' | 'hosted';
 
 /** The api-key adapter a `'byo'` `RuntimeSettings.authMode` dispatches through. */
 export type ApiKeyAdapter = 'anthropic' | 'openai-compatible';
-export type RuntimeTierAdapter = ApiKeyAdapter | 'local';
+export type RuntimeTierAdapter = ApiKeyAdapter | 'local' | 'pi-ai';
 
 /**
  * Extends the Harness page's tier→model binding shape with the persisted
@@ -56,6 +56,12 @@ export interface RuntimeSettings {
   apiKeyModel?: string;
   /** Base URL override, `openai-compatible` only. Non-secret. */
   apiKeyBaseURL?: string;
+  /** pi-ai provider id `'gateway'` dispatches through (e.g. `openrouter`). Non-secret. */
+  gatewayProvider?: string;
+  /** Default model id for gateway tiers without their own model. Non-secret. */
+  gatewayModel?: string;
+  /** Optional custom OpenAI-compatible base URL for the gateway provider. Non-secret. */
+  gatewayBaseURL?: string;
   /** Separate subscription dispatcher driver model; never a compiled profile tier. */
   subscriptionDriverModel?: string;
 }
@@ -93,7 +99,14 @@ export type SubscriptionModelCatalog =
 export interface AdapterEnvStatus {
   anthropic: boolean;
   openaiCompatible: boolean;
+  /** `GENBI_GATEWAY_API_KEY` presence, the gateway mode's credential. */
+  gateway?: boolean;
 }
+
+/** Mirrors `GET /api/harness/gateway-models`: pi-ai's offline built-in catalog. */
+export type GatewayModelCatalog =
+  | { status: 'ready'; providers: string[]; models: { model: string; displayName: string }[] }
+  | { status: 'unavailable'; reason: string };
 
 /** `PUT /api/config/runtime`'s response — the persisted settings plus any compliance warnings. */
 export interface NativeRuntimeBinding {

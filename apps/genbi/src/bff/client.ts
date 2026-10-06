@@ -25,6 +25,7 @@ import type {
   SubscriptionModelCatalog,
   SubscriptionProvider,
   SubscriptionLoginStatus,
+  GatewayModelCatalog,
 } from '@/setup/types';
 import { bffBaseUrl } from './env';
 
@@ -534,6 +535,12 @@ export function getSubscriptionLoginStatus(): Promise<SubscriptionLoginStatus> {
 }
 
 /** Sanitized catalog for the selected, signed-in subscription provider. */
+/** pi-ai's offline built-in catalog for the gateway option; `provider` narrows the model list. */
+export function getGatewayModelCatalog(provider?: string): Promise<GatewayModelCatalog> {
+  const query = provider?.trim() ? `?provider=${encodeURIComponent(provider.trim())}` : '';
+  return request<GatewayModelCatalog>(`/api/harness/gateway-models${query}`);
+}
+
 export function getSubscriptionModelCatalog(provider: SubscriptionProvider, refresh = false): Promise<SubscriptionModelCatalog> {
   return request<SubscriptionModelCatalog>(
     `/api/config/subscription-models?provider=${encodeURIComponent(provider)}&refresh=${refresh ? '1' : '0'}`,

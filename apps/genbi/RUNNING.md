@@ -286,6 +286,16 @@ The `openai-compatible` adapter has no environment fallback and stays the one
 for NIM, vLLM or Ollama endpoints; point it at your own serving runtime, not at
 `api.openai.com`.
 
+Gateway mode (`--mode gateway`, or "Org gateway (pi-ai)" in the setup wizard)
+uses the `pi-ai` adapter: `--provider` names a pi-ai built-in provider
+(`openrouter`, `amazon-bedrock`, `vercel-ai-gateway`, ...) and `--model` one of
+its catalogued model ids; `--endpoint` instead turns `--provider` into the name
+of your own OpenAI-compatible endpoint. pi-ai is an optional dependency that
+needs Node.js >= 22.19 and is loaded only when a gateway model is called. It
+never reads provider environment variables, `~/.pi` or OAuth sign-ins: the BFF
+passes `GENBI_GATEWAY_API_KEY` with each request, and the CLI passes `--api-key`.
+A gateway tier binding is `{ "adapter": "pi-ai", "config": { "provider": ..., "model": ... } }`.
+
 `extraBody` is merged into every request the `openai-compatible` adapter sends,
 for serving runtimes whose switches live in the body (Nemotron's reasoning
 toggle above). `--tier-adapter` accepts the same `zone=` field and the same

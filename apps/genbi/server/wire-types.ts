@@ -505,7 +505,7 @@ export interface SetupEnvField {
   readonly secret: boolean;
 }
 
-export type AuthMode = "subscription" | "byo" | "local";
+export type AuthMode = "subscription" | "byo" | "local" | "gateway";
 export type Deployment = "personal" | "hosted";
 export type SubscriptionProvider = "claude" | "codex";
 
@@ -539,7 +539,7 @@ export type SubscriptionModelCatalog =
     };
 
 /** A concrete adapter selectable for an individual compiled-bundle tier. */
-export type RuntimeTierAdapter = "anthropic" | "openai-compatible" | "local";
+export type RuntimeTierAdapter = "anthropic" | "openai-compatible" | "local" | "pi-ai";
 
 /** Kept as the legacy/default-runtime spelling used by the BYO auth control. */
 export type ApiKeyAdapter = "anthropic" | "openai-compatible";
@@ -568,6 +568,12 @@ export interface RuntimeSettings {
   readonly apiKeyModel?: string;
   /** Base URL override, `openai-compatible` only. Non-secret. */
   readonly apiKeyBaseURL?: string;
+  /** pi-ai provider id the `"gateway"` mode dispatches through (e.g. `openrouter`). Non-secret. */
+  readonly gatewayProvider?: string;
+  /** Default model id for `"gateway"` tiers without their own model. Non-secret. */
+  readonly gatewayModel?: string;
+  /** Optional custom OpenAI-compatible base URL for the `"gateway"` provider. Non-secret. */
+  readonly gatewayBaseURL?: string;
   /**
    * Model for the subscription dispatcher itself. This is deliberately NOT a
    * profile tier: compiled bundles own their step tiers, while subscription
@@ -575,6 +581,19 @@ export interface RuntimeSettings {
    */
   readonly subscriptionDriverModel?: string;
 }
+
+/**
+ * `GET /api/harness/gateway-models`: pi-ai's offline built-in catalog for the
+ * gateway wizard. `unavailable` when the optional pi-ai dependency is not
+ * installed; the wizard then falls back to free-text ids.
+ */
+export type GatewayModelCatalog =
+  | {
+      readonly status: "ready";
+      readonly providers: readonly string[];
+      readonly models: readonly { readonly model: string; readonly displayName: string }[];
+    }
+  | { readonly status: "unavailable"; readonly reason: string };
 
 /** Login availability only. No credential contents or metadata cross this boundary. */
 export interface SubscriptionLoginStatus {
@@ -605,6 +624,8 @@ export type RuntimeSettingsReadiness = { readonly valid: true } | { readonly val
 export interface AdapterEnvStatus {
   readonly anthropic: boolean;
   readonly openaiCompatible: boolean;
+  /** `GENBI_GATEWAY_API_KEY`, the credential `"gateway"` mode sends to its pi-ai provider. */
+  readonly gateway?: boolean;
 }
 
 // ---------------------------------------------------------------------------

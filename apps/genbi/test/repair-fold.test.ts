@@ -3,11 +3,12 @@ import { describe, expect, it } from "vitest";
 import { loadBundle } from "../harness/bundle/loader.js";
 import { executeAgent, InvalidRepairFoldError, RepairExhaustedError } from "../harness/loop/index.js";
 import type { ExecuteAgentContext } from "../harness/loop/index.js";
-import { createDefaultProviderRegistry, MOCK_ADAPTER_ID } from "../harness/providers/index.js";
+import { createDefaultProviderRegistry, MOCK_ADAPTER_ID, PI_AI_ADAPTER_ID } from "../harness/providers/index.js";
 import type { TierBinding } from "../harness/providers/index.js";
 import { resolveTools } from "../harness/tools/index.js";
 import { mockWrenServerConfig } from "./mock-mcp-server.js";
 import { loadLegacyFixture } from "./fixtures.js";
+import { fakePiGateway } from "./pi-ai-fake-gateway.js";
 import { buildSyntheticBundle } from "./synthetic-bundle.js";
 
 const EMPTY_USAGE: LanguageModelV4Usage = {
@@ -115,6 +116,52 @@ describe("executeAgent repair_fold", () => {
 
       // generate_sql still produces query_result, and repair_sql's
       // repaired_result now appears too (a repair actually happened).
+      expect(artifacts.get("query_result")).toBe(finalText);
+      expect(artifacts.get("repaired_result")).toBe(finalText);
+    } finally {
+      await resolved.close();
+    }
+  });
+
+  it("recovers through one repair attempt with the strong tier on the pi-ai adapter", async () => {
+    const bundle = loadLegacyFixture("genbi-default.bundle.json");
+    const agent = bundle.agents.find((candidate) => candidate.id === "answer_query")!;
+
+    const resolved = await resolveTools(agent, {
+      mcpServers: { sample: mockWrenServerConfig({ failQueryCount: 1 }) },
+    });
+    try {
+      const finalText = JSON.stringify({
+        columns: ["customer", "revenue"],
+        rows: [["Acme", 1000]],
+        verified: true,
+        definition: { sql: "select * from customers", source_tables: ["customers"], filters: [] },
+      });
+      const gateway = fakePiGateway([
+        { toolCall: { id: "call-1", name: "query", input: { sql: "select * from customers" } } },
+        { toolCall: { id: "call-2", name: "query", input: { sql: "select * from customers" } } },
+        { text: finalText },
+      ]);
+      const binding: TierBinding = {
+        tiers: {
+          cheap: { adapter: MOCK_ADAPTER_ID, config: { doGenerate: async () => textResult("intent: top customer by revenue") } },
+          strong: {
+            adapter: PI_AI_ADAPTER_ID,
+            config: { provider: "org-gateway", model: "org/model-a", baseUrl: "https://gateway.test/v1", apiKey: "fake-gateway-key", fetch: gateway.fetch },
+          },
+        },
+      };
+
+      const artifacts = await executeAgent(agent, {
+        binding,
+        registry: createDefaultProviderRegistry(),
+        tools: resolved.tools,
+        userInput: "who is our top customer?",
+      });
+
+      // The failing tool call, the folded-in repair retry, and the finishing turn.
+      expect(gateway.requests).toHaveLength(3);
+      expect(JSON.stringify(gateway.requests[1]!.body["messages"])).toContain("Repair step");
       expect(artifacts.get("query_result")).toBe(finalText);
       expect(artifacts.get("repaired_result")).toBe(finalText);
     } finally {

@@ -34,11 +34,14 @@ import { shutdownNativeResources } from "./native-shutdown.js";
  *                               clear 500 at dispatch time instead.
  *   WREN_HARNESS_PROFILE        profileSource; default resolveDefaultProfileSource()
  *   WREN_HARNESS_MODE           subscription|api-key|local|gateway (auth mode)
- *   WREN_HARNESS_PROVIDER       subscription provider: claude|codex
+ *   WREN_HARNESS_PROVIDER       subscription provider: claude|codex; gateway mode: pi-ai provider id
  *   WREN_HARNESS_ADAPTER        api-key adapter name
  *   WREN_HARNESS_API_KEY        api-key credential
  *   WREN_HARNESS_MODEL          model override
- *   WREN_HARNESS_ENDPOINT       local/gateway endpoint URL
+ *   WREN_HARNESS_ENDPOINT       local endpoint URL; gateway mode: optional custom base URL
+ *   GENBI_GATEWAY_API_KEY       gateway-mode credential for the selected pi-ai provider. Read by
+ *                               the BFF and passed per request; never persisted, and pi-ai's own
+ *                               provider env vars / credential files are never consulted
  *   WREN_HARNESS_WARBLE_BIN     path to the warble CLI binary
  *   WREN_HARNESS_CONTEXT_LOADER_BIN
  *                               path to the wren-context-loader binary, which renders the bound

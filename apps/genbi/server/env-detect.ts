@@ -1,5 +1,12 @@
 import type { AdapterEnvStatus } from "./wire-types.js";
 
+/**
+ * The one credential env var for `"gateway"` mode, whatever pi-ai provider it
+ * targets. The BFF reads it and passes it to the adapter per request; pi-ai's
+ * own provider env vars are never consulted.
+ */
+export const GATEWAY_API_KEY_ENV = "GENBI_GATEWAY_API_KEY";
+
 /** True iff the named env var is set to a non-empty (non-whitespace-only) value. */
 function isNonEmptyEnv(name: string): boolean {
   const value = process.env[name];
@@ -16,5 +23,6 @@ export function detectAdapterEnv(): AdapterEnvStatus {
   return {
     anthropic: isNonEmptyEnv("ANTHROPIC_API_KEY"),
     openaiCompatible: isNonEmptyEnv("OPENAI_API_KEY"),
+    gateway: isNonEmptyEnv(GATEWAY_API_KEY_ENV),
   };
 }

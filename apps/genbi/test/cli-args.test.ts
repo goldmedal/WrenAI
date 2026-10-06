@@ -106,10 +106,10 @@ describe("resolveAuthChoice default policy (no --mode)", () => {
   });
 
   it("--api-key together with an explicit --mode still honors that mode (unaffected)", async () => {
-    const flags: CliFlags = { apiKey: "sk-test", mode: "gateway", endpoint: "http://gw/v1", model: "m" };
+    const flags: CliFlags = { apiKey: "sk-test", mode: "gateway", provider: "org-gw", endpoint: "http://gw/v1", model: "m" };
     await expect(resolveAuthChoice(flags, probe({ claude: true }))).resolves.toEqual({
       mode: "gateway",
-      config: { baseURL: "http://gw/v1", model: "m", apiKey: "sk-test" },
+      config: { provider: "org-gw", baseUrl: "http://gw/v1", model: "m", apiKey: "sk-test" },
     });
   });
 });
@@ -140,10 +140,14 @@ describe("buildExplicitAuthChoice", () => {
     });
   });
 
-  it("gateway builds config from endpoint/model/api-key", () => {
-    expect(buildExplicitAuthChoice("gateway", { endpoint: "http://gw/v1", model: "m" })).toEqual({
+  it("gateway builds pi-ai config from provider/model/endpoint/api-key", () => {
+    expect(buildExplicitAuthChoice("gateway", { provider: "openrouter", model: "m" })).toEqual({
       mode: "gateway",
-      config: { baseURL: "http://gw/v1", model: "m" },
+      config: { provider: "openrouter", model: "m" },
+    });
+    expect(buildExplicitAuthChoice("gateway", { provider: "org-gw", endpoint: "http://gw/v1", model: "m" })).toEqual({
+      mode: "gateway",
+      config: { provider: "org-gw", baseUrl: "http://gw/v1", model: "m" },
     });
     expect(buildExplicitAuthChoice("gateway", {})).toEqual({ mode: "gateway" });
   });
@@ -159,10 +163,11 @@ describe("config builders", () => {
     expect(buildApiKeyConfig({ model: "m" })).toEqual({ model: "m" });
   });
 
-  it("buildGatewayConfig maps endpoint to baseURL, or undefined when nothing set", () => {
+  it("buildGatewayConfig maps provider/model/api-key and endpoint to baseUrl, or undefined when nothing set", () => {
     expect(buildGatewayConfig({})).toBeUndefined();
-    expect(buildGatewayConfig({ endpoint: "http://gw/v1", model: "m", apiKey: "k" })).toEqual({
-      baseURL: "http://gw/v1",
+    expect(buildGatewayConfig({ provider: "org-gw", endpoint: "http://gw/v1", model: "m", apiKey: "k" })).toEqual({
+      provider: "org-gw",
+      baseUrl: "http://gw/v1",
       model: "m",
       apiKey: "k",
     });
@@ -213,28 +218,43 @@ describe("CLI-level compliance wiring (resolveDeployment + enforceCompliance com
 
 describe("gateway loud-fail (deriveAdapterSpec)", () => {
   it("throws a clear error naming both missing fields when config is empty", () => {
-    expect(() => deriveAdapterSpec({ mode: "gateway" })).toThrow(/gateway mode requires baseURL and model/);
+    expect(() => deriveAdapterSpec({ mode: "gateway" })).toThrow(/gateway mode requires provider and model in config, missing provider and model/);
   });
 
-  it("names only the missing field", () => {
-    expect(() => deriveAdapterSpec({ mode: "gateway", config: { baseURL: "http://gw/v1" } })).toThrow(
-      /requires model in config/,
+  it("names both required fields and the missing one", () => {
+    expect(() => deriveAdapterSpec({ mode: "gateway", config: { provider: "openrouter" } })).toThrow(
+      /requires provider and model in config, missing model \(/,
     );
     expect(() => deriveAdapterSpec({ mode: "gateway", config: { model: "m" } })).toThrow(
-      /requires baseURL in config/,
+      /requires provider and model in config, missing provider \(/,
+    );
+    // A base URL alone (the old OpenAI-compatible gateway shape) is not enough: the provider is required.
+    expect(() => deriveAdapterSpec({ mode: "gateway", config: { baseURL: "http://gw/v1", model: "m" } })).toThrow(
+      /missing provider/,
     );
   });
 
   it("rejects whitespace-only values as missing", () => {
-    expect(() => deriveAdapterSpec({ mode: "gateway", config: { baseURL: "  ", model: "  " } })).toThrow(
-      /baseURL and model/,
+    expect(() => deriveAdapterSpec({ mode: "gateway", config: { provider: "  ", model: "  " } })).toThrow(
+      /missing provider and model/,
     );
   });
 
-  it("passes through a complete config", () => {
-    expect(deriveAdapterSpec({ mode: "gateway", config: { baseURL: "http://gw/v1", model: "m" } })).toEqual({
+  it("maps a complete config onto the pi-ai adapter", () => {
+    expect(deriveAdapterSpec({ mode: "gateway", config: { provider: "org-gw", baseUrl: "http://gw/v1", model: "m", apiKey: "k" } })).toEqual({
+      adapter: "pi-ai",
+      config: { provider: "org-gw", baseUrl: "http://gw/v1", model: "m", apiKey: "k" },
+    });
+  });
+
+  it("leaves api-key and local unchanged", () => {
+    expect(deriveAdapterSpec({ mode: "api-key", adapter: "anthropic", config: { model: "m" } })).toEqual({
+      adapter: "anthropic",
+      config: { model: "m" },
+    });
+    expect(deriveAdapterSpec({ mode: "local" })).toEqual({
       adapter: "openai-compatible",
-      config: { baseURL: "http://gw/v1", model: "m" },
+      config: { baseURL: "http://localhost:11434/v1", model: "llama3.1" },
     });
   });
 });
@@ -301,9 +321,18 @@ describe("hybrid: buildTierBindingFromFlags", () => {
     expect(() => buildTierBindingFromFlags(["cheap=api-key"])).toThrow(/requires --adapter/);
   });
 
-  it("rewraps a gateway loud-fail (missing baseURL/model) as a CliUsageError", () => {
+  it("rewraps a gateway loud-fail (missing provider/model) as a CliUsageError", () => {
     expect(() => buildTierBindingFromFlags(["cheap=gateway"])).toThrow(CliUsageError);
-    expect(() => buildTierBindingFromFlags(["cheap=gateway"])).toThrow(/gateway mode requires baseURL and model/);
+    expect(() => buildTierBindingFromFlags(["cheap=gateway"])).toThrow(/gateway mode requires provider and model/);
+  });
+
+  it("binds a gateway tier to pi-ai from provider/model/endpoint fields", () => {
+    expect(buildTierBindingFromFlags(["strong=gateway:provider=openrouter,model=m,zone=public"])).toEqual({
+      strong: { adapter: "pi-ai", config: { provider: "openrouter", model: "m" }, zone: "public" },
+    });
+    expect(buildTierBindingFromFlags(["cheap=gateway:provider=org-gw,endpoint=http://gw/v1,model=m"])).toEqual({
+      cheap: { adapter: "pi-ai", config: { provider: "org-gw", baseUrl: "http://gw/v1", model: "m" } },
+    });
   });
 });
 
