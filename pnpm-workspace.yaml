@@ -15,3 +15,4 @@ minimumReleaseAgeExclude:
   - '@warble/ir-spec@0.9.0'
   - '@earendil-works/pi-ai@1.0.4'
   - '@earendil-works/pi-telemetry@1.0.4'
+  - '@wrenai/context-loader@0.1.2'

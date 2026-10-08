@@ -45,7 +45,7 @@ try {
   const packedFiles = await tarFiles(packageTarball);
   assertPublishedFiles(packedFiles);
   const packedManifest = await tarJson(packageTarball, "package/package.json");
-  if (packedManifest.dependencies?.["@wrenai/context-loader"] !== "0.1.1") {
+  if (packedManifest.dependencies?.["@wrenai/context-loader"] !== "0.1.2") {
     throw new Error("packed @wrenai/genbi does not retain an exact @wrenai/context-loader version");
   }
 
@@ -217,6 +217,10 @@ async function packVerifiedContextLoaderFixture(source, stage, destination) {
   await writeFile(binary, content, { mode: 0o755 });
   await chmod(binary, 0o755);
   const packageJson = JSON.parse(await readFile(path.join(stage, "package.json"), "utf8"));
+  // The fixture stands in for the exact registry version genbi pins, so npm resolves the pin to this tarball.
+  const genbiManifest = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
+  packageJson.version = genbiManifest.dependencies["@wrenai/context-loader"];
+  await writeFile(path.join(stage, "package.json"), JSON.stringify(packageJson, null, 2));
   await writeFile(path.join(stage, "artifacts.json"), JSON.stringify({ schema: 1, package: packageJson.name, version: packageJson.version, artifacts: { "darwin-arm64": { url: "https://example.invalid/context-loader.tar.gz", archiveSha256: "0".repeat(64), binarySha256, binaryPath: "wren-context-loader" } } }));
   await writeFile(path.join(stage, "install-state.json"), JSON.stringify({ package: packageJson.name, version: packageJson.version, target: "darwin-arm64", archiveSha256: "0".repeat(64), binarySha256, binaryPath: path.join("bin", "wren-context-loader") }));
   await run("npm", ["pack", "--ignore-scripts", "--pack-destination", destination], { cwd: stage });

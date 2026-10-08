@@ -1,6 +1,6 @@
 {
   "name": "@wrenai/genbi",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Wren GenBI \u2014 the web UI for WrenAI: ask questions of your data and get dashboards back",
   "license": "Apache-2.0",
   "keywords": [
@@ -54,7 +54,7 @@
     "@warble/cli": "0.17.0",
     "@warble/codex-local": "0.17.0",
     "@warble/ir-spec": "0.9.0",
-    "@wrenai/context-loader": "0.1.1",
+    "@wrenai/context-loader": "0.1.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "ai": "~7.0.28",

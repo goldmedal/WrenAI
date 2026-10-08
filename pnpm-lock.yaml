@@ -52,8 +52,8 @@ importers:
         specifier: 0.9.0
         version: 0.9.0
       '@wrenai/context-loader':
-        specifier: link:../context-loader
-        version: link:../context-loader
+        specifier: 0.1.2
+        version: 0.1.2
       '@xterm/addon-fit':
         specifier: ^0.11.0
         version: 0.11.0
@@ -1284,6 +1284,10 @@ packages:
 
   '@workflow/serde@4.1.0':
     resolution: {integrity: sha512-pav4F2BoirECWR7Nf1TKt+2eETcBj7jj4cBefQ8VXQCA6NPkaKeLfj/zMgi+3zYV5ZIBT4GuUiphsj0/b9hPQQ==}
+
+  '@wrenai/context-loader@0.1.2':
+    resolution: {integrity: sha512-0uOMmO29XTNTbt81g3uiQ+iA6pUQ89/wqVeebLb4YDYBGTGtRuzTl1Fl5uGOnJte6xBEff+OpRAlReiwE2Xixw==}
+    hasBin: true
 
   '@xterm/addon-fit@0.11.0':
     resolution: {integrity: sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==}
@@ -3599,6 +3603,8 @@ snapshots:
   '@warble/ir-spec@0.9.0': {}
 
   '@workflow/serde@4.1.0': {}
+
+  '@wrenai/context-loader@0.1.2': {}
 
   '@xterm/addon-fit@0.11.0': {}
 
