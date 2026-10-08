@@ -16,7 +16,7 @@ import { BUILD_CONTEXT_AGENT_ID, ComplianceError, CONNECT_SOURCE_AGENT_ID, conte
 import type { Bundle, ContextLifecyclePrefix } from "../harness/index.js";
 import { adoptWithChosenProfile, verifyAdoptProject } from "./adopt.js";
 import { mountSpaFallback } from "./spa.js";
-import { toAuthChoiceFromRuntimeSettings } from "./auth-choice.js";
+import { isRuntimeAuthMode, runtimeSettingsFromAuthChoice, toAuthChoiceFromRuntimeSettings } from "./auth-choice.js";
 import { composeSetupPrompt, zeroMdlSchemaDiscoveryInstruction } from "./compose.js";
 import { mapContextShowToOverview } from "./context-map.js";
 import { buildContextFileTree, computeKnowledgeStatus } from "./context-files.js";
@@ -1643,7 +1643,12 @@ export function createApp(deps: TurnDeps) {
   // Config / setup pages
   // ---------------------------------------------------------------------
 
-  app.get("/api/config/runtime", (c) => c.json(deps.store.getRuntimeSettings()));
+  // Until the user saves, the effective runtime is the boot auth env, so report that rather than
+  // the seeded display default. Nothing here is persisted and no credential is read.
+  app.get("/api/config/runtime", (c) => {
+    const stored = deps.store.getRuntimeSettings();
+    return c.json(deps.store.hasExplicitRuntimeSettings() ? stored : runtimeSettingsFromAuthChoice(deps.baseRouteOptions.authChoice, stored));
+  });
 
   app.get("/api/config/runtime/readiness", (c) => {
     const correction = persistedRuntimeCorrection(deps);
@@ -1712,7 +1717,13 @@ export function createApp(deps: TurnDeps) {
 
   app.put("/api/config/runtime", async (c) => {
     const patch = await c.req.json().catch(() => ({}) as Partial<RuntimeSettings>);
-    const updated: RuntimeSettings = { ...deps.store.getRuntimeSettings(), ...patch };
+    // Seed the merge from what GET reports, so a first save patches the effective (boot) runtime.
+    const stored = deps.store.getRuntimeSettings();
+    const effective = deps.store.hasExplicitRuntimeSettings() ? stored : runtimeSettingsFromAuthChoice(deps.baseRouteOptions.authChoice, stored);
+    const updated: RuntimeSettings = { ...effective, ...patch };
+    if (!isRuntimeAuthMode(updated.authMode)) {
+      return c.json({ error: "authMode must be one of subscription, byo, local, gateway" }, 400);
+    }
 
     // Derive the candidate live AuthChoice from the merged (not-yet-persisted)
     // settings and validate it BEFORE any mutation — a rejected save must leave

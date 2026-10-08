@@ -46,3 +46,55 @@ export function toAuthChoiceFromRuntimeSettings(settings: RuntimeSettings): Auth
     }
   }
 }
+
+const RUNTIME_AUTH_MODES: ReadonlySet<string> = new Set(["subscription", "byo", "local", "gateway"]);
+
+/** True for the wire `authMode` values `toAuthChoiceFromRuntimeSettings` can map. */
+export function isRuntimeAuthMode(value: unknown): value is RuntimeSettings["authMode"] {
+  return typeof value === "string" && RUNTIME_AUTH_MODES.has(value);
+}
+
+function stringField(config: Readonly<Record<string, unknown>> | undefined, key: string): string | undefined {
+  const value = config?.[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+/**
+ * The inverse of `toAuthChoiceFromRuntimeSettings`, for reporting the auth the BFF booted with
+ * (`WREN_HARNESS_MODE` / `MODEL` / `ENDPOINT` / flags) before the user has saved a runtime.
+ * Overlays only the auth-selection fields onto `base`; tier rows, deployment and hybrid stay the
+ * store's. Credentials never appear in the result. A boot adapter the wizard cannot represent
+ * leaves `base` untouched.
+ */
+export function runtimeSettingsFromAuthChoice(choice: AuthChoice, base: RuntimeSettings): RuntimeSettings {
+  switch (choice.mode) {
+    case "subscription":
+      return { ...base, authMode: "subscription", subscriptionProvider: choice.provider };
+    case "local":
+      return { ...base, authMode: "local" };
+    case "gateway": {
+      const provider = stringField(choice.config, "provider");
+      const model = stringField(choice.config, "model");
+      const baseURL = stringField(choice.config, "baseUrl");
+      return {
+        ...base,
+        authMode: "gateway",
+        ...(provider !== undefined ? { gatewayProvider: provider } : {}),
+        ...(model !== undefined ? { gatewayModel: model } : {}),
+        ...(baseURL !== undefined ? { gatewayBaseURL: baseURL } : {}),
+      };
+    }
+    case "api-key": {
+      if (choice.adapter !== "anthropic" && choice.adapter !== "openai-compatible") return base;
+      const model = stringField(choice.config, "model");
+      const baseURL = choice.adapter === "openai-compatible" ? stringField(choice.config, "baseURL") : undefined;
+      return {
+        ...base,
+        authMode: "byo",
+        apiKeyAdapter: choice.adapter,
+        ...(model !== undefined ? { apiKeyModel: model } : {}),
+        ...(baseURL !== undefined ? { apiKeyBaseURL: baseURL } : {}),
+      };
+    }
+  }
+}
