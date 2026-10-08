@@ -9,9 +9,9 @@ allowBuilds:
   '@google/genai': false
   protobufjs: false
 minimumReleaseAgeExclude:
-  - '@warble/claude-agent-sdk@0.15.4'
-  - '@warble/cli@0.15.4'
-  - '@warble/codex-local@0.15.4'
-  - '@warble/ir-spec@0.8.0'
+  - '@warble/claude-agent-sdk@0.17.0'
+  - '@warble/cli@0.17.0'
+  - '@warble/codex-local@0.17.0'
+  - '@warble/ir-spec@0.9.0'
   - '@earendil-works/pi-ai@1.0.4'
   - '@earendil-works/pi-telemetry@1.0.4'

@@ -54,7 +54,7 @@ async function captureBindings(irDocument: string, options: NativeComponentConte
     if (!isDeepStrictEqual(currentIdentity(), identity)) throw new Error("Native component context binding expired");
   };
   check();
-  const ir = z.object({ warble_ir_version: z.literal("0.8"), components: z.array(z.object({
+  const ir = z.object({ warble_ir_version: z.literal("0.9"), components: z.array(z.object({
     id: z.string(), context_binding: z.record(z.string(), z.unknown()).optional(),
   }).passthrough()) }).passthrough().parse(JSON.parse(irDocument));
   if (new Set(ir.components.map((component) => component.id)).size !== ir.components.length) throw new Error("Duplicate component identity");

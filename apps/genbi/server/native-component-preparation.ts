@@ -10,7 +10,7 @@ const nodeSchema = z.object({ id: z.string().min(1), verb: z.string().min(1), en
   context_binding: z.record(z.string(), z.unknown()),
   llm_calls: z.array(z.object({ tier: z.string().min(1), component_calls: z.array(z.object({ alias: z.string(), component: z.string() })).optional() }).passthrough()),
 }).passthrough();
-const irSchema = z.object({ warble_ir_version: z.literal("0.8"), components: z.array(z.record(z.string(), z.unknown())) }).passthrough();
+const irSchema = z.object({ warble_ir_version: z.literal("0.9"), components: z.array(z.record(z.string(), z.unknown())) }).passthrough();
 const supportedGuards = new Set(["read_only_execution", "row_limit", "statement_timeout", "deterministic_gate", "artifact_write", "additivity_guard", "drill_depth_limit"]);
 const execution = ["ordered_steps", "isolated_step_tools", "artifact_provenance", "per_step_tiers", "bounded_repair", "render_contract"];
 

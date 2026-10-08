@@ -140,7 +140,7 @@ async function describeAgentSdkManifest(options: DescribeBundleOptions): Promise
   return loadBundleWithProvenance(manifest, {
     ...(compiled.warbleBin !== undefined ? { warbleBin: compiled.warbleBin } : {}),
     profileSource: options.profileSource,
-  }, { irVersion: "0.8", bundleVersions: ["0.1", "0.3"] });
+  }, { irVersion: "0.9", bundleVersions: ["0.1", "0.3"] });
 }
 
 function compileForDescription(

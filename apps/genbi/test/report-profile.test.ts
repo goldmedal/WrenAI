@@ -26,7 +26,7 @@ describe("genbi-report profile: released Hub, committed golden, caller SQL denia
       const compiled = JSON.parse(await readFile(path.join(out, "ir.json"), "utf8"));
       const golden = JSON.parse(await readFile(REPORT_IR_GOLDEN, "utf8"));
       expect(compiled).toEqual(golden);
-      expect(golden.warble_ir_version).toBe("0.8");
+      expect(golden.warble_ir_version).toBe("0.9");
       expect(golden.profile).toBe("genbi-report");
       const ids = golden.components.map((node: { id: string; entrypoint?: boolean }) => [node.id, node.entrypoint]);
       expect(ids).toEqual([["plan_report", true], ["answer_batch", false]]);

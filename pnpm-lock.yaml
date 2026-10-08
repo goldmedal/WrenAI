@@ -40,17 +40,17 @@ importers:
         specifier: ^2.0.10
         version: 2.1.1(hono@4.13.5)
       '@warble/claude-agent-sdk':
-        specifier: 0.15.4
-        version: 0.15.4(@warble/ir-spec@0.8.0)
+        specifier: 0.17.0
+        version: 0.17.0(@warble/ir-spec@0.9.0)
       '@warble/cli':
-        specifier: 0.15.4
-        version: 0.15.4(@warble/ir-spec@0.8.0)
+        specifier: 0.17.0
+        version: 0.17.0(@warble/ir-spec@0.9.0)
       '@warble/codex-local':
-        specifier: 0.15.4
-        version: 0.15.4(@warble/ir-spec@0.8.0)
+        specifier: 0.17.0
+        version: 0.17.0(@warble/ir-spec@0.9.0)
       '@warble/ir-spec':
-        specifier: 0.8.0
-        version: 0.8.0
+        specifier: 0.9.0
+        version: 0.9.0
       '@wrenai/context-loader':
         specifier: link:../context-loader
         version: link:../context-loader
@@ -1257,29 +1257,29 @@ packages:
   '@vitest/utils@4.1.11':
     resolution: {integrity: sha512-zTCVGpyFsGWBhllOyKlTw/vnr6D9qxsfSDyfbyZmTyjHw5N/VuvzHpHoQjm2ZJzn4RJgx5w4r7V0er69CmLgPQ==}
 
-  '@warble/claude-agent-sdk@0.15.4':
-    resolution: {integrity: sha512-zDshoAG5A85+M8Ynir7maNrC4C8Ah5N1bo96H3dC9oaJ+fWS67u1q8yfjHRfcIWYUmuTKEloQVUEJ7w76fL9VA==}
+  '@warble/claude-agent-sdk@0.17.0':
+    resolution: {integrity: sha512-eU4drhW5+SDJKBdUkc6cNzbZ1QcF6/t1qJQ/nUXx/rbWDa86/f3eEkhoOXh8AUIXlRtvgTmfRdyRg/iJ47uIDw==}
     engines: {node: '>=18'}
     hasBin: true
     peerDependencies:
-      '@warble/ir-spec': 0.8.x
+      '@warble/ir-spec': 0.9.x
 
-  '@warble/cli@0.15.4':
-    resolution: {integrity: sha512-x1/0VQUQE4XCGOSAxyNVIhGSEpgE8yAhbeOrLmQ06n4TmXP5qMZCDaz8wZTPS/P2zN9+DEJWGPQZXpT4ox0y7Q==}
+  '@warble/cli@0.17.0':
+    resolution: {integrity: sha512-fqNwwEzpeVg/A5ZcF38DaX5doH+ArqsLRs/qux1XnWdV5eIkwrPtBfdTvrlgYqdg43vChkHLWT9sUEhlAaOeOg==}
     engines: {node: '>=14.14', npm: '>=6'}
     hasBin: true
     peerDependencies:
-      '@warble/ir-spec': 0.8.x
+      '@warble/ir-spec': 0.9.x
 
-  '@warble/codex-local@0.15.4':
-    resolution: {integrity: sha512-g1aR2EfThJ7TpYssdQSep5uW9a4lLk+Xo3ZEwKMx1O+MPmxBssoLCf4BOlxgRIarGd/6qPCXsfUkrD3xgMK2UA==}
+  '@warble/codex-local@0.17.0':
+    resolution: {integrity: sha512-y2+Oh64Ei3XNIxg7w5wS0d+tm7OKNwcS385a3QNG0tuFK7zn8XAwCE/uITFEe0MLsBNGhmfTdMevWtxcj8aUiA==}
     engines: {node: '>=18'}
     hasBin: true
     peerDependencies:
-      '@warble/ir-spec': 0.8.x
+      '@warble/ir-spec': 0.9.x
 
-  '@warble/ir-spec@0.8.0':
-    resolution: {integrity: sha512-nzBlxB+FZsXiwXykjlWT9OPpnDlx7vX9Y6fPBejcN0BjHttSnxLH056lb5MwC+o91f2WKUFn2fuZwQH/QrU+QA==}
+  '@warble/ir-spec@0.9.0':
+    resolution: {integrity: sha512-jgy1H3IEOza5PAinBV6B5LZhYRsm+q+PD3xMIm+UZTBSfe9kqnmjdnsk/8tIUtcDZa0HLbgOrNRPpD1Ye/pHmA==}
     engines: {node: '>=18'}
 
   '@workflow/serde@4.1.0':
@@ -3580,23 +3580,23 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.1
 
-  '@warble/claude-agent-sdk@0.15.4(@warble/ir-spec@0.8.0)':
+  '@warble/claude-agent-sdk@0.17.0(@warble/ir-spec@0.9.0)':
     dependencies:
       '@anthropic-ai/claude-agent-sdk': 0.1.77(zod@4.5.4)
-      '@warble/ir-spec': 0.8.0
+      '@warble/ir-spec': 0.9.0
       yaml: 2.9.0
       zod: 4.5.4
 
-  '@warble/cli@0.15.4(@warble/ir-spec@0.8.0)':
+  '@warble/cli@0.17.0(@warble/ir-spec@0.9.0)':
     dependencies:
-      '@warble/ir-spec': 0.8.0
+      '@warble/ir-spec': 0.9.0
       detect-libc: 2.1.2
 
-  '@warble/codex-local@0.15.4(@warble/ir-spec@0.8.0)':
+  '@warble/codex-local@0.17.0(@warble/ir-spec@0.9.0)':
     dependencies:
-      '@warble/ir-spec': 0.8.0
+      '@warble/ir-spec': 0.9.0
 
-  '@warble/ir-spec@0.8.0': {}
+  '@warble/ir-spec@0.9.0': {}
 
   '@workflow/serde@4.1.0': {}
 

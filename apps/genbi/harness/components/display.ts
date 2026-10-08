@@ -8,7 +8,7 @@ const enforcement: Record<string, string> = { read_only_execution: "read_only", 
 
 /** Display projection only. Executable call edges remain in the separate host plan. */
 export function describeComponentPlan(plan: ExecutionPlan, profile: string): Bundle {
-  const bundle = bundleSchema.parse({ vercel_bundle_version: "0.2", compat: { min_ir_version: "0.8", max_ir_version: "0.8" },
+  const bundle = bundleSchema.parse({ vercel_bundle_version: "0.2", compat: { min_ir_version: "0.9", max_ir_version: "0.9" },
     profile, target: "vercel:headless", agents: plan.entries.map((id) => {
       const node = plan.components[id]!;
       const declaration = node.declaration;
