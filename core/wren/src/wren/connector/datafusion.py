@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 from loguru import logger
 
-from wren.connector.base import ConnectorABC, strip_trailing_semicolon
+from wren.connector.base import ConnectorABC, coerce_limit
 from wren.model import DataFusionConnectionInfo
 from wren.model.error import ErrorCode, WrenError
 
@@ -29,17 +29,24 @@ class DataFusionConnector(ConnectorABC):
         self._register_tables()
 
     def query(self, sql: str, limit: int | None = None) -> pa.Table:
+        limit = coerce_limit(limit)
+        stripped = self._strip(sql)
         if limit is not None:
-            sql = (
-                f"SELECT * FROM ({strip_trailing_semicolon(sql)}) "
-                f"AS _q LIMIT {int(limit)}"
-            )
+            # Multiline wrap so a trailing line comment in the inner SQL is
+            # terminated by the newline instead of swallowing the closing paren.
+            sql = f"SELECT * FROM (\n{stripped}\n) AS _q LIMIT {limit}"
+        else:
+            sql = stripped
         ipc_bytes = self.ctx.query(sql)
         reader = ipc.open_stream(io.BytesIO(bytes(ipc_bytes)))
         return reader.read_all()
 
     def dry_run(self, sql: str) -> None:
-        self.ctx.dry_run(sql)
+        # Trailing semicolons break DataFusion's dry-run path the same way they
+        # break the LIMIT subquery wrap (``SELECT 1;`` is a multi-statement batch
+        # the planner rejects). Strip only the terminating run so ';' inside
+        # string literals stays intact — same helper already used by ``query``.
+        self.ctx.dry_run(self._strip(sql))
 
     def close(self) -> None:
         pass

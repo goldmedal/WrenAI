@@ -6,7 +6,8 @@ over them:
 - ``GrepIndex`` — dependency-free token/substring search. The default when the
   ``memory`` extra is absent; ``knowledge/sql/`` *is* the index (nothing to build).
 - ``LanceDBIndex`` — semantic search via the ``memory`` extra (lancedb +
-  sentence-transformers), with LanceDB as a derived index.
+  sentence-transformers) or ``memory-onnx`` (lancedb + onnxruntime), with
+  LanceDB as a derived index.
 
 Backend selection: ``WREN_MEMORY_BACKEND=grep|lancedb`` forces a choice;
 otherwise LanceDB is used when its extra is importable, else Grep.
@@ -123,9 +124,7 @@ class LanceDBIndex(MemoryIndex):
 
     def rebuild(self) -> dict:
         pairs = load_query_pairs(self._project)
-        if not pairs:
-            return {"backend": self.name, "loaded": 0, "updated": 0}
-        res = self._store.load_queries(pairs, upsert=True)
+        res = self._store.sync_markdown_queries(pairs)
         return {"backend": self.name, **res}
 
     def reset(self) -> None:
@@ -141,7 +140,14 @@ class LanceDBIndex(MemoryIndex):
 
 
 def _extra_available() -> bool:
-    return bool(find_spec("lancedb")) and bool(find_spec("sentence_transformers"))
+    """True when LanceDB and some embedding backend are both importable.
+
+    Either embedding extra qualifies — pinning this to sentence-transformers
+    would silently downgrade a ``memory-onnx`` install to Grep.
+    """
+    from wren.memory.embeddings import embedding_backend_available  # noqa: PLC0415
+
+    return bool(find_spec("lancedb")) and embedding_backend_available()
 
 
 def resolve_backend(env: str | None = None) -> str:

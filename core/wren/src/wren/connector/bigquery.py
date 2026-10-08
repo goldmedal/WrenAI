@@ -4,29 +4,53 @@ from json import loads
 import pyarrow as pa
 from loguru import logger
 
-from wren.connector.base import ConnectorABC
+from wren.connector.base import ConnectorABC, coerce_limit, strip_trailing_semicolon
+
+
+def _apply_limit(sql: str, limit: int, dialect: str | None = None) -> str:
+    """Push LIMIT into SQL via outer subquery wrap.
+
+    ``max_results`` only caps the page size of job results-reading; it does
+    not rewrite the query plan. Wrapping as ``SELECT * FROM (sql) LIMIT n``
+    (after stripping a trailing semicolon) short-circuits the engine and
+    correctly enforces the caller's limit even when *sql* already contains an
+    inner ``LIMIT`` (the outer limit always wins / can only reduce rows).
+    Avoids comment-sensitive outer-LIMIT detection heuristics. The wrap
+    itself is multiline so a trailing ``-- line comment`` in *sql* is
+    terminated by the newline instead of swallowing the closing paren,
+    alias and LIMIT clause (same technique as postgres.py/athena.py).
+    """
+    cleaned = strip_trailing_semicolon(sql, dialect)
+    return f"SELECT * FROM (\n{cleaned}\n) AS _sub LIMIT {limit}"
+
+
+_SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/cloud-platform",
+]
 
 
 class BigQueryConnector(ConnectorABC):
     def __init__(self, connection_info):
         from google.cloud import bigquery  # noqa: PLC0415
-        from google.oauth2 import service_account  # noqa: PLC0415
 
         self.connection_info = connection_info
-        credits_json = loads(
-            base64.b64decode(connection_info.credentials.get_secret_value()).decode(
-                "utf-8"
+        if connection_info.credentials:
+            from google.oauth2 import service_account  # noqa: PLC0415
+
+            credits_json = loads(
+                base64.b64decode(connection_info.credentials.get_secret_value()).decode(
+                    "utf-8"
+                )
             )
-        )
-        credentials = service_account.Credentials.from_service_account_info(
-            credits_json
-        )
-        credentials = credentials.with_scopes(
-            [
-                "https://www.googleapis.com/auth/drive",
-                "https://www.googleapis.com/auth/cloud-platform",
-            ]
-        )
+            credentials = service_account.Credentials.from_service_account_info(
+                credits_json
+            )
+            credentials = credentials.with_scopes(_SCOPES)
+        else:
+            import google.auth  # noqa: PLC0415
+
+            credentials, _ = google.auth.default(scopes=_SCOPES)
         client = bigquery.Client(
             credentials=credentials,
             project=connection_info.get_billing_project_id(),
@@ -37,13 +61,19 @@ class BigQueryConnector(ConnectorABC):
         self.connection = client
 
     def query(self, sql: str, limit: int | None = None) -> pa.Table:
-        return self.connection.query(sql).result(max_results=limit).to_arrow()
+        limit = coerce_limit(limit)
+        if limit is not None:
+            sql = _apply_limit(sql, limit, self.dialect)
+        else:
+            sql = self._strip(sql)
+        return self.connection.query(sql).result().to_arrow()
 
     def dry_run(self, sql: str) -> None:
         from google.cloud import bigquery  # noqa: PLC0415
 
         self.connection.query(
-            sql, job_config=bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+            self._strip(sql),
+            job_config=bigquery.QueryJobConfig(dry_run=True, use_query_cache=False),
         )
 
     def close(self) -> None:

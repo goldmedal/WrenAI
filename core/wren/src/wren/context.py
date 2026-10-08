@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
@@ -261,6 +262,23 @@ def convert_mdl_to_project(mdl_json: dict) -> list[ProjectFile]:
             )
         )
 
+    # ── Cubes ─────────────────────────────────────────────────
+    for i, cube in enumerate(mdl_json.get("cubes", [])):
+        cube_snake = _convert_keys_to_snake(cube)
+        if "name" not in cube_snake:
+            raise ValueError(f"Cube at index {i} is missing required 'name' field")
+        files.append(
+            ProjectFile(
+                relative_path=f"cubes/{cube_snake['name']}/metadata.yml",
+                content=yaml.dump(
+                    cube_snake,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                ),
+            )
+        )
+
     # ── Relationships ─────────────────────────────────────────
     relationships = mdl_json.get("relationships", [])
     if relationships:
@@ -308,6 +326,7 @@ def write_project_files(
     output_dir: Path,
     *,
     force: bool = False,
+    extra_managed_paths: Iterable[str] = (),
 ) -> None:
     """Write project files to disk.
 
@@ -315,8 +334,26 @@ def write_project_files(
         files: List of ProjectFile from convert_mdl_to_project().
         output_dir: Target directory.
         force: If False, raise SystemExit if any target file already exists.
+        extra_managed_paths: Additional top-level paths the caller owns; with
+            ``force`` they are removed before writing (e.g. ``"cubes"``).
     """
     output_dir = Path(output_dir)
+    root = output_dir.resolve()
+    resolved_files: list[tuple[ProjectFile, Path]] = []
+    seen_targets: set[Path] = set()
+
+    for file in files:
+        target = (output_dir / file.relative_path).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise SystemExit(f"Error: invalid output path: {file.relative_path!r}")
+        if target == root:
+            raise SystemExit(f"Error: invalid output path: {file.relative_path!r}")
+        if target in seen_targets:
+            raise SystemExit(f"Error: duplicate output path: {file.relative_path!r}")
+        seen_targets.add(target)
+        resolved_files.append((file, target))
 
     if force and output_dir.exists():
         import shutil  # noqa: PLC0415
@@ -328,6 +365,7 @@ def write_project_files(
             "instructions.md",
             "wren_project.yml",
             "AGENTS.md",
+            *extra_managed_paths,
         }
         if any(f.relative_path == "queries.yml" for f in files):
             managed_paths.add("queries.yml")
@@ -341,7 +379,7 @@ def write_project_files(
 
     if not force:
         conflicts = [
-            f.relative_path for f in files if (output_dir / f.relative_path).exists()
+            file.relative_path for file, target in resolved_files if target.exists()
         ]
         if conflicts:
             names = ", ".join(f"'{Path(p).name}'" for p in conflicts)
@@ -349,15 +387,9 @@ def write_project_files(
                 f"Error: {names} already exists. Use --force to overwrite."
             )
 
-    for f in files:
-        root = output_dir.resolve()
-        path = (output_dir / f.relative_path).resolve()
-        try:
-            path.relative_to(root)
-        except ValueError:
-            raise SystemExit(f"Error: invalid output path: {f.relative_path!r}")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f.content)
+    for file, target in resolved_files:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(file.content, encoding="utf-8")
 
 
 # ── Project discovery ─────────────────────────────────────────────────────
@@ -450,7 +482,8 @@ def save_project_config(project_path: Path, config: dict) -> None:
     (project_path / PROJECT_FILE).write_text(
         yaml.safe_dump(
             ordered, default_flow_style=False, sort_keys=False, allow_unicode=True
-        )
+        ),
+        encoding="utf-8",
     )
 
 
@@ -684,6 +717,26 @@ def require_schema_version(project_path: Path) -> int:
 # ── Loaders (all return snake_case dicts) ─────────────────────────────────
 
 
+def _normalize_model_columns(model: dict) -> dict:
+    """Normalise YAML-sourced ``columns`` to ``list[dict]``.
+
+    Hand-edited project YAML can set ``columns:`` to a scalar or mix bare
+    strings into the list. Loaders drop malformed entries (matching views/
+    relationships); ``validate_project`` re-reads the raw file to report them.
+
+    Omit the key when absent so ``target/mdl.json`` does not gain an empty
+    ``columns: []`` solely from loader defaults.
+    """
+    if "columns" not in model:
+        return model
+    raw = model.get("columns")
+    if not isinstance(raw, list):
+        model["columns"] = []
+        return model
+    model["columns"] = [c for c in raw if isinstance(c, dict)]
+    return model
+
+
 def load_models(project_path: Path) -> list[dict]:
     """Load models — dispatches on schema_version.
 
@@ -707,7 +760,7 @@ def _load_models_v1(project_path: Path) -> list[dict]:
         data = yaml.safe_load(f.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             data["_source_dir"] = f.stem
-            models.append(data)
+            models.append(_normalize_model_columns(data))
     return models
 
 
@@ -740,7 +793,7 @@ def _load_models_v2(project_path: Path) -> list[dict]:
             if sql_content:
                 model["ref_sql"] = sql_content
 
-        models.append(model)
+        models.append(_normalize_model_columns(model))
     return models
 
 
@@ -763,7 +816,13 @@ def _load_views_v1(project_path: Path) -> list[dict]:
     if not views_file.exists():
         return []
     data = yaml.safe_load(views_file.read_text(encoding="utf-8")) or {}
-    return data.get("views", []) if isinstance(data, dict) else []
+    views = data.get("views") if isinstance(data, dict) else None
+    # A bare ``views:`` parses to None and means "no views", same as a missing
+    # key. Any other non-list value is malformed; return nothing here and let
+    # ``validate_project`` be the one to report it.
+    if not isinstance(views, list):
+        return []
+    return [v for v in views if isinstance(v, dict)]
 
 
 def _load_views_v2(project_path: Path) -> list[dict]:
@@ -812,6 +871,71 @@ def load_cubes(project_path: Path) -> list[dict]:
     return _load_cubes_v2(project_path)
 
 
+def _report_malformed_cube_members(
+    errors: list[ValidationError], src_path: str, raw: dict
+) -> None:
+    """Report non-list containers and non-mapping member entries."""
+    # Prefer cube name; bare path twice reads poorly when name is missing.
+    if isinstance(raw.get("name"), str) and raw["name"]:
+        cube_label = raw["name"]
+    else:
+        cube_label = "cube"
+    for key in ("measures", "dimensions", "time_dimensions"):
+        val = raw.get(key)
+        # Bare `dimensions:` parses to None and means "no members" (loader
+        # normalises to []). Only non-list non-null values are malformed.
+        if val is None:
+            continue
+        if not isinstance(val, list):
+            errors.append(
+                ValidationError(
+                    "error",
+                    f"{src_path} > {cube_label} > {key}",
+                    f"'{key}' must be a list, got {type(val).__name__}",
+                )
+            )
+            continue
+        for i, item in enumerate(val):
+            if not isinstance(item, dict):
+                errors.append(
+                    ValidationError(
+                        "error",
+                        f"{src_path} > {cube_label} > {key}[{i}]",
+                        f"{key[:-1]} entry must be a mapping, got {type(item).__name__}",
+                    )
+                )
+                continue
+            if not isinstance(item.get("name"), str):
+                errors.append(
+                    ValidationError(
+                        "error",
+                        f"{src_path} > {cube_label} > {key}[{i}]",
+                        f"{key[:-1]} entry must have a string 'name'",
+                    )
+                )
+
+
+def _normalise_cube_member_lists(cube: dict) -> dict:
+    """Drop non-mapping measure/dimension/time_dimension entries.
+
+    Explicit null keys (YAML ``dimensions:``) become empty lists so the
+    build artifact never carries null member containers into the CLI.
+
+    ``validate_project`` re-reads the raw YAML so hand-edited mistakes are
+    still reported rather than vanishing quietly (same pattern as views /
+    relationships in #2604 / #2613).
+    """
+    for key in ("measures", "dimensions", "time_dimensions"):
+        if key not in cube:
+            continue
+        raw = cube[key]
+        if raw is None or not isinstance(raw, list):
+            cube[key] = []
+            continue
+        cube[key] = [item for item in raw if isinstance(item, dict)]
+    return cube
+
+
 def _load_cubes_v1(project_path: Path) -> list[dict]:
     """Legacy: load cube YAML files from project_path/cubes/*.yml."""
     cubes_dir = project_path / "cubes"
@@ -819,10 +943,13 @@ def _load_cubes_v1(project_path: Path) -> list[dict]:
         return []
     cubes = []
     for f in sorted(cubes_dir.glob("*.yml")):
-        data = yaml.safe_load(f.read_text(encoding="utf-8"))
+        try:
+            data = yaml.safe_load(f.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            continue
         if isinstance(data, dict):
             data["_source_file"] = f.name
-            cubes.append(data)
+            cubes.append(_normalise_cube_member_lists(data))
     return cubes
 
 
@@ -841,10 +968,13 @@ def _load_cubes_v2(project_path: Path) -> list[dict]:
         meta_file = d / "metadata.yml"
         if not meta_file.exists():
             continue
-        data = yaml.safe_load(meta_file.read_text())
+        try:
+            data = yaml.safe_load(meta_file.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            continue
         if isinstance(data, dict):
             data["_source_file"] = str(meta_file.relative_to(cubes_dir))
-            cubes.append(data)
+            cubes.append(_normalise_cube_member_lists(data))
     return cubes
 
 
@@ -855,12 +985,21 @@ def _cube_migration_target(cube: dict, source_file: str | None) -> tuple[str, st
 
 
 def load_relationships(project_path: Path) -> list[dict]:
-    """Load relationships from project_path/relationships.yml."""
+    """Load relationships from project_path/relationships.yml.
+
+    Non-list ``relationships`` values and non-mapping entries are dropped here
+    (matching ``_load_views_v1``). ``validate_project`` re-reads the raw YAML
+    so hand-edited mistakes are still reported rather than vanishing quietly.
+    """
     rel_file = project_path / "relationships.yml"
     if not rel_file.exists():
         return []
     data = yaml.safe_load(rel_file.read_text(encoding="utf-8")) or {}
-    return data.get("relationships", []) if isinstance(data, dict) else []
+    rels = data.get("relationships") if isinstance(data, dict) else None
+    # A bare ``relationships:`` parses to None and means "no relationships".
+    if not isinstance(rels, list):
+        return []
+    return [r for r in rels if isinstance(r, dict)]
 
 
 def load_instructions(project_path: Path) -> str | None:
@@ -991,7 +1130,9 @@ def save_target(manifest_json: dict, project_path: Path) -> Path:
     target_dir = project_path / _TARGET_DIR
     target_dir.mkdir(parents=True, exist_ok=True)
     out = target_dir / _TARGET_FILE
-    out.write_text(json.dumps(manifest_json, indent=2, ensure_ascii=False))
+    out.write_text(
+        json.dumps(manifest_json, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return out
 
 
@@ -1106,11 +1247,86 @@ def validate_project(project_path: Path) -> list[ValidationError]:
     model_names: set[str] = set()
     view_names: set[str] = set()
 
+    # Hand-edited model YAML may set columns: to a non-list (e.g. a bare
+    # string). load_models() normalises to list[dict], but validate_project
+    # must still report the mistake rather than let it vanish quietly.
+    def _iter_raw_model_files() -> list[tuple[str, dict]]:
+        models_dir = project_path / "models"
+        if not models_dir.is_dir():
+            return []
+        out: list[tuple[str, dict]] = []
+        if sv == 1:
+            for f in sorted(models_dir.glob("*.yml")):
+                data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+                if isinstance(data, dict):
+                    out.append((f"models/{f.name}", data))
+        else:
+            for d in sorted(models_dir.iterdir()):
+                if not d.is_dir():
+                    continue
+                meta = d / "metadata.yml"
+                if not meta.exists():
+                    continue
+                data = yaml.safe_load(meta.read_text(encoding="utf-8")) or {}
+                if isinstance(data, dict):
+                    out.append((f"models/{d.name}/metadata.yml", data))
+        return out
+
+    # source key (_source_dir) -> raw columns list (file order) for
+    # index-stable diagnostics. Key by source identity, not model name —
+    # duplicate names are reachable and must not cross-wire column lists.
+    raw_model_columns: dict[str, list] = {}
+    for src_path, raw_model in _iter_raw_model_files():
+        if "columns" not in raw_model:
+            continue
+        raw_cols = raw_model.get("columns")
+        # v2 path is models/<dir>/metadata.yml — prefer directory name over
+        # stem "metadata" when the YAML omits `name`.
+        if src_path.endswith("/metadata.yml"):
+            source_key = Path(src_path).parent.name
+            mname = raw_model.get("name") or source_key
+        else:
+            source_key = Path(src_path).stem
+            mname = raw_model.get("name") or source_key
+        if not isinstance(raw_cols, list):
+            errors.append(
+                ValidationError(
+                    "error",
+                    f"{src_path} > {mname} > columns",
+                    f"must be a list, got {type(raw_cols).__name__}",
+                )
+            )
+            continue
+        raw_model_columns[source_key] = raw_cols
+        for j, col in enumerate(raw_cols):
+            if not isinstance(col, dict):
+                errors.append(
+                    ValidationError(
+                        "error",
+                        f"{src_path} > {mname} > columns[{j}]",
+                        "column entry must be an object",
+                    )
+                )
+
     # Check models
     for i, model in enumerate(models):
         src = model.get("_source_dir", f"models[{i}]")
-        src_path = f"models/{src}/metadata.yml"
+        # v1 is flat models/<stem>.yml; v2+ is models/<dir>/metadata.yml.
+        # Keep labels consistent with the raw re-read paths above.
+        if sv == 1:
+            src_path = f"models/{src}.yml"
+        else:
+            src_path = f"models/{src}/metadata.yml"
         name = model.get("name")
+        if isinstance(name, (list, dict)):
+            errors.append(
+                ValidationError(
+                    "error",
+                    src_path,
+                    f"model 'name' must be a scalar value, got {type(name).__name__}",
+                )
+            )
+            continue
         if not name:
             errors.append(ValidationError("error", src_path, "model missing 'name'"))
             continue
@@ -1151,14 +1367,8 @@ def validate_project(project_path: Path) -> list[ValidationError]:
                     )
                 )
 
+        # columns shape is owned by load_models + the raw re-read above.
         columns = model.get("columns", [])
-        if not isinstance(columns, list):
-            errors.append(
-                ValidationError(
-                    "error", f"{src_path} > {name}", "columns must be a list"
-                )
-            )
-            columns = []
         if not columns:
             errors.append(
                 ValidationError(
@@ -1166,16 +1376,19 @@ def validate_project(project_path: Path) -> list[ValidationError]:
                 )
             )
 
+        # Walk the raw columns list when available so indices match the file
+        # (filtered loader positions would renumber past dropped junk).
+        # Keyed by _source_dir so duplicate model names cannot cross-wire.
+        raw_cols_for_model = raw_model_columns.get(src)
+        col_entries = (
+            list(enumerate(raw_cols_for_model))
+            if raw_cols_for_model is not None
+            else list(enumerate(columns))
+        )
         col_names = set()
-        for j, col in enumerate(columns):
+        for j, col in col_entries:
             if not isinstance(col, dict):
-                errors.append(
-                    ValidationError(
-                        "error",
-                        f"{src_path} > {name} > columns[{j}]",
-                        "column entry must be an object",
-                    )
-                )
+                # Non-mappings already reported from the raw re-read above.
                 continue
             col_name = col.get("name")
             if not col_name:
@@ -1263,10 +1476,112 @@ def validate_project(project_path: Path) -> list[ValidationError]:
                     )
                 )
 
+        props = model.get("properties")
+        if props is not None and not isinstance(props, dict):
+            errors.append(
+                ValidationError(
+                    "error",
+                    f"{src_path} > {name}",
+                    "properties must be a mapping",
+                )
+            )
+        # Prefer raw-file indices for properties diagnostics too (same list).
+        for j, col in col_entries:
+            if not isinstance(col, dict):
+                continue
+            col_props = col.get("properties")
+            if col_props is not None and not isinstance(col_props, dict):
+                col_name = col.get("name") or f"columns[{j}]"
+                errors.append(
+                    ValidationError(
+                        "error",
+                        f"{src_path} > {name} > {col_name}",
+                        "properties must be a mapping",
+                    )
+                )
+
+    # v1 legacy views.yml may contain non-mapping entries (e.g. `- null`).
+    # load_views() silently drops those (matching the other loaders), but
+    # validate_project's job is to tell the user about hand-edited mistakes
+    # rather than let them vanish quietly, so re-check the raw entries here.
+    if sv == 1:
+        views_file = project_path / "views.yml"
+        if views_file.exists():
+            raw = yaml.safe_load(views_file.read_text(encoding="utf-8")) or {}
+            raw_views = raw.get("views") if isinstance(raw, dict) else None
+            if raw_views is not None and not isinstance(raw_views, list):
+                # A bare ``views:`` (None) legitimately means "no views"; a
+                # scalar or mapping there does not.
+                errors.append(
+                    ValidationError(
+                        "error",
+                        "views.yml > views",
+                        f"'views' must be a list, got {type(raw_views).__name__}",
+                    )
+                )
+            for i, v in enumerate(raw_views if isinstance(raw_views, list) else []):
+                if not isinstance(v, dict):
+                    errors.append(
+                        ValidationError(
+                            "error",
+                            f"views.yml > views[{i}]",
+                            f"view entry must be a mapping, got {type(v).__name__}",
+                        )
+                    )
+
+    # relationships.yml may contain non-mapping entries (e.g. `- null`).
+    # load_relationships() silently drops those (matching the other loaders),
+    # but validate_project reports hand-edited mistakes rather than letting
+    # them vanish quietly — re-check the raw entries here.
+    # Also remember the raw list so the field checks below can keep file indices.
+    raw_relationships_list: list | None = None
+    rel_file = project_path / "relationships.yml"
+    if rel_file.exists():
+        raw = yaml.safe_load(rel_file.read_text(encoding="utf-8")) or {}
+        if raw and not isinstance(raw, dict):
+            # Most likely hand-edit: bare list / scalar root (omitted `relationships:` key).
+            errors.append(
+                ValidationError(
+                    "error",
+                    "relationships.yml",
+                    "relationships.yml must be a mapping with a 'relationships' key, "
+                    f"got {type(raw).__name__}",
+                )
+            )
+        raw_rels = raw.get("relationships") if isinstance(raw, dict) else None
+        if isinstance(raw_rels, list):
+            raw_relationships_list = raw_rels
+        if raw_rels is not None and not isinstance(raw_rels, list):
+            errors.append(
+                ValidationError(
+                    "error",
+                    "relationships.yml > relationships",
+                    f"'relationships' must be a list, got {type(raw_rels).__name__}",
+                )
+            )
+        for i, r in enumerate(raw_rels if isinstance(raw_rels, list) else []):
+            if not isinstance(r, dict):
+                errors.append(
+                    ValidationError(
+                        "error",
+                        f"relationships.yml > relationships[{i}]",
+                        f"relationship entry must be a mapping, got {type(r).__name__}",
+                    )
+                )
+
     # Check views
     for i, view in enumerate(views):
         src_dir = view.get("_source_dir", f"views[{i}]")
         name = view.get("name")
+        if isinstance(name, (list, dict)):
+            errors.append(
+                ValidationError(
+                    "error",
+                    f"views/{src_dir}/metadata.yml",
+                    f"view 'name' must be a scalar value, got {type(name).__name__}",
+                )
+            )
+            continue
         if not name:
             errors.append(
                 ValidationError(
@@ -1309,17 +1624,27 @@ def validate_project(project_path: Path) -> list[ValidationError]:
                     )
                 )
 
-    # Check relationships
-    all_entity_names = model_names | view_names
-    for i, rel in enumerate(relationships):
-        if not isinstance(rel, dict):
+        view_props = view.get("properties")
+        if view_props is not None and not isinstance(view_props, dict):
             errors.append(
                 ValidationError(
                     "error",
-                    f"relationships[{i}]",
-                    "relationship entry must be an object",
+                    f"views/{src_dir}",
+                    "properties must be a mapping",
                 )
             )
+
+    # Check relationships — walk the raw list when available so indices match
+    # the file (filtered loader positions would renumber past dropped junk).
+    all_entity_names = model_names | view_names
+    rel_entries = (
+        list(enumerate(raw_relationships_list))
+        if raw_relationships_list is not None
+        else list(enumerate(relationships))
+    )
+    for i, rel in rel_entries:
+        if not isinstance(rel, dict):
+            # Non-mappings already reported from the raw pass above.
             continue
         rel_name = rel.get("name", f"relationships[{i}]")
         ref_models = rel.get("models") or []
@@ -1344,6 +1669,65 @@ def validate_project(project_path: Path) -> list[ValidationError]:
                     "warning", f"relationships > {rel_name}", "missing join_type"
                 )
             )
+
+    # Cube YAML may contain non-mapping files / member-array junk.
+    # load_cubes() drops those (matching views / relationships). Re-read the
+    # raw files here so hand-edits are reported rather than vanishing quietly.
+    cubes_dir = project_path / "cubes"
+    if cubes_dir.is_dir():
+        if sv == 1:
+            for f in sorted(cubes_dir.glob("*.yml")):
+                src_path = f"cubes/{f.name}"
+                try:
+                    raw = yaml.safe_load(f.read_text(encoding="utf-8"))
+                except yaml.YAMLError as e:
+                    errors.append(
+                        ValidationError(
+                            "error",
+                            src_path,
+                            f"invalid YAML: {e}",
+                        )
+                    )
+                    continue
+                if not isinstance(raw, dict):
+                    errors.append(
+                        ValidationError(
+                            "error",
+                            src_path,
+                            f"cube file must be a mapping, got {type(raw).__name__}",
+                        )
+                    )
+                    continue
+                _report_malformed_cube_members(errors, src_path, raw)
+        else:
+            for d in sorted(cubes_dir.iterdir()):
+                if not d.is_dir():
+                    continue
+                meta_file = d / "metadata.yml"
+                if not meta_file.exists():
+                    continue
+                src_path = f"cubes/{d.name}/metadata.yml"
+                try:
+                    raw = yaml.safe_load(meta_file.read_text(encoding="utf-8"))
+                except yaml.YAMLError as e:
+                    errors.append(
+                        ValidationError(
+                            "error",
+                            src_path,
+                            f"invalid YAML: {e}",
+                        )
+                    )
+                    continue
+                if not isinstance(raw, dict):
+                    errors.append(
+                        ValidationError(
+                            "error",
+                            src_path,
+                            f"cube metadata must be a mapping, got {type(raw).__name__}",
+                        )
+                    )
+                    continue
+                _report_malformed_cube_members(errors, src_path, raw)
 
     # Check cubes — only structural / reference checks here. Deep validation
     # (measure cycles, hierarchy levels) runs Rust-side in
@@ -1453,6 +1837,88 @@ class UpgradeError(Exception):
     """Raised when a project upgrade cannot proceed."""
 
 
+def _resolve_upgrade_directory(
+    project_path: Path,
+    collection: str,
+    entity: str,
+    name: Any,
+) -> Path:
+    """Resolve one v1 migration directory without leaving its collection."""
+    if not isinstance(name, str) or not name:
+        raise UpgradeError(
+            f"Cannot upgrade: {entity} name must be a non-empty string, got {name!r}"
+        )
+    if (
+        name in {".", ".."}
+        or PurePosixPath(name).parts != (name,)
+        or PureWindowsPath(name).parts != (name,)
+    ):
+        raise UpgradeError(
+            f"Cannot upgrade: {entity} name {name!r} must be a single portable "
+            "path component"
+        )
+
+    project_root = project_path.resolve()
+    collection_root = (project_root / collection).resolve()
+    try:
+        collection_root.relative_to(project_root)
+    except ValueError as exc:
+        raise UpgradeError(
+            f"Cannot upgrade: {collection}/ resolves outside the project directory"
+        ) from exc
+
+    target_directory = (collection_root / name).resolve()
+    try:
+        target_directory.relative_to(collection_root)
+    except ValueError as exc:
+        raise UpgradeError(
+            f"Cannot upgrade: {entity} name {name!r} resolves outside {collection}/"
+        ) from exc
+    if target_directory == collection_root:
+        raise UpgradeError(
+            f"Cannot upgrade: {entity} name {name!r} does not identify a directory"
+        )
+    return target_directory
+
+
+def _resolve_upgrade_file(target_directory: Path, filename: str) -> Path:
+    """Resolve one concrete migration file and reject existing symlinks."""
+    target_file = target_directory / filename
+    if target_file.is_symlink():
+        raise UpgradeError(
+            f"Cannot upgrade: destination file '{target_file}' is a symbolic link"
+        )
+
+    resolved_file = target_file.resolve()
+    try:
+        resolved_file.relative_to(target_directory)
+    except ValueError as exc:
+        raise UpgradeError(
+            f"Cannot upgrade: destination file '{target_file}' resolves outside "
+            "its entity directory"
+        ) from exc
+    return resolved_file
+
+
+def _validate_upgrade_view_statement(name: str, statement: Any) -> str | None:
+    """Reject malformed legacy view statements before migration."""
+    if statement is not None and not isinstance(statement, str):
+        raise UpgradeError(
+            f"Cannot upgrade: view {name!r} statement must be a string, "
+            f"got {statement!r}"
+        )
+    return statement
+
+
+def _validate_upgrade_model_ref_sql(name: str, ref_sql: Any) -> str | None:
+    """Reject malformed legacy model SQL before migration."""
+    if ref_sql is not None and not isinstance(ref_sql, str):
+        raise UpgradeError(
+            f"Cannot upgrade: model {name!r} ref_sql must be a string, got {ref_sql!r}"
+        )
+    return ref_sql
+
+
 def _knowledge_skeleton_targets() -> list[str]:
     """Canonical relative paths of a fresh knowledge/ skeleton.
 
@@ -1476,9 +1942,11 @@ def create_knowledge_skeleton(project_path: Path) -> list[str]:
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         if rel == _KNOWLEDGE_CONFIG_FILE:
-            dest.write_text(f"schema_version: {_KNOWLEDGE_SCHEMA_VERSION}\n")
+            dest.write_text(
+                f"schema_version: {_KNOWLEDGE_SCHEMA_VERSION}\n", encoding="utf-8"
+            )
         else:
-            dest.write_text("")  # .gitkeep
+            dest.write_text("", encoding="utf-8")  # .gitkeep
         created.append(rel)
     return created
 
@@ -1535,40 +2003,106 @@ def plan_upgrade(
     )
 
 
+def _reject_malformed_v1_model_columns(project_path: Path) -> None:
+    """Abort v1→v2 upgrade if any model YAML has malformed ``columns``.
+
+    Loader normalisation is correct for validation/runtime, but migration
+    deletes the source file after writing the normalised model. Require a
+    clean columns shape up front so content is never silently discarded.
+    """
+    models_dir = project_path / "models"
+    if not models_dir.is_dir():
+        return
+    problems: list[str] = []
+    for f in sorted(models_dir.glob("*.yml")):
+        data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict) or "columns" not in data:
+            continue
+        raw_cols = data.get("columns")
+        src = f"models/{f.name}"
+        name = data.get("name") or f.stem
+        if not isinstance(raw_cols, list):
+            problems.append(
+                f"{src} > {name} > columns: must be a list, "
+                f"got {type(raw_cols).__name__}"
+            )
+            continue
+        for j, col in enumerate(raw_cols):
+            if not isinstance(col, dict):
+                problems.append(
+                    f"{src} > {name} > columns[{j}]: column entry must be an object"
+                )
+    if problems:
+        detail = "; ".join(problems)
+        raise UpgradeError(
+            "Cannot upgrade: malformed model columns would be discarded — " + detail
+        )
+
+
 def _plan_v1_to_v2(project_path: Path) -> tuple[list[str], list[str]]:
     """Plan the v1→v2 file restructuring. Returns (files_created, files_deleted)."""
     created: list[str] = []
     deleted: list[str] = []
+    project_root = project_path.resolve()
+
+    # Reject malformed model columns before any write: load_models normalises
+    # (drops non-list / non-dict entries), and _apply_v1_to_v2 then unlinks the
+    # v1 source. Abort in preflight so upgrade cannot silently discard data.
+    _reject_malformed_v1_model_columns(project_path)
 
     # Models: flat files → directories
+    seen_model_targets: set[str] = set()
     models = _load_models_v1(project_path)
     for model in models:
         source_dir = model.pop("_source_dir", None)
         name = model.get("name", source_dir or "unknown")
-        dir_path = f"models/{name}"
+        model_dir = _resolve_upgrade_directory(project_path, "models", "model", name)
 
-        ref_sql = model.get("ref_sql")
+        ref_sql = _validate_upgrade_model_ref_sql(name, model.get("ref_sql"))
         if ref_sql:
-            created.append(f"{dir_path}/ref_sql.sql")
+            ref_sql_file = _resolve_upgrade_file(model_dir, "ref_sql.sql")
+            created.append(ref_sql_file.relative_to(project_root).as_posix())
 
-        created.append(f"{dir_path}/metadata.yml")
+        metadata_file = _resolve_upgrade_file(model_dir, "metadata.yml")
+        target = metadata_file.relative_to(project_root).as_posix()
+        # Case-folded: two names differing only in case resolve to the same
+        # directory on a case-insensitive filesystem (macOS APFS default,
+        # Windows), so treat them as the same target everywhere, not just on
+        # a literal string match.
+        if target.casefold() in seen_model_targets:
+            raise UpgradeError(
+                f"Cannot upgrade: multiple legacy models map to '{target}'"
+            )
+        seen_model_targets.add(target.casefold())
+        created.append(target)
 
         if source_dir:
             deleted.append(f"models/{source_dir}.yml")
 
     # Views: single file → directories
+    seen_view_targets: set[str] = set()
     views = _load_views_v1(project_path)
     for view in views:
         name = view.get("name")
         if not name:
             continue
-        dir_path = f"views/{name}"
+        view_dir = _resolve_upgrade_directory(project_path, "views", "view", name)
 
-        statement = view.get("statement")
+        statement = _validate_upgrade_view_statement(name, view.get("statement"))
         if statement and "\n" in statement.strip():
-            created.append(f"{dir_path}/sql.yml")
+            sql_file = _resolve_upgrade_file(view_dir, "sql.yml")
+            created.append(sql_file.relative_to(project_root).as_posix())
 
-        created.append(f"{dir_path}/metadata.yml")
+        metadata_file = _resolve_upgrade_file(view_dir, "metadata.yml")
+        target = metadata_file.relative_to(project_root).as_posix()
+        # Case-folded for the same reason as the model guard above.
+        if target.casefold() in seen_view_targets:
+            raise UpgradeError(
+                f"Cannot upgrade: multiple legacy views map to '{target}'"
+            )
+        seen_view_targets.add(target.casefold())
+
+        created.append(target)
 
     views_file = project_path / "views.yml"
     if views_file.exists():
@@ -1579,7 +2113,10 @@ def _plan_v1_to_v2(project_path: Path) -> tuple[list[str], list[str]]:
     cubes = _load_cubes_v1(project_path)
     for cube in cubes:
         source_file = cube.pop("_source_file", None)
-        _, target = _cube_migration_target(cube, source_file)
+        name, _ = _cube_migration_target(cube, source_file)
+        cube_dir = _resolve_upgrade_directory(project_path, "cubes", "cube", name)
+        metadata_file = _resolve_upgrade_file(cube_dir, "metadata.yml")
+        target = metadata_file.relative_to(project_root).as_posix()
         if target in seen_cube_targets:
             raise UpgradeError(
                 f"Cannot upgrade: multiple legacy cube files map to '{target}'"
@@ -1622,28 +2159,37 @@ def apply_upgrade(project_path: Path, result: UpgradeResult) -> None:
     config["schema_version"] = result.to_version
     config_file = project_path / PROJECT_FILE
     config_file.write_text(
-        yaml.dump(config, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        yaml.dump(
+            config, default_flow_style=False, sort_keys=False, allow_unicode=True
+        ),
+        encoding="utf-8",
     )
 
 
 def _apply_v1_to_v2(project_path: Path) -> None:
     """Execute the v1→v2 restructuring: write new files, delete old ones."""
+    # Validate every user-derived target before the first filesystem mutation.
+    _plan_v1_to_v2(project_path)
+
     # Write new model directories
     models = _load_models_v1(project_path)
     for model in models:
         source_dir = model.pop("_source_dir", None)
         name = model.get("name", source_dir or "unknown")
-        model_dir = project_path / "models" / name
+        model_dir = _resolve_upgrade_directory(project_path, "models", "model", name)
         model_dir.mkdir(parents=True, exist_ok=True)
 
         ref_sql = model.pop("ref_sql", None)
         if ref_sql:
-            (model_dir / "ref_sql.sql").write_text(ref_sql.strip() + "\n")
+            _resolve_upgrade_file(model_dir, "ref_sql.sql").write_text(
+                ref_sql.strip() + "\n", encoding="utf-8"
+            )
 
-        (model_dir / "metadata.yml").write_text(
+        _resolve_upgrade_file(model_dir, "metadata.yml").write_text(
             yaml.dump(
                 model, default_flow_style=False, sort_keys=False, allow_unicode=True
-            )
+            ),
+            encoding="utf-8",
         )
 
         # Delete old flat file
@@ -1658,26 +2204,28 @@ def _apply_v1_to_v2(project_path: Path) -> None:
         name = view.get("name")
         if not name:
             continue
-        view_dir = project_path / "views" / name
+        view_dir = _resolve_upgrade_directory(project_path, "views", "view", name)
         view_dir.mkdir(parents=True, exist_ok=True)
 
-        statement = view.pop("statement", None)
+        statement = _validate_upgrade_view_statement(name, view.pop("statement", None))
         if statement and "\n" in statement.strip():
-            (view_dir / "sql.yml").write_text(
+            _resolve_upgrade_file(view_dir, "sql.yml").write_text(
                 yaml.dump(
                     {"statement": statement},
                     default_flow_style=False,
                     sort_keys=False,
                     allow_unicode=True,
-                )
+                ),
+                encoding="utf-8",
             )
         elif statement:
             view["statement"] = statement
 
-        (view_dir / "metadata.yml").write_text(
+        _resolve_upgrade_file(view_dir, "metadata.yml").write_text(
             yaml.dump(
                 view, default_flow_style=False, sort_keys=False, allow_unicode=True
-            )
+            ),
+            encoding="utf-8",
         )
 
     # Delete old views.yml
@@ -1697,11 +2245,11 @@ def _apply_v1_to_v2(project_path: Path) -> None:
             )
         seen_cube_targets.add(target)
 
-        cube_dir = project_path / "cubes" / name
+        cube_dir = _resolve_upgrade_directory(project_path, "cubes", "cube", name)
         cube_dir.mkdir(parents=True, exist_ok=True)
 
-        (cube_dir / "metadata.yml").write_text(
-            yaml.dump(cube, default_flow_style=False, sort_keys=False)
+        _resolve_upgrade_file(cube_dir, "metadata.yml").write_text(
+            yaml.dump(cube, default_flow_style=False, sort_keys=False), encoding="utf-8"
         )
 
         if source_file:
@@ -1721,7 +2269,10 @@ _VALID_LEVELS = frozenset({"error", "warning", "strict"})
 
 
 def _prop_description(item: dict) -> str | None:
-    return (item.get("properties") or {}).get("description")
+    props = item.get("properties") or {}
+    if not isinstance(props, dict):
+        return None
+    return props.get("description")
 
 
 def _check_descriptions(manifest: dict, *, strict: bool = False) -> list[str]:

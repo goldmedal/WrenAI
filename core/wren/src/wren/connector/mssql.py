@@ -19,7 +19,7 @@ try:
 except ImportError:  # pragma: no cover
     pyodbc = None
 
-from wren.connector.base import ConnectorABC
+from wren.connector.base import ConnectorABC, strip_trailing_semicolon
 from wren.model import MSSqlConnectionInfo
 from wren.model.error import DIALECT_SQL, ErrorCode, ErrorPhase, WrenError
 
@@ -99,6 +99,9 @@ class MSSqlConnector(ConnectorABC):
     ) -> str:
         """Inject a ``LIMIT n`` into a Select so sqlglot emits the tsql
         ``OFFSET 0 ROWS FETCH NEXT n ROWS ONLY`` clause."""
+        # Unlimited path: strip trailing terminators so client-pasted SQL
+        # matches dry_run / limit composition (connector consistency; see #2595).
+        sql = strip_trailing_semicolon(sql, input_dialect)
         if limit is None:
             return sql
 
@@ -118,10 +121,20 @@ class MSSqlConnector(ConnectorABC):
     ) -> str:
         """Collapse an outer ``LIMIT`` wrapped around a single subquery into
         the inner Select's ``LIMIT`` — undoes the v4 paginate-wrap pattern."""
+        sql_query = strip_trailing_semicolon(sql_query, input_dialect)
         try:
             parsed = parse_one(sql_query, dialect=input_dialect)
             if not isinstance(parsed, exp.Select) or not parsed.args.get("limit"):
                 return sql_query
+
+            # Flattening keeps only the inner Select, so an outer WITH (e.g.
+            # semantic-layer model CTEs) or ORDER BY would be silently dropped —
+            # producing invalid references or wrong TOP-n rows. Only the bare
+            # paginate-wrap shape ``SELECT * FROM (inner) LIMIT n`` is safe to
+            # collapse; otherwise re-emit through the tsql dialect so a literal
+            # ``LIMIT`` still becomes TOP/FETCH while WITH and ORDER BY survive.
+            if parsed.args.get("with_") or parsed.args.get("order"):
+                return parsed.sql(dialect="tsql")
 
             from_clause = parsed.find(exp.From)
             if not from_clause:
@@ -456,7 +469,9 @@ def _connect_mssql_pyodbc(
     for key, value in connect_kwargs.items():
         connection_parts.append(f"{key}={_escape_odbc_value(str(value))}")
 
-    connection = pyodbc.connect(";".join(connection_parts))
+    # pyodbc defaults to autocommit=False, which would leave this cached,
+    # long-lived connection in one never-committed transaction.
+    connection = pyodbc.connect(";".join(connection_parts), autocommit=True)
     _register_mssql_output_converters(connection)
 
     if statement_timeout is not None:

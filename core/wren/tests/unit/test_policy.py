@@ -5,12 +5,16 @@ These tests use sqlglot parsing only and do not require a database or wren-core.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import pytest
 from sqlglot import exp, parse_one
 
 from wren.config import WrenConfig
 from wren.model.error import ErrorCode, WrenError
-from wren.policy import validate_sql_policy
+from wren.policy import resolve_model_name, validate_planned_sql, validate_sql_policy
 
 pytestmark = pytest.mark.unit
 
@@ -542,3 +546,180 @@ def test_optin_generator_does_not_unblock_distinct_generator():
     with pytest.raises(WrenError) as exc_info:
         validate_sql_policy(ast, _MODELS, config)
     assert exc_info.value.error_code == ErrorCode.MODEL_NOT_FOUND
+
+
+# ── Read-only statement validation ────────────────────────────────────────
+#
+# This control is always on, independent of strict mode: strict mode governs
+# *which tables* may be named, not *what may be done to them*. Planned SQL is
+# executed verbatim by the connector, and several connectors run with
+# ``autocommit=True``, so a write that gets through is durable.
+
+
+def _plain_config() -> WrenConfig:
+    """The CLI default: strict mode off, no denied functions."""
+    return WrenConfig()
+
+
+def _assert_blocked(sql: str, dialect: str = "postgres") -> WrenError:
+    with pytest.raises(WrenError) as exc:
+        validate_sql_policy(parse_one(sql, dialect=dialect), _MODELS, _plain_config())
+    assert exc.value.error_code == ErrorCode.BLOCKED_STATEMENT
+    return exc.value
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM orders",
+        "SELECT a FROM orders UNION SELECT a FROM customers",
+        "WITH c AS (SELECT 1 AS a) SELECT a FROM c",
+        "(SELECT 1)",
+        "VALUES (1), (2)",
+    ],
+)
+def test_read_only_queries_pass(sql):
+    validate_sql_policy(parse_one(sql, dialect="postgres"), _MODELS, _plain_config())
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "DROP TABLE orders",
+        "TRUNCATE TABLE orders",
+        "DELETE FROM orders",
+        "INSERT INTO orders VALUES (1)",
+        "UPDATE orders SET a = 1",
+        "CREATE TABLE t2 AS SELECT * FROM orders",
+        "ALTER TABLE orders ADD COLUMN b int",
+        "GRANT SELECT ON orders TO public",
+        "COPY orders TO '/tmp/x.csv'",
+        # Locking reads: not writes, but they request write-intent locks, and
+        # the connector never commits the connection they would be held on.
+        "SELECT * FROM orders FOR UPDATE",
+        "SELECT * FROM orders FOR SHARE",
+    ],
+)
+def test_writes_are_blocked_with_strict_mode_off(sql):
+    """The CLI ships with strict mode off, so this must not depend on it."""
+    _assert_blocked(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # sqlglot folds anything it cannot model into one exp.Command node,
+        # which is why this is an allow-list rather than a deny-list.
+        "EXPLAIN SELECT 1",
+        "EXPLAIN ANALYZE INSERT INTO orders VALUES (1)",
+        "SHOW TABLES",
+        "DO $$ BEGIN DROP TABLE orders; END $$",
+    ],
+)
+def test_statements_sqlglot_cannot_model_are_blocked(sql):
+    _assert_blocked(sql)
+
+
+def test_data_modifying_cte_is_blocked():
+    """Roots at SELECT, so the root check alone would let it through."""
+    err = _assert_blocked("WITH x AS (DELETE FROM orders RETURNING id) SELECT * FROM x")
+    assert "DELETE" in err.message
+
+
+def test_tsql_select_into_is_blocked():
+    """``SELECT * INTO t2 FROM t1`` creates t2 in T-SQL, and roots at SELECT."""
+    err = _assert_blocked("SELECT * INTO t2 FROM orders", dialect="tsql")
+    assert "INTO" in err.message
+
+
+def test_multi_statement_input_is_blocked():
+    _assert_blocked("SELECT 1; DROP TABLE orders")
+
+
+def test_read_only_check_runs_before_strict_mode_checks():
+    """A write against an unknown table reports the write, not the table."""
+    err = _assert_blocked("DROP TABLE not_in_the_manifest")
+    assert err.error_code == ErrorCode.BLOCKED_STATEMENT
+
+
+# ── Planned-SQL validation ────────────────────────────────────────────────
+
+
+def test_planned_sql_with_injected_write_is_blocked():
+    """Planning inlines view statements, so output can mutate when input did not.
+
+    A view whose statement is ``DROP TABLE public.orders`` turns an innocuous
+    ``SELECT * FROM v`` into ``WITH v AS (DROP TABLE public.orders) SELECT ...``.
+    """
+    with pytest.raises(WrenError) as exc:
+        validate_planned_sql(
+            "WITH v AS (DROP TABLE public.orders) SELECT * FROM v", "postgres"
+        )
+    assert exc.value.error_code == ErrorCode.BLOCKED_STATEMENT
+
+
+def test_planned_sql_that_is_read_only_passes():
+    validate_planned_sql(
+        'WITH orders AS (SELECT a FROM probe."public".orders) SELECT * FROM orders',
+        "postgres",
+    )
+
+
+def test_planned_sql_fails_open_when_unparseable():
+    """The caller does not author planned SQL.
+
+    Rejecting a valid query because sqlglot cannot re-parse the transpiler's
+    dialect-specific output would be a regression, so the output direction fails
+    open where the input direction fails closed.
+    """
+    validate_planned_sql("SELCT a FRM orders", "postgres")
+
+
+# ── resolve_model_name, case-insensitive fallback ──────────────────────────
+
+
+def test_resolve_model_name_exact_match_wins():
+    assert resolve_model_name("orders", False, {"orders", "Orders"}) == "orders"
+
+
+def test_resolve_model_name_quoted_is_case_sensitive():
+    assert resolve_model_name("Orders", True, {"orders"}) is None
+
+
+def test_resolve_model_name_unquoted_case_insensitive_fallback():
+    assert resolve_model_name("ORDERS", False, {"orders"}) == "orders"
+
+
+def test_resolve_model_name_no_match_returns_none():
+    assert resolve_model_name("missing", False, {"orders"}) is None
+
+
+def test_resolve_model_name_case_collision_is_deterministic():
+    """When two model names differ only in case, an unquoted reference that
+    matches neither exactly must resolve the same way every time.
+
+    Before the fix this depended on ``set`` iteration order, which varies by
+    process under ``PYTHONHASHSEED``, not within one: a fixed hash seed makes
+    iteration order stable for the lifetime of a process, so a same-process
+    loop passes on the buggy code too, every time. The bug only shows up
+    across fresh interpreters, so the regression spawns one per
+    ``PYTHONHASHSEED`` instead, matching how this was reproduced originally
+    (8 fresh subprocesses split 6/2 between ``'Orders'`` and ``'orders'``).
+    Sorted order is an arbitrary tie-break (the two names are equally
+    "right", this pair may legitimately be two distinct models, see
+    test_case_sensitivity.py); the point is only that it no longer varies.
+    """
+    script = (
+        "from wren.policy import resolve_model_name; "
+        "print(resolve_model_name('ORDERS', False, {'Orders', 'orders'}))"
+    )
+    for seed in range(8):
+        env = {**os.environ, "PYTHONHASHSEED": str(seed)}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert result.stdout.strip() == "Orders"

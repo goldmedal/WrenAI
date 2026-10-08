@@ -4,7 +4,7 @@ import pandas as pd
 import pyarrow as pa
 from loguru import logger
 
-from wren.connector.base import ConnectorABC, strip_trailing_semicolon
+from wren.connector.base import ConnectorABC, coerce_limit
 from wren.model import (
     RedshiftConnectionInfo,
     RedshiftConnectionUnion,
@@ -44,11 +44,16 @@ class RedshiftConnector(ConnectorABC):
         self.connection.autocommit = True
 
     def query(self, sql: str, limit: int | None = None) -> pa.Table:
+        limit = coerce_limit(limit)
+        stripped = self._strip(sql)
         if limit is not None:
-            sql = (
-                f"SELECT * FROM ({strip_trailing_semicolon(sql)}) "
-                f"AS _q LIMIT {int(limit)}"
-            )
+            # Multiline wrap so a trailing line comment in the inner SQL is
+            # terminated by the newline instead of eating the closing paren.
+            sql = f"SELECT * FROM (\n{stripped}\n) AS _q LIMIT {limit}"
+        else:
+            # Unlimited path also rejects trailing ``;`` for single statements
+            # depending on driver/session settings — strip for consistency.
+            sql = stripped
         with closing(self.connection.cursor()) as cursor:
             cursor.execute(sql)
             cols = [desc[0] for desc in cursor.description]
@@ -58,9 +63,7 @@ class RedshiftConnector(ConnectorABC):
 
     def dry_run(self, sql: str) -> None:
         with closing(self.connection.cursor()) as cursor:
-            cursor.execute(
-                f"SELECT * FROM ({strip_trailing_semicolon(sql)}) AS sub LIMIT 0"
-            )
+            cursor.execute(f"SELECT * FROM (\n{self._strip(sql)}\n) AS sub LIMIT 0")
 
     def close(self) -> None:
         try:

@@ -126,6 +126,61 @@ def test_list_stored_queries_uses_ctx_project(tmp_path, monkeypatch):
     assert captured["path"] != str(proj_a / ".wren" / "memory")
 
 
+def test_list_stored_queries_fallback_applies_default_cap(tmp_path, monkeypatch):
+    """The markdown fallback must apply the same default cap as the LanceDB path.
+
+    ``store.list_queries`` is called with ``limit=MAX_ROW_LIMIT`` when the caller
+    omits ``limit``; the fallback (taken on *any* MemoryStore error, not just a
+    missing extra) must not return the whole corpus uncapped.
+    """
+    import wren.mcp_server as mcp_mod
+
+    ctx = _make_ctx(tmp_path)
+    mcp = build_server(ctx)
+    list_stored_queries = _get_tool(mcp, "list_stored_queries")
+
+    class BrokenStore:
+        def __init__(self, path):
+            raise RuntimeError("memory extra unavailable")
+
+    monkeypatch.setattr("wren.memory.store.MemoryStore", BrokenStore)
+    monkeypatch.setattr(mcp_mod, "MAX_ROW_LIMIT", 3)
+    monkeypatch.setattr(
+        "wren.memory.markdown.load_query_pairs",
+        lambda project: [{"nl": f"q{i}", "sql": f"SELECT {i}"} for i in range(10)],
+    )
+
+    result = list_stored_queries()
+
+    assert len(result["queries"]) == 3
+
+
+def test_list_stored_queries_fallback_honours_explicit_limit(tmp_path, monkeypatch):
+    """Reverse anchor: an explicit limit below the cap must still win.
+
+    Guards against "fix" that hard-caps the fallback at MAX_ROW_LIMIT and
+    ignores the caller's smaller limit.
+    """
+    import wren.mcp_server as mcp_mod
+
+    ctx = _make_ctx(tmp_path)
+    mcp = build_server(ctx)
+    list_stored_queries = _get_tool(mcp, "list_stored_queries")
+
+    class BrokenStore:
+        def __init__(self, path):
+            raise RuntimeError("memory extra unavailable")
+
+    monkeypatch.setattr("wren.memory.store.MemoryStore", BrokenStore)
+    monkeypatch.setattr(mcp_mod, "MAX_ROW_LIMIT", 3)
+    monkeypatch.setattr(
+        "wren.memory.markdown.load_query_pairs",
+        lambda project: [{"nl": f"q{i}", "sql": f"SELECT {i}"} for i in range(10)],
+    )
+
+    assert len(list_stored_queries(limit=2)["queries"]) == 2
+
+
 def test_store_query_uses_ctx_project(tmp_path, monkeypatch):
     proj_a = tmp_path / "projA"
     proj_b = tmp_path / "projB"
@@ -362,5 +417,124 @@ def test_query_cube_negative_limit_rejected_consistently():
             measures=["total_revenue"],
             dimensions=["customer_id"],
             limit=-1,
+            sql_only=True,
+        )
+
+
+# ── query_cube ordering reaches the agent-facing surface ───────────────────
+#
+# The ordering itself is wren-core's; what these pin is that `order_by`
+# survives the MCP hop on *both* paths — and that adding ORDER BY does not
+# disturb the truncation probe, since core emits it before LIMIT.
+
+
+def test_query_cube_order_by_in_sql_only():
+    """Ordering reaches the generated SQL, ordered by output ordinal."""
+    ctx = _make_ctx(V5_GOLDEN, engine=Mock())
+    mcp = build_server(ctx)
+    query_cube = _get_tool(mcp, "query_cube")
+
+    result = query_cube(
+        cube="order_metrics",
+        measures=["total_revenue"],
+        dimensions=["customer_id"],
+        order_by=["total_revenue:desc"],
+        limit=5,
+        sql_only=True,
+    )
+
+    sql = result["sql"].upper()
+    assert "ORDER BY 2 DESC" in sql
+    assert sql.index("ORDER BY") < sql.index("LIMIT")
+
+
+def test_query_cube_order_by_repeatable_matches_comma_form():
+    """Both spec shapes the CLI accepts must produce identical SQL here too."""
+    ctx = _make_ctx(V5_GOLDEN, engine=Mock())
+    mcp = build_server(ctx)
+    query_cube = _get_tool(mcp, "query_cube")
+
+    def run(order_by):
+        return query_cube(
+            cube="order_metrics",
+            measures=["total_revenue"],
+            dimensions=["customer_id"],
+            order_by=order_by,
+            limit=5,
+            sql_only=True,
+        )["sql"]
+
+    assert run(["total_revenue:desc,customer_id:asc"]) == run(
+        ["total_revenue:desc", "customer_id:asc"]
+    )
+
+
+def test_query_cube_order_by_survives_execution_probe():
+    """ORDER BY and the N+1 probe coexist; the connector still gets no limit."""
+    engine = Mock()
+    engine.query.return_value = pa.table(
+        {"customer_id": [1, 2], "total_revenue": [9.0, 8.0]}
+    )
+
+    ctx = _make_ctx(V5_GOLDEN, engine=engine)
+    mcp = build_server(ctx)
+    query_cube = _get_tool(mcp, "query_cube")
+
+    query_cube(
+        cube="order_metrics",
+        measures=["total_revenue"],
+        dimensions=["customer_id"],
+        order_by=["total_revenue:desc"],
+        limit=5,
+    )
+
+    sql, connector_limit = engine.query.call_args[0]
+    assert "ORDER BY 2 DESC" in sql.upper()
+    assert sql.upper().endswith("LIMIT 6")
+    assert connector_limit is None
+
+
+def test_query_cube_order_by_unselected_member_surfaces_core_error():
+    """Ordering validation stays in core; query_cube must not duplicate it."""
+    ctx = _make_ctx(V5_GOLDEN, engine=Mock())
+    mcp = build_server(ctx)
+    query_cube = _get_tool(mcp, "query_cube")
+
+    with pytest.raises(ValueError, match="is not selected by the query"):
+        query_cube(
+            cube="order_metrics",
+            measures=["total_revenue"],
+            dimensions=["customer_id"],
+            order_by=["order_count:desc"],
+            sql_only=True,
+        )
+
+
+def test_query_cube_order_by_bad_spec_is_readable():
+    """A malformed spec reaches the caller as the parser's own message.
+
+    query_cube shares cube_cli's spec parsers, so the error is raised there —
+    same as the pre-existing `filters` / `time_dimension` behaviour.
+    """
+    ctx = _make_ctx(V5_GOLDEN, engine=Mock())
+    mcp = build_server(ctx)
+    query_cube = _get_tool(mcp, "query_cube")
+
+    with pytest.raises(Exception, match="member:direction"):
+        query_cube(
+            cube="order_metrics",
+            measures=["total_revenue"],
+            dimensions=["customer_id"],
+            order_by=["total_revenue"],
+            sql_only=True,
+        )
+
+    # An empty entry alongside a valid one is rejected, not dropped.
+    with pytest.raises(Exception, match="member:direction"):
+        query_cube(
+            cube="order_metrics",
+            measures=["total_revenue"],
+            dimensions=["customer_id"],
+            order_by=["", "total_revenue:desc"],
             sql_only=True,
         )

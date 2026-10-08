@@ -20,7 +20,7 @@ import sqlglot.errors
 from loguru import logger
 from sqlglot.expressions import DataType
 
-from wren.connector.base import ConnectorABC, strip_trailing_semicolon
+from wren.connector.base import ConnectorABC, coerce_limit
 from wren.model.error import (
     DIALECT_SQL,
     DatabaseTimeoutError,
@@ -55,7 +55,10 @@ def _parse_clickhouse_type(type_str: str | None) -> pa.DataType:
         return pa.string()
     try:
         parsed = sqlglot.parse_one(type_str, into=DataType, dialect="clickhouse")
-    except sqlglot.errors.ParseError:
+    except (sqlglot.errors.SqlglotError, ValueError):
+        # SqlglotError covers ParseError *and* TokenError (unterminated quotes /
+        # stray control chars). Match wren.type_mapping: fall back to string
+        # rather than failing the entire query result conversion.
         logger.warning(f"Failed to parse ClickHouse type string: {type_str}")
         return pa.string()
     if parsed is None:
@@ -389,13 +392,16 @@ class ClickHouseConnector(ConnectorABC):
         self._closed = False
 
     def query(self, sql: str, limit: int | None = None) -> pa.Table:
+        limit = coerce_limit(limit)
         # Strip the terminating run of ``;`` / whitespace before wrapping —
         # ``SELECT * FROM (SELECT 1;) AS _wren_sub LIMIT N`` is invalid SQL.
         # Semicolons inside string literals are preserved.
-        stripped = strip_trailing_semicolon(sql)
+        stripped = self._strip(sql)
         statement = stripped
         if limit is not None:
-            statement = f"SELECT * FROM ({stripped}) AS _wren_sub LIMIT {limit}"
+            # Multiline wrap so a trailing line comment in the inner SQL is
+            # terminated by the newline instead of swallowing the closing paren.
+            statement = f"SELECT * FROM (\n{stripped}\n) AS _wren_sub LIMIT {limit}"
         try:
             result = self.connection.query(statement)
         except _ClickHouseDbError as e:
@@ -410,9 +416,11 @@ class ClickHouseConnector(ConnectorABC):
         return _build_clickhouse_arrow_table(result)
 
     def dry_run(self, sql: str) -> None:
-        stripped = strip_trailing_semicolon(sql)
+        stripped = self._strip(sql)
         try:
-            self.connection.query(f"SELECT * FROM ({stripped}) AS _wren_sub LIMIT 0")
+            self.connection.query(
+                f"SELECT * FROM (\n{stripped}\n) AS _wren_sub LIMIT 0"
+            )
         except _ClickHouseDbError as e:
             if "TIMEOUT_EXCEEDED" in str(e):
                 raise DatabaseTimeoutError(str(e)) from e

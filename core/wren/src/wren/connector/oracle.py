@@ -14,7 +14,7 @@ try:
 except ImportError:  # pragma: no cover
     oracledb = None
 
-from wren.connector.base import ConnectorABC, strip_trailing_semicolon
+from wren.connector.base import ConnectorABC, coerce_limit
 from wren.model.error import DIALECT_SQL, ErrorCode, ErrorPhase, WrenError
 
 
@@ -178,11 +178,16 @@ class OracleConnector(ConnectorABC):
         self.connection = _make_oracle_connection(connection_info)
 
     def query(self, sql: str, limit: int | None = None) -> pa.Table:
+        limit = coerce_limit(limit)
+        # Always strip terminating `;` even on the unlimited path: a bare
+        # trailing semicolon is rejected by some Oracle clients/drivers even
+        # though engines accept multi-statement scripts elsewhere.
+        sql = self._strip(sql)
         if limit is not None:
-            sql = (
-                f"SELECT * FROM ({strip_trailing_semicolon(sql)}) t "
-                f"WHERE ROWNUM <= {limit}"
-            )
+            # Multiline wrap so a trailing `-- line comment` in the inner SQL
+            # is terminated by the newline instead of swallowing the closing
+            # `) t WHERE ROWNUM <= n` (same technique as postgres.py).
+            sql = f"SELECT * FROM (\n{sql}\n) t WHERE ROWNUM <= {limit}"
         try:
             with self.connection.cursor() as cursor:
                 cursor.execute(sql)
@@ -200,8 +205,7 @@ class OracleConnector(ConnectorABC):
             try:
                 with self.connection.cursor() as cursor:
                     cursor.execute(
-                        f"SELECT * FROM ({strip_trailing_semicolon(sql)}) t "
-                        f"WHERE ROWNUM <= 0"
+                        f"SELECT * FROM (\n{self._strip(sql)}\n) t WHERE ROWNUM <= 0"
                     )
             except oracledb.DatabaseError as e:
                 raise WrenError(

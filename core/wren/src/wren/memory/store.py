@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from wren.memory.embeddings import (
     _DEFAULT_DIM,
     _DEFAULT_MODEL,
     get_embedding_function,
+    resolve_embedding_backend,
     warm_up,
 )
 from wren.memory.schema_indexer import (
@@ -25,10 +27,41 @@ _WREN_MEMORY_DIR = Path.home() / ".wren" / "memory"
 _SCHEMA_TABLE = "schema_items"
 _QUERY_TABLE = "query_history"
 
+# Extra token appended (space-separated, after the `source:` token) to a
+# query_history row's tags when it is written by sync_markdown_queries's own
+# upsert. `source:user` is not proof a row is markdown-backed: `wren memory
+# load` defaults every pair to it, and so does a pre-`source:legacy` import
+# of an already-consumed queries.yml, both with no knowledge/sql/*.md file
+# behind them (see sync_markdown_queries). Scoping the forget step to rows
+# carrying this marker, instead of inferring provenance from `source`, means
+# the sync only ever deletes rows it wrote itself.
+_MARKDOWN_SYNC_TAG = "origin:markdown-sync"
+
 
 def _esc(value: str) -> str:
     """Escape single quotes for LanceDB where-clause literals."""
     return value.replace("'", "''")
+
+
+def _tag_source(tags: str | None) -> str | None:
+    """Extract the explicit ``source:`` value from a tags string, else ``None``.
+
+    ``None`` means the row carries no ``source:`` token at all, which is what
+    ``store_query`` writes for a `wren memory store` / MCP ``store_query`` pair,
+    whose ``tags`` hold the caller's own free-form labels (``"revenue,finance"``)
+    or nothing. Those rows must not be swept up by a ``--source user`` filter,
+    least of all by ``forget``, so this stays distinct from the ``"user"``
+    *display* default applied in ``cli._parse_source``.
+    """
+    for part in (tags or "").split():
+        if part.startswith("source:"):
+            return part[len("source:") :]
+    return None
+
+
+def _has_tag(tags: str | None, tag: str) -> bool:
+    """Whether *tag* is one of the whitespace-separated tokens in *tags*."""
+    return tag in (tags or "").split()
 
 
 def _schema_items_arrow_schema(dim: int = _DEFAULT_DIM) -> pa.Schema:
@@ -92,9 +125,79 @@ class MemoryStore:
         resolved.mkdir(parents=True, exist_ok=True)
         self._path = resolved
         self._db = lancedb.connect(str(resolved))
-        self._embed_fn = get_embedding_function(model_name or _DEFAULT_MODEL)
-        # Trigger model loading silently and derive vector dimension.
-        self._dim = warm_up(self._embed_fn)
+        self._model_name = model_name or _DEFAULT_MODEL
+        self._embed_fn_cached = None
+        self._dim_cached = None
+        self._init_lock = threading.Lock()
+        # _resolve_dim() may initialize _embed_fn while holding _dim_lock.
+        self._dim_lock = threading.Lock()
+
+    @property
+    def _embed_fn(self):
+        """Construct the shared embedding function on first use."""
+        if self._embed_fn_cached is None:
+            with self._init_lock:
+                if self._embed_fn_cached is None:
+                    self._embed_fn_cached = get_embedding_function(self._model_name)
+        return self._embed_fn_cached
+
+    @property
+    def _dim(self) -> int:
+        if self._dim_cached is None:
+            with self._dim_lock:
+                if self._dim_cached is None:
+                    self._dim_cached = self._resolve_dim()
+        return self._dim_cached
+
+    def _table_vector_dim(self, name: str) -> int | None:
+        """Return an existing table's fixed vector dimension."""
+        if name not in _table_names(self._db):
+            return None
+        table = self._db.open_table(name)
+        vector_field = table.schema.field("vector")
+        if not isinstance(vector_field.type, pa.FixedSizeListType):
+            raise ValueError(
+                f"Table '{name}' vector column is not a fixed-size list "
+                f"(got {vector_field.type!r}); cannot resolve dimension."
+            )
+        return vector_field.type.list_size
+
+    def _resolve_dim(self) -> int:
+        """Resolve dimension from existing tables or an embedding probe."""
+        dims: dict[str, int] = {}
+        for name in (_SCHEMA_TABLE, _QUERY_TABLE):
+            dim = self._table_vector_dim(name)
+            if dim is not None:
+                dims[name] = dim
+
+        if dims:
+            unique_dims = set(dims.values())
+            if len(unique_dims) > 1:
+                raise ValueError(
+                    f"Mixed-dimension memory store: {dims!r}. This happens "
+                    "when WREN_EMBEDDING_MODEL was swapped for a "
+                    "different-dim model against an existing store. Reset "
+                    "the store or restore the original model to continue."
+                )
+            return next(iter(unique_dims))
+
+        return warm_up(self._embed_fn)
+
+    def _validate_and_set_dim(self, dim: int) -> None:
+        """Validate a computed vector dimension before caching it."""
+        with self._dim_lock:
+            for name in (_SCHEMA_TABLE, _QUERY_TABLE):
+                existing_dim = self._table_vector_dim(name)
+                if existing_dim is not None and existing_dim != dim:
+                    raise ValueError(
+                        f"New vector dim {dim} does not match existing "
+                        f"table '{name}' dim {existing_dim}. This happens "
+                        "when WREN_EMBEDDING_MODEL was swapped for a "
+                        "different-dim model against an existing store. "
+                        "Reset the store or restore the original model to "
+                        "continue."
+                    )
+            self._dim_cached = dim
 
     def _schema_table_schema(self) -> pa.Schema:
         return _schema_items_arrow_schema(dim=self._dim)
@@ -129,6 +232,7 @@ class MemoryStore:
         else:
             texts = [item["text"] for item in items]
             vectors = self._embed_fn.compute_source_embeddings(texts)
+            self._validate_and_set_dim(len(vectors[0]))
 
             for item, vec in zip(items, vectors):
                 item["vector"] = vec
@@ -160,29 +264,27 @@ class MemoryStore:
         return {"schema_items": schema_count, "seed_queries": seed_count}
 
     def _upsert_seed_queries(self, manifest: dict) -> int:
-        """Replace seed query entries, preserving user-confirmed ones."""
+        """Replace seed queries after their embeddings are ready."""
         from wren.memory.seed_queries import (  # noqa: PLC0415
             SEED_TAG,
             generate_seed_queries,
         )
 
-        # Remove old seeds (tagged 'source:seed') but keep user entries
+        pairs = generate_seed_queries(manifest)
+
+        if not pairs:
+            if _QUERY_TABLE in _table_names(self._db):
+                table = self._db.open_table(_QUERY_TABLE)
+                table.delete(f"tags = '{SEED_TAG}'")
+            return 0
+
+        records = self._prepare_query_records(pairs, tags=SEED_TAG)
+
         if _QUERY_TABLE in _table_names(self._db):
             table = self._db.open_table(_QUERY_TABLE)
             table.delete(f"tags = '{SEED_TAG}'")
 
-        pairs = generate_seed_queries(manifest)
-        if not pairs:
-            return 0
-
-        # Insert new seeds via the existing store_query() method
-        for pair in pairs:
-            self.store_query(
-                nl_query=pair["nl"],
-                sql_query=pair["sql"],
-                tags=SEED_TAG,
-            )
-
+        self._write_query_records(records)
         return len(pairs)
 
     def schema_is_current(self, manifest: dict) -> bool:
@@ -287,6 +389,7 @@ class MemoryStore:
         """Store a NL→SQL pair with embedding of the NL query."""
         now = datetime.now(timezone.utc)
         vectors = self._embed_fn.compute_source_embeddings([nl_query])
+        self._validate_and_set_dim(len(vectors[0]))
 
         record = {
             "text": nl_query,
@@ -356,7 +459,7 @@ class MemoryStore:
         # Ensure a clean 0-based index matching the unfiltered table.
         df = df.reset_index(drop=True)
         if source:
-            df = df[df["tags"] == f"source:{source}"]
+            df = df[df["tags"].map(_tag_source) == source]
         total = len(df)
         df = df.sort_values("created_at", ascending=False)
         rows = df.iloc[offset : offset + limit]
@@ -373,39 +476,47 @@ class MemoryStore:
             return 0
         table = self._db.open_table(_QUERY_TABLE)
         df = table.to_pandas()
-        return int((df["tags"] == f"source:{source}").sum())
+        return int((df["tags"].map(_tag_source) == source).sum())
 
     def forget_queries_by_ids(self, row_ids: list[int]) -> int:
         """Delete rows at the given positional indices.  Returns deleted count."""
         if _QUERY_TABLE not in _table_names(self._db):
             return 0
         table = self._db.open_table(_QUERY_TABLE)
+        existing_schema = table.schema
         df = table.to_pandas()
         to_delete = sorted({i for i in row_ids if 0 <= i < len(df)})
         if not to_delete:
             return 0
         keep = df.drop(index=to_delete).reset_index(drop=True)
-        # Rebuild the table with remaining rows
-        self._db.drop_table(_QUERY_TABLE)
         if len(keep) == 0:
+            self._db.drop_table(_QUERY_TABLE)
             return len(to_delete)
-        keep_arrow = pa.Table.from_pandas(keep, schema=self._query_table_schema())
+        # Build the replacement before asking LanceDB to overwrite the table.
+        keep_arrow = pa.Table.from_pandas(keep, schema=existing_schema)
         self._db.create_table(
             _QUERY_TABLE,
             keep_arrow,
-            schema=self._query_table_schema(),
+            schema=existing_schema,
+            mode="overwrite",
         )
         return len(to_delete)
 
     def forget_queries_by_source(self, source: str) -> int:
-        """Delete all query_history rows matching *source* tag.  Returns deleted count."""
+        """Delete all query_history rows matching *source* tag.  Returns deleted count.
+
+        Goes through :meth:`forget_queries_by_ids` (parsing each row's
+        ``source:`` token via :func:`_tag_source`) rather than an equality
+        match on the raw ``tags`` string, so a row carrying an extra token
+        after its ``source:`` tag (e.g. ``_MARKDOWN_SYNC_TAG``) still matches
+        on its actual source, exactly as an untagged row would.
+        """
         if _QUERY_TABLE not in _table_names(self._db):
             return 0
         table = self._db.open_table(_QUERY_TABLE)
-        where = f"tags = 'source:{_esc(source)}'"
-        before = table.count_rows()
-        table.delete(where)
-        return before - table.count_rows()
+        df = table.to_pandas().reset_index(drop=True)
+        ids = [i for i, t in enumerate(df["tags"]) if _tag_source(t) == source]
+        return self.forget_queries_by_ids(ids) if ids else 0
 
     # ── Dump / Load ──────────────────────────────────────────────────────
 
@@ -420,7 +531,7 @@ class MemoryStore:
         table = self._db.open_table(_QUERY_TABLE)
         df = table.to_pandas()
         if source:
-            df = df[df["tags"] == f"source:{source}"]
+            df = df[df["tags"].map(_tag_source) == source]
         df = df.sort_values("created_at", ascending=True)
         return df.drop(columns=["vector"], errors="ignore").to_dict("records")
 
@@ -446,32 +557,87 @@ class MemoryStore:
             nl_to_rowids.setdefault(nl, []).append(idx)
         return exact_set, nl_to_rowids
 
+    def _prepare_query_records(
+        self,
+        pairs: list[dict],
+        *,
+        tags: str | None = None,
+        extra_tag: str | None = None,
+    ) -> list[dict]:
+        """Prepare a complete query batch without changing its table.
+
+        *extra_tag*, when given, is appended as an additional space-separated
+        token after the row's usual ``source:`` tag (computed or explicit) so
+        a later scan can recognize the row without touching what ``source:``
+        it carries. See ``_MARKDOWN_SYNC_TAG``.
+        """
+        if not pairs:
+            return []
+        texts = [p["nl"] for p in pairs]
+        vectors = self._embed_fn.compute_source_embeddings(texts)
+        self._validate_and_set_dim(len(vectors[0]))
+        now = datetime.now(timezone.utc)
+        records = []
+        for p, vec in zip(pairs, vectors):
+            record_tags = (
+                tags if tags is not None else f"source:{p.get('source', 'user')}"
+            )
+            if extra_tag:
+                record_tags = f"{record_tags} {extra_tag}"
+            records.append(
+                {
+                    "text": p["nl"],
+                    "vector": vec,
+                    "nl_query": p["nl"],
+                    "sql_query": p["sql"],
+                    "datasource": p.get("datasource") or "",
+                    "created_at": now,
+                    "tags": record_tags,
+                }
+            )
+        return records
+
+    def _write_query_records(self, records: list[dict]) -> None:
+        """Batch-insert precomputed query_history records built by
+        :meth:`_prepare_query_records`."""
+        if not records:
+            return
+        if _QUERY_TABLE in _table_names(self._db):
+            table = self._db.open_table(_QUERY_TABLE)
+            table.add(records)
+        else:
+            self._db.create_table(
+                _QUERY_TABLE,
+                records,
+                schema=self._query_table_schema(),
+            )
+
     def load_queries(
         self,
         pairs: list[dict],
         *,
         overwrite: bool = False,
         upsert: bool = False,
+        mark_markdown_synced: bool = False,
     ) -> dict[str, int]:
         """Batch-import parsed YAML pairs into query_history.
+
+        ``mark_markdown_synced`` tags every written row with
+        ``_MARKDOWN_SYNC_TAG`` in addition to its usual ``source:`` tag, so a
+        later ``sync_markdown_queries`` forget pass can recognize rows it
+        wrote itself without inferring that from ``source`` (see
+        ``sync_markdown_queries``). Only meaningful together with
+        ``upsert=True``, the only mode ``sync_markdown_queries`` uses.
 
         Returns ``{"loaded": N, "skipped": M, "updated": U}``.
         """
         if overwrite:
             sources = {p.get("source", "user") for p in pairs}
+            records = self._prepare_query_records(pairs)
             for src in sources:
                 self.forget_queries_by_source(src)
-            loaded = 0
-            for p in pairs:
-                tags = f"source:{p.get('source', 'user')}"
-                self.store_query(
-                    nl_query=p["nl"],
-                    sql_query=p["sql"],
-                    datasource=p.get("datasource"),
-                    tags=tags,
-                )
-                loaded += 1
-            return {"loaded": loaded, "skipped": 0, "updated": 0}
+            self._write_query_records(records)
+            return {"loaded": len(records), "skipped": 0, "updated": 0}
 
         exact_set, nl_to_rowids = self._existing_pairs_index()
 
@@ -482,6 +648,9 @@ class MemoryStore:
                 seen_nl[p["nl"]] = p
             deduped = list(seen_nl.values())
 
+            extra_tag = _MARKDOWN_SYNC_TAG if mark_markdown_synced else None
+            records = self._prepare_query_records(deduped, extra_tag=extra_tag)
+
             # Batch: collect IDs to delete, then delete once, then insert all.
             ids_to_delete = []
             updated = 0
@@ -491,14 +660,7 @@ class MemoryStore:
                     updated += 1
             if ids_to_delete:
                 self.forget_queries_by_ids(ids_to_delete)
-            for p in deduped:
-                tags = f"source:{p.get('source', 'user')}"
-                self.store_query(
-                    nl_query=p["nl"],
-                    sql_query=p["sql"],
-                    datasource=p.get("datasource"),
-                    tags=tags,
-                )
+            self._write_query_records(records)
             loaded = len(deduped) - updated
             return {"loaded": loaded, "skipped": 0, "updated": updated}
 
@@ -521,11 +683,56 @@ class MemoryStore:
 
         return {"loaded": loaded, "skipped": skipped, "updated": 0}
 
+    def sync_markdown_queries(self, pairs: list[dict]) -> dict[str, int]:
+        """Upsert *pairs* and forget any indexed pair absent from them.
+
+        *pairs* must be the complete current ``knowledge/sql/*.md`` set (the
+        source of truth). The forget step is scoped to rows this method
+        itself previously wrote (tagged ``_MARKDOWN_SYNC_TAG`` by the upsert
+        below), never to rows merely matching some inferred "non-markdown"
+        exclusion list: ``source:user`` is also what ``wren memory load``
+        gives a pair with no ``source`` of its own, and what a pre-upgrade
+        ``queries.yml`` import already carried before ``source:legacy``
+        existed, so neither is safe to treat as markdown-backed. A row from
+        either of those paths is never forgotten here, only a row this sync
+        wrote on a prior run and no longer sees in *pairs*.
+
+        One consequence of tracking provenance instead of inferring it: a
+        markdown row that already existed in the index under the old,
+        untagged scheme is not eligible to be forgotten until the upsert
+        above has re-written it at least once (which happens on this very
+        call, for every pair still present). The transition fails toward
+        keeping a row an extra run rather than losing one it shouldn't.
+
+        Returns ``{"loaded": N, "skipped": M, "updated": U, "forgotten": F}``.
+        """
+        result = self.load_queries(pairs, upsert=True, mark_markdown_synced=True)
+        current_nls = {p["nl"] for p in pairs}
+        rows, _ = self.list_queries(limit=1_000_000)
+        stale_ids = [
+            row["_row_id"]
+            for row in rows
+            if _has_tag(row.get("tags"), _MARKDOWN_SYNC_TAG)
+            and row["nl_query"] not in current_nls
+        ]
+        forgotten = self.forget_queries_by_ids(stale_ids) if stale_ids else 0
+        return {**result, "forgotten": forgotten}
+
     # ── Housekeeping ──────────────────────────────────────────────────────
 
     def status(self) -> dict:
-        """Return index statistics."""
-        info: dict = {"path": str(self._path), "tables": {}}
+        """Return index statistics, including which embedding backend is live.
+
+        Reported from ``resolve_embedding_backend()`` rather than from a
+        constructed model, so asking for status never loads one. It is the
+        same resolution the store itself would use on its next embed.
+        """
+        info: dict = {
+            "path": str(self._path),
+            "embedding_backend": resolve_embedding_backend(),
+            "model": self._model_name,
+            "tables": {},
+        }
         for name in _table_names(self._db):
             table = self._db.open_table(name)
             info["tables"][name] = table.count_rows()

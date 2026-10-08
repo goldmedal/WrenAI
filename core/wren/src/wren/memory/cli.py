@@ -10,10 +10,37 @@ from typing import Annotated, Optional
 
 import typer
 import yaml
+from typer.core import TyperGroup
+
+
+class _MemoryGroup(TyperGroup):
+    """Report an embedding backend that cannot serve the model, from any command.
+
+    These failures surface lazily from the first encode, so every command that
+    embeds can raise one -- `index`, `store`, `recall`, `fetch`, and whatever
+    is added next. Handling them per call site means each new command has to
+    remember; handling them here means it inherits. Each message already names
+    the way out, so echoing it is enough.
+
+    Scoped to `OnnxBackendError` rather than `RuntimeError`: `typer.Exit`
+    subclasses `RuntimeError`, so the wider catch would rewrite every exit code
+    in this sub-app to 1.
+    """
+
+    def invoke(self, ctx):
+        from wren.memory.embeddings import OnnxBackendError  # noqa: PLC0415
+
+        try:
+            return super().invoke(ctx)
+        except OnnxBackendError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(1) from e
+
 
 memory_app = typer.Typer(
     name="memory",
     help="Schema and query memory backed by LanceDB.",
+    cls=_MemoryGroup,
 )
 
 _WREN_HOME = Path(os.environ.get("WREN_HOME", Path.home() / ".wren"))
@@ -220,7 +247,14 @@ def index(
             pass  # instructions are optional; never fail index because of them
 
     mem_store = _get_store(path)
-    result = mem_store.index_schema(manifest, seed_queries=not no_seed)
+
+    # Backend errors are RuntimeErrors, so they pass this branch untouched and
+    # reach _MemoryGroup -- none of them is a manifest problem.
+    try:
+        result = mem_store.index_schema(manifest, seed_queries=not no_seed)
+    except ValueError as e:
+        typer.echo(f"Malformed manifest: {e}", err=True)
+        raise typer.Exit(1) from e
     typer.echo(
         f"Indexed {result['schema_items']} schema items"
         + (f", {result['seed_queries']} seed queries" if result["seed_queries"] else "")
@@ -237,12 +271,16 @@ def index(
             project_path = discover_project_path(explicit=None)
 
             md_pairs = load_query_pairs(project_path)
-            if md_pairs:
-                # upsert → re-running index converges on the markdown content.
-                res = mem_store.load_queries(md_pairs, upsert=True)
+            res = mem_store.sync_markdown_queries(md_pairs)
+            if res["loaded"] or res["updated"] or res["forgotten"]:
                 typer.echo(
                     f"Indexed {res['loaded'] + res['updated']} pair(s) from "
-                    f"knowledge/sql/.",
+                    f"knowledge/sql/."
+                    + (
+                        f" Forgot {res['forgotten']} stale pair(s)."
+                        if res["forgotten"]
+                        else ""
+                    ),
                     err=True,
                 )
 
@@ -251,7 +289,13 @@ def index(
                 raw = queries_file.read_text(encoding="utf-8")
                 doc = yaml.safe_load(raw)
                 if doc and isinstance(doc, dict) and doc.get("pairs"):
-                    load_result = mem_store.load_queries(doc["pairs"], upsert=False)
+                    # Tag legacy=queries.yml explicitly so these rows are
+                    # distinguishable from markdown-backed ones in
+                    # `memory list/dump/forget --source`. They are already
+                    # safe from sync_markdown_queries, whose forget pass is
+                    # scoped to rows carrying its own provenance tag.
+                    legacy_pairs = [{**p, "source": "legacy"} for p in doc["pairs"]]
+                    load_result = mem_store.load_queries(legacy_pairs, upsert=False)
                     loaded = load_result["loaded"]
                     skipped = load_result["skipped"]
                     if loaded:
@@ -460,6 +504,11 @@ def status(
     if info["backend"] == "grep":
         typer.echo(f"  knowledge/sql: {info['pairs']} pair(s)")
         return
+    # Two backends produce these vectors and only one of them pulls torch, so
+    # which one is live is the first thing to check when an install is bigger
+    # or slower than expected.
+    if info.get("embedding_backend"):
+        typer.echo(f"  embeddings: {info['embedding_backend']} ({info['model']})")
     tables = info.get("tables", {})
     if not tables:
         typer.echo("No tables indexed yet.")
@@ -471,14 +520,26 @@ def status(
 @memory_app.command()
 def reset(
     path: PathOpt = None,
-    force: Annotated[
-        bool, typer.Option("--force", "-f", help="Skip confirmation")
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            "--force",
+            "-f",
+            help="Skip confirmation. `--force`/`-f` are deprecated aliases.",
+        ),
     ] = False,
 ) -> None:
     """Drop the derived memory index. knowledge/sql/*.md is preserved.
 
     The LanceDB index is a derived artifact — after reset, run `wren memory
     index` to rebuild it from the markdown source of truth.
+
+    ``--force`` still works but is deprecated: elsewhere in this CLI
+    ``--force`` means "overwrite files" (``wren context init --force``) or
+    "run non-interactively" (``wren memory forget --force``), so the flag
+    that only skips a confirmation is spelled ``--yes``.
     """
     from wren.context import discover_project_path  # noqa: PLC0415
     from wren.memory.index_backend import get_index  # noqa: PLC0415
@@ -492,7 +553,7 @@ def reset(
     if idx.name == "grep":
         typer.echo("grep backend has no derived index — knowledge/sql/ is the source.")
         return
-    if not force:
+    if not yes:
         confirm = typer.confirm(
             "This drops the derived memory index. Your knowledge/sql/*.md "
             "source files are kept. Continue?"
@@ -528,21 +589,28 @@ def check(
         )
         return
 
+    from wren.memory.store import _MARKDOWN_SYNC_TAG, _has_tag  # noqa: PLC0415
+
     md_nls = {p["nl"] for p in load_query_pairs(project)}
     mem_store = idx.store
     indexed, _ = mem_store.list_queries(limit=1_000_000)
     indexed_nls = {r.get("nl_query") for r in indexed}
-    # Only user-sourced pairs come from markdown; seeds/views are derived from
-    # the manifest and are not expected to have a knowledge/sql/ file.
-    indexed_user = {
+    # Markdown-backed means "written by sync_markdown_queries", which is what
+    # the provenance tag records: the same predicate that method's own forget
+    # pass uses. Deriving it from `source` instead would put this report out of
+    # step with the write path in both directions: a `source:legacy`/`view`
+    # pair exported into knowledge/sql/ would read as permanently "not
+    # indexed", and a `wren memory load` pair would read as permanently
+    # "stale" even though no `index` run is able to clear it.
+    indexed_md = {
         r.get("nl_query")
         for r in indexed
-        if _parse_source(r.get("tags")) not in ("seed", "view")
+        if _has_tag(r.get("tags"), _MARKDOWN_SYNC_TAG)
     }
 
-    # Compare user pairs only — seed/view rows aren't markdown-backed.
-    missing = md_nls - indexed_user  # in markdown but not indexed as a user pair
-    stale = indexed_user - md_nls  # user-indexed but no longer in markdown
+    # markdown vs. the rows the sync derived from it
+    missing = md_nls - indexed_md  # in markdown but not indexed as a synced pair
+    stale = indexed_md - md_nls  # synced but no longer in markdown
 
     typer.echo(
         f"knowledge/sql: {len(md_nls)} pair(s); index: {len(indexed_nls)} pair(s)"
@@ -554,7 +622,7 @@ def check(
         typer.echo(f"  {len(missing)} not indexed — run `wren memory index`.")
     if stale:
         typer.echo(
-            f"  {len(stale)} user pair(s) indexed without markdown — "
+            f"  {len(stale)} indexed pair(s) without markdown, "
             "stale index, run `wren memory index`."
         )
 
@@ -643,26 +711,36 @@ def watch(
         from wren.memory.markdown import load_query_pairs  # noqa: PLC0415
 
         md_pairs = load_query_pairs(project_path)
-        loaded = 0
-        if md_pairs:
-            res = mem_store.load_queries(md_pairs, upsert=True)
-            loaded = res["loaded"] + res["updated"]
+        res = mem_store.sync_markdown_queries(md_pairs)
+        loaded = res["loaded"] + res["updated"]
         typer.echo(
             f"Reindexed {result['schema_items']} schema item(s)"
             + (f", {loaded} pair(s)" if loaded else "")
+            + (f", forgot {res['forgotten']} stale pair(s)" if res["forgotten"] else "")
             + "."
         )
 
     def _on_event(event: str) -> None:
         if event == "change-detected":
             typer.echo("Change detected — reindexing...", err=True)
-        elif event == "reindex-error":
-            typer.echo(
-                "Reindex failed; change kept pending, will retry next poll.",
-                err=True,
-            )
         elif event == "stopped":
             typer.echo("Stopped watching.", err=True)
+
+    def _on_error(event: str, exc: BaseException) -> None:
+        if event == "reindex-error":
+            # The reason is the actionable half of this message, and the only
+            # half the event name cannot carry — except for typer.Exit, where
+            # _reindex has already echoed the real error and str(exc) would
+            # only repeat the exit code ("Reindex failed: 1").
+            reason = (
+                ""
+                if isinstance(exc, typer.Exit)
+                else f": {str(exc) or type(exc).__name__}"
+            )
+            typer.echo(
+                f"Reindex failed{reason}; change kept pending, will retry next poll.",
+                err=True,
+            )
 
     typer.echo(
         f"Watching {project_path} every {max(interval, 1.0):g}s "
@@ -676,6 +754,7 @@ def watch(
         max_polls=max_polls,
         reindex_on_start=reindex_on_start,
         on_event=_on_event,
+        on_error=_on_error,
     )
     if max_polls is not None:
         typer.echo(
@@ -833,7 +912,16 @@ def forget(
     ] = None,
     force: Annotated[
         bool,
-        typer.Option("--force", "-f", help="Skip interactive UI / confirmation"),
+        typer.Option(
+            "--force",
+            "-f",
+            "--yes",
+            "-y",
+            help=(
+                "Run non-interactively: skip the checkbox UI and any "
+                "confirmation. Required with --source to delete in bulk."
+            ),
+        ),
     ] = False,
     limit: Annotated[
         int,
@@ -845,6 +933,12 @@ def forget(
 
     Default: interactive checkbox UI.
     With --id or --force: non-interactive mode for scripts and agents.
+
+    Unlike ``wren memory reset``, this flag keeps the name ``--force``: it
+    does not merely answer a prompt, it selects a different mode — the
+    checkbox UI is skipped, and ``--source`` only deletes in bulk when it is
+    given. ``--yes``/``-y`` are accepted as aliases so the vocabulary is the
+    same across the CLI.
     """
     mem_store = _get_store(path)
 
@@ -877,11 +971,14 @@ def forget(
 
 
 def _parse_source(tags: str | None) -> str:
-    """Extract source value from a (possibly null/empty) tags string."""
-    for part in (tags or "").split():
-        if part.startswith("source:"):
-            return part[len("source:") :]
-    return "user"
+    """Source value for display/export, defaulting an untagged row to "user".
+
+    Distinct from ``store._tag_source``, which reports ``None`` for a row with
+    no ``source:`` token so that ``--source`` filters do not match it.
+    """
+    from wren.memory.store import _tag_source  # noqa: PLC0415
+
+    return _tag_source(tags) or "user"
 
 
 def _pairs_to_yaml(rows: list[dict]) -> str:
@@ -1022,6 +1119,13 @@ def load(
         if "nl" not in p or "sql" not in p:
             typer.echo(f"Error: pair #{i + 1} missing 'nl' or 'sql'.", err=True)
             raise typer.Exit(1)
+        for field in ("nl", "sql", "source", "datasource"):
+            if field in p and not isinstance(p[field], str):
+                typer.echo(
+                    f"Error: pair #{i + 1} field '{field}' must be a string.",
+                    err=True,
+                )
+                raise typer.Exit(1)
 
     # ── Summary ──
     from collections import Counter  # noqa: PLC0415

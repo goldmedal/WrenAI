@@ -17,7 +17,7 @@ from typing import Any
 import pyarrow as pa
 from loguru import logger
 
-from wren.connector.base import ConnectorABC, strip_trailing_semicolon
+from wren.connector.base import ConnectorABC, coerce_limit
 from wren.model.error import DIALECT_SQL, ErrorCode, ErrorPhase, WrenError
 
 # Postgres OID → Arrow type. Canner publishes Trino-style values over the
@@ -242,10 +242,20 @@ class CannerConnector(ConnectorABC):
         self._closed = False
 
     def query(self, sql: str, limit: int | None = None) -> pa.Table:
+        limit = coerce_limit(limit)
         import psycopg  # noqa: PLC0415
 
+        # Always strip a trailing statement terminator. Unlimited queries still
+        # go to execute() raw; ``SELECT 1;`` is fine for single-shot clients, but
+        # multi-semicolon whitespace after tools paste (``SELECT 1; ;``) and
+        # empty trailing statements can produce Protocol/syntax noise/door. More
+        # importantly we keep composition consistent with the limited path so
+        # callers can always end SQL with ``;`` without branching.
+        sql = self._strip(sql)
         if limit is not None:
-            sql = f"SELECT * FROM ({strip_trailing_semicolon(sql)}) AS _t LIMIT {limit}"
+            # Multiline wrap so a trailing line comment in the inner SQL is
+            # terminated by the newline instead of swallowing the closing paren.
+            sql = f"SELECT * FROM (\n{sql}\n) AS _t LIMIT {limit}"
 
         try:
             with self.connection.cursor() as cursor:
@@ -266,7 +276,7 @@ class CannerConnector(ConnectorABC):
     def dry_run(self, sql: str) -> None:
         import psycopg  # noqa: PLC0415
 
-        wrapped = f"SELECT * FROM ({strip_trailing_semicolon(sql)}) AS _t LIMIT 0"
+        wrapped = f"SELECT * FROM (\n{self._strip(sql)}\n) AS _t LIMIT 0"
         try:
             with self.connection.cursor() as cursor:
                 cursor.execute(wrapped)

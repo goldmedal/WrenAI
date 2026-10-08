@@ -1,5 +1,133 @@
 # Changelog
 
+## [0.15.0](https://github.com/Canner/WrenAI/compare/wren-v0.14.0...wren-v0.15.0) (2026-09-16)
+
+
+### Features
+
+* **wren:** reach cube orderBy from the CLI and the MCP query_cube tool ([#2730](https://github.com/Canner/WrenAI/issues/2730)) ([be1f9b5](https://github.com/Canner/WrenAI/commit/be1f9b57d2664aeb8287eef3eae3d931d90da3b9))
+
+
+### Bug Fixes
+
+* **bigquery:** support Application Default Credentials ([#2726](https://github.com/Canner/WrenAI/issues/2726)) ([19495ee](https://github.com/Canner/WrenAI/commit/19495eedbe3ba934310f65ee6f320abd12da9007))
+* **wren:** bigquery and duckdb LIMIT wrap breaks on SQL ending in a trailing comment ([#2734](https://github.com/Canner/WrenAI/issues/2734)) ([0be34c0](https://github.com/Canner/WrenAI/commit/0be34c041205bef6592dfcd6d7ff8cbdb12ce015))
+* **wren:** detect a SELECT * in any UNION/INTERSECT/EXCEPT branch, not just the first ([#2743](https://github.com/Canner/WrenAI/issues/2743)) ([871118e](https://github.com/Canner/WrenAI/commit/871118e94f1525c401d867074c05e7e8eefca1cc))
+* **wren:** oracle, redshift and trino LIMIT wrap breaks on SQL ending in a trailing comment ([#2736](https://github.com/Canner/WrenAI/issues/2736)) ([1fdd864](https://github.com/Canner/WrenAI/commit/1fdd864e0c48decd25a05c586ea7658330b77bf6))
+* **wren:** postgres LIMIT pushdown breaks on SQL ending in a trailing comment ([#2728](https://github.com/Canner/WrenAI/issues/2728)) ([9ff9649](https://github.com/Canner/WrenAI/commit/9ff9649f91c8a84f721fcbecb33cc9f71ca2d1a5))
+
+## [0.14.0](https://github.com/Canner/WrenAI/compare/wren-v0.13.4...wren-v0.14.0) (2026-09-08)
+
+
+### Features
+
+* **wren:** add `wren cloud` to bind a local project to a Wren Cloud git remote ([#2706](https://github.com/Canner/WrenAI/issues/2706)) ([8e532b4](https://github.com/Canner/WrenAI/commit/8e532b497da8131d3d90abbfab5752d592eba4e2))
+* **wren:** add a torch-free onnx embedding backend for wren memory ([#2707](https://github.com/Canner/WrenAI/issues/2707)) ([308a0dd](https://github.com/Canner/WrenAI/commit/308a0ddb36706bf7248bd8a06ad6193a27eb78fe))
+
+
+### Bug Fixes
+
+* **wren:** connect MSSqlConnector with autocommit so statements are not left in an open transaction ([#2705](https://github.com/Canner/WrenAI/issues/2705)) ([4d167fc](https://github.com/Canner/WrenAI/commit/4d167fc0c3678abcbdd7120d912788305fbfe51b))
+* **wren:** forget query_history rows deleted from knowledge/sql on reindex ([#2703](https://github.com/Canner/WrenAI/issues/2703)) ([10a6432](https://github.com/Canner/WrenAI/commit/10a6432afb24c5ba92f87d13693393e8b0a66401))
+* **wren:** make resolve_model_name's case-insensitive fallback deterministic ([#2719](https://github.com/Canner/WrenAI/issues/2719)) ([c59ec23](https://github.com/Canner/WrenAI/commit/c59ec230d2a117bb85313efeb24a5107342322c0))
+
+## [0.13.4](https://github.com/Canner/WrenAI/compare/wren-v0.13.3...wren-v0.13.4) (2026-09-02)
+
+
+### Bug Fixes
+
+* **context:** normalise model columns in load_models ([#2614](https://github.com/Canner/WrenAI/issues/2614)) ([d48498f](https://github.com/Canner/WrenAI/commit/d48498fd553e0aa6fd6066f127ff7732335f6d37))
+* **context:** reject v1 view upgrades that map two views to the same target ([#2696](https://github.com/Canner/WrenAI/issues/2696)) ([992f1da](https://github.com/Canner/WrenAI/commit/992f1da21b94293c72881484135cbab88fb04b31))
+* **cube:** load/validate like views; fail loud on mdl.json ([#2668](https://github.com/Canner/WrenAI/issues/2668)) ([5cf36cd](https://github.com/Canner/WrenAI/commit/5cf36cd7aad1caff2dba8e10252585026be48ef6))
+* **memory:** validate imported query pair field types ([#2656](https://github.com/Canner/WrenAI/issues/2656)) ([2e87902](https://github.com/Canner/WrenAI/commit/2e87902ed6911c67bf9520478b594d56957923a5))
+* **skills:** wrap generate-mdl SKILL.md's relationships.yml example under the required key ([#2676](https://github.com/Canner/WrenAI/issues/2676)) ([a8e8d04](https://github.com/Canner/WrenAI/commit/a8e8d04013ae64e3794aec0d4533e85c45f93fea))
+* **wren:** accept only read-only SELECT statements in the query path ([#2679](https://github.com/Canner/WrenAI/issues/2679)) ([ce9513d](https://github.com/Canner/WrenAI/commit/ce9513d68ae73887ce858940d58fe26b4dda12b7))
+* **wren:** connect with autocommit so a failed statement cannot poison the connection ([#2683](https://github.com/Canner/WrenAI/issues/2683)) ([5e01777](https://github.com/Canner/WrenAI/commit/5e01777e7cd7f025466b958d82494882cdc14eb2))
+* **wren:** mark truncated values in the skipped-row report ([#2675](https://github.com/Canner/WrenAI/issues/2675)) ([11184dc](https://github.com/Canner/WrenAI/commit/11184dc69d4a9f72a6ee8db2263f82231b8f14ac))
+* **wren:** preserve wide MySQL and Doris decimals ([#2657](https://github.com/Canner/WrenAI/issues/2657)) ([7ca6c77](https://github.com/Canner/WrenAI/commit/7ca6c77118dd87ba29ccbc973c756e5bdd5f0bf0))
+* **wren:** report a validation error for non-scalar model/view names ([#2681](https://github.com/Canner/WrenAI/issues/2681)) ([56e007d](https://github.com/Canner/WrenAI/commit/56e007da9b70f4554c32c0831576410a8b811b32))
+
+## [0.13.3](https://github.com/Canner/WrenAI/compare/wren-v0.13.2...wren-v0.13.3) (2026-08-18)
+
+
+### Bug Fixes
+
+* **context:** filter non-mapping entries in _load_views_v1 ([#2604](https://github.com/Canner/WrenAI/issues/2604)) ([9bdae39](https://github.com/Canner/WrenAI/commit/9bdae39c99a818faa91229bd4a3972c00643f041))
+* **context:** harden description checks for bad MDL rows ([#2616](https://github.com/Canner/WrenAI/issues/2616)) ([b56d4da](https://github.com/Canner/WrenAI/commit/b56d4da16b5a05125448827d0154777c2c3692a4))
+* **context:** harden relationships load + validate like views ([#2613](https://github.com/Canner/WrenAI/issues/2613)) ([d234608](https://github.com/Canner/WrenAI/commit/d23460893dfbda63097a5da889432230208eca79))
+* **genbi:** harden non-dict apps.yml entries in list/get/register ([#2587](https://github.com/Canner/WrenAI/issues/2587)) ([dae7076](https://github.com/Canner/WrenAI/commit/dae7076ccc3335615b61e61cd938637f17146f5e))
+* **genbi:** reject non-object Vercel API JSON ([#2582](https://github.com/Canner/WrenAI/issues/2582)) ([4cd4bf8](https://github.com/Canner/WrenAI/commit/4cd4bf8d7ee1e3f27c2deca4d9f1eabb799ae99a))
+* **memory:** reject non-list relationship models in schema_indexer ([#2605](https://github.com/Canner/WrenAI/issues/2605)) ([73c1255](https://github.com/Canner/WrenAI/commit/73c1255439795ac9cf538b706ec4c208d6d3f25b))
+* **memory:** skip non-dict rows in extract_schema_items/describe ([#2586](https://github.com/Canner/WrenAI/issues/2586)) ([32d76bf](https://github.com/Canner/WrenAI/commit/32d76bfdab57260e24ebb4cd12d22ab4111e090d))
+* **memory:** skip unnamed cubes/measures/dimensions in schema_indexer ([#2665](https://github.com/Canner/WrenAI/issues/2665)) ([f29b5b0](https://github.com/Canner/WrenAI/commit/f29b5b0a01e31db07f7e1a4c0dbdc258d48deca3))
+* **spark:** apply limit via DataFrame.limit before toPandas ([#2574](https://github.com/Canner/WrenAI/issues/2574)) ([4483ce8](https://github.com/Canner/WrenAI/commit/4483ce8c7eaccf7a8ebc454586884b4d4869f206))
+* **wren-cli:** surface skipped non-mapping rows in parse/translate-types ([#2570](https://github.com/Canner/WrenAI/issues/2570)) ([fc4ebf0](https://github.com/Canner/WrenAI/commit/fc4ebf01130040623abaf2defc500e53a98baee1))
+* **wren:** bound the session-context cache to 32 LRU entries ([#2628](https://github.com/Canner/WrenAI/issues/2628)) ([f92e681](https://github.com/Canner/WrenAI/commit/f92e681fd5731f477dadfed963b63397cf95a283))
+* **wren:** classify bare TimeoutError as DatabaseTimeoutError in WrenEngine ([#2654](https://github.com/Canner/WrenAI/issues/2654)) ([7f7370e](https://github.com/Canner/WrenAI/commit/7f7370e4e9b05a51dbde918cd5c9ecbedafe3d20))
+* **wren:** preserve unconstrained PostgreSQL NUMERIC precision ([#2655](https://github.com/Canner/WrenAI/issues/2655)) ([2c264e5](https://github.com/Canner/WrenAI/commit/2c264e56ee2409fe6d426380fbda6b56950c3ac4))
+* **wren:** prevent context upgrade path traversal ([#2649](https://github.com/Canner/WrenAI/issues/2649)) ([6db8bed](https://github.com/Canner/WrenAI/commit/6db8bed56a9063944f149b3ff3dd6eb54b3c1897))
+* **wren:** validate import paths before force cleanup ([#2580](https://github.com/Canner/WrenAI/issues/2580)) ([60ee894](https://github.com/Canner/WrenAI/commit/60ee8947670661e0a3faeafbb464e217921f7f6b))
+
+## [0.13.2](https://github.com/Canner/WrenAI/compare/wren-v0.13.1...wren-v0.13.2) (2026-07-28)
+
+
+### Bug Fixes
+
+* **ask:** guided template's recall step uses a valid CLI option ([#2565](https://github.com/Canner/WrenAI/issues/2565)) ([f242be4](https://github.com/Canner/WrenAI/commit/f242be4689a93d2da6f214c38c414352d07ebdaf))
+* **athena:** strip trailing semicolon on unlimited query path ([#2535](https://github.com/Canner/WrenAI/issues/2535)) ([06e4c42](https://github.com/Canner/WrenAI/commit/06e4c42ddeed6a7c78c178ffb0a7a086783364c0))
+* **bigquery:** push LIMIT into SQL and strip trailing semicolon ([#2465](https://github.com/Canner/WrenAI/issues/2465)) ([0a25df3](https://github.com/Canner/WrenAI/commit/0a25df3eaba8d40ece29061c6970c63a46717178))
+* **duckdb:** strip trailing semicolon on unlimited query path ([#2489](https://github.com/Canner/WrenAI/issues/2489)) ([3d1be24](https://github.com/Canner/WrenAI/commit/3d1be241e8cc625b7bb7df17cc871365edfbab9f))
+* **mcp:** apply default row cap in list_stored_queries markdown fallback ([#2526](https://github.com/Canner/WrenAI/issues/2526)) ([86fac4f](https://github.com/Canner/WrenAI/commit/86fac4fcb2fdadeb5b7f5939539c19df24f8644c))
+* **memory:** skip non-dict columns in seed query generation ([#2514](https://github.com/Canner/WrenAI/issues/2514)) ([a3de389](https://github.com/Canner/WrenAI/commit/a3de389752f5cfc5c01de9333bbf9f0c1e252597))
+* **memory:** skip non-dict models/relationships/views in schema_indexer ([#2533](https://github.com/Canner/WrenAI/issues/2533)) ([50493ab](https://github.com/Canner/WrenAI/commit/50493ab2f965d2febb1a850c6ca37ad5e67eb1d1))
+* **mssql:** preserve outer CTEs and ORDER BY when flattening pagination wrap ([#2579](https://github.com/Canner/WrenAI/issues/2579)) ([a93184d](https://github.com/Canner/WrenAI/commit/a93184dc1d9584a8c4d33b08e3e9183e85445a57))
+* **mssql:** strip trailing semicolons before sqlglot LIMIT rewrite ([#2476](https://github.com/Canner/WrenAI/issues/2476)) ([2e2d0a9](https://github.com/Canner/WrenAI/commit/2e2d0a9346319f0d871c84048fdc08687b8c1ba4))
+* **oracle:** strip trailing semicolon on unlimited query path ([#2534](https://github.com/Canner/WrenAI/issues/2534)) ([78b5b93](https://github.com/Canner/WrenAI/commit/78b5b934792b8869c185bdb15796d2fdcf32c0ab))
+* **profile:** exclude connection_url from selectable datasources ([#2527](https://github.com/Canner/WrenAI/issues/2527)) ([62712f2](https://github.com/Canner/WrenAI/commit/62712f21d9264578bfb34fd439b6cf5486b161fb))
+* **profile:** mask secrets nested under kwargs and settings in profile debug ([#2525](https://github.com/Canner/WrenAI/issues/2525)) ([682e829](https://github.com/Canner/WrenAI/commit/682e829bb52f3fbcd4d2a203664f371ba2442f7b))
+* **redshift:** strip trailing semicolon on unlimited query path ([#2482](https://github.com/Canner/WrenAI/issues/2482)) ([812e802](https://github.com/Canner/WrenAI/commit/812e80289687715460304469a5af01cecfcaf1ad))
+* **redshift:** use public strip_trailing_semicolon on unlimited path ([#2560](https://github.com/Canner/WrenAI/issues/2560)) ([50e710d](https://github.com/Canner/WrenAI/commit/50e710deea6df466bce23c5915ccfd148d5f1113))
+* **spark:** strip trailing semicolon before sql/dry_run ([#2464](https://github.com/Canner/WrenAI/issues/2464)) ([f4b45ed](https://github.com/Canner/WrenAI/commit/f4b45eddab3bd19919045c3f3bee16c85a8f7ebf))
+
+
+### Documentation
+
+* set an explicit contribution bar for agent-authored PRs ([#2602](https://github.com/Canner/WrenAI/issues/2602)) ([b590b65](https://github.com/Canner/WrenAI/commit/b590b6503d7634a36d9c0cace477bff145376e37))
+
+## [0.13.1](https://github.com/Canner/WrenAI/compare/wren-v0.13.0...wren-v0.13.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* **athena:** push LIMIT into SQL and strip trailing semicolon on wrap ([#2457](https://github.com/Canner/WrenAI/issues/2457)) ([79af489](https://github.com/Canner/WrenAI/commit/79af489464431c4bdaf1ff44a28050f0086376c9))
+* **canner:** strip trailing semicolon on unlimited query path ([#2488](https://github.com/Canner/WrenAI/issues/2488)) ([c7e7462](https://github.com/Canner/WrenAI/commit/c7e7462e30bee1ba356861f885f7554fe8fefa3d))
+* **clickhouse:** catch SqlglotError in type string parsing ([#2523](https://github.com/Canner/WrenAI/issues/2523)) ([e99d5ee](https://github.com/Canner/WrenAI/commit/e99d5eef086896152b29a0e5af30fa51e1bd765c))
+* **connector:** use public strip_trailing_semicolon in dry_run paths ([#2550](https://github.com/Canner/WrenAI/issues/2550)) ([4e0c4f3](https://github.com/Canner/WrenAI/commit/4e0c4f35db1024cd5361b8b7156d878dd600630d))
+* **context:** guard `wren context show`/`validate` against null relationship models ([#2494](https://github.com/Canner/WrenAI/issues/2494)) ([30f045d](https://github.com/Canner/WrenAI/commit/30f045d327f72d2acf5ed7749d831c7d5a86edce))
+* **databricks:** strip trailing semicolon before query execute ([#2477](https://github.com/Canner/WrenAI/issues/2477)) ([7aebe4e](https://github.com/Canner/WrenAI/commit/7aebe4e7e28523cd34944e611f1d1981e694fa1d))
+* **datafusion:** strip trailing semicolon before dry_run ([#2463](https://github.com/Canner/WrenAI/issues/2463)) ([fc5949f](https://github.com/Canner/WrenAI/commit/fc5949fde786653ba67e404b9592283d8f0b2fcd))
+* **memory:** guard schema indexing against null relationship models ([#2493](https://github.com/Canner/WrenAI/issues/2493)) ([e19677f](https://github.com/Canner/WrenAI/commit/e19677fbe3fcc3249b7f24dfb45c7dcc01261c56))
+* **postgres:** strip trailing semicolon on unlimited query path ([#2490](https://github.com/Canner/WrenAI/issues/2490)) ([7e4cfca](https://github.com/Canner/WrenAI/commit/7e4cfca9b40fc9b4055137b1a73718ef79358a6c))
+* **profile:** mask all registry-sensitive fields in `wren profile debug` ([#2492](https://github.com/Canner/WrenAI/issues/2492)) ([68cf17b](https://github.com/Canner/WrenAI/commit/68cf17bd3b26a1a508694b44ce3f0a057eb60bde))
+* **snowflake:** strip trailing semicolon before dry_run describe ([#2487](https://github.com/Canner/WrenAI/issues/2487)) ([724c9bd](https://github.com/Canner/WrenAI/commit/724c9bd2fce3d7b6cc1fbb53b7cf83f08fbefd9e))
+* **trino:** coerce verify=false URL/kwargs for SSL connections ([#2481](https://github.com/Canner/WrenAI/issues/2481)) ([243eec8](https://github.com/Canner/WrenAI/commit/243eec883e12657791bcf911f4c2f2de6638bfa8))
+* **trino:** fall back on Sqlglot TokenError for type strings ([#2505](https://github.com/Canner/WrenAI/issues/2505)) ([82ad7a1](https://github.com/Canner/WrenAI/commit/82ad7a1c473f8b28fd8df32d5e35b9955bc30b61))
+* **trino:** sanitize bracketed userinfo and URL-decode credentials ([#2472](https://github.com/Canner/WrenAI/issues/2472)) ([769e222](https://github.com/Canner/WrenAI/commit/769e222a1366e4c2eaff8177a10065f2fb295efa))
+* **type_mapping:** skip non-dict rows in parse/translate_types ([#2508](https://github.com/Canner/WrenAI/issues/2508)) ([aab727f](https://github.com/Canner/WrenAI/commit/aab727fa240f362547d2f21f56bc54bd2c17bdde))
+* **wren:** align MCP handlers with ServeContext and query limits ([#2500](https://github.com/Canner/WrenAI/issues/2500)) ([55c128a](https://github.com/Canner/WrenAI/commit/55c128ab20a27ad20b2bce2320fa3bafd883be05))
+* **wren:** bump transitive deps to clear security advisories ([#2529](https://github.com/Canner/WrenAI/issues/2529)) ([9b2c362](https://github.com/Canner/WrenAI/commit/9b2c362f42c4f05651d8d2adbc128fadbb043a93))
+* **wren:** treat non-string SQL as not exploratory ([#2509](https://github.com/Canner/WrenAI/issues/2509)) ([cba94ad](https://github.com/Canner/WrenAI/commit/cba94ad1476ba4583695fed2aa3da31ddbbf59f3))
+
+
+### Performance Improvements
+
+* **wren:** defer memory model initialization ([#2513](https://github.com/Canner/WrenAI/issues/2513)) ([736175c](https://github.com/Canner/WrenAI/commit/736175c83f562e842b0e906279962cedfe9908bd))
+
+
+### Documentation
+
+* **wren:** fix cube hierarchy YAML examples ([#2502](https://github.com/Canner/WrenAI/issues/2502)) ([d0c6a46](https://github.com/Canner/WrenAI/commit/d0c6a46b348be785e3fbbc41270a4aadefbfb42a))
+
 ## [0.13.0](https://github.com/Canner/WrenAI/compare/wren-v0.12.0...wren-v0.13.0) (2026-07-13)
 
 

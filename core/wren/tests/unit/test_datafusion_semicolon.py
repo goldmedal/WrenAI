@@ -14,11 +14,10 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pyarrow.ipc as ipc
 
+from wren.connector.base import strip_trailing_semicolon as _strip_trailing_semicolon
 from wren.connector.datafusion import (
     DataFusionConnector,
-    
 )
-from wren.connector.base import strip_trailing_semicolon as _strip_trailing_semicolon
 
 
 def _make_mock_connector() -> tuple[DataFusionConnector, MagicMock]:
@@ -41,16 +40,25 @@ def test_query_strips_trailing_semicolon_before_subquery_wrap() -> None:
     connector, ctx = _make_mock_connector()
     connector.query("SELECT 1;", limit=5)
     (sent,), _ = ctx.query.call_args
-    assert sent == "SELECT * FROM (SELECT 1) AS _q LIMIT 5"
-    assert ";)" not in sent
+    assert sent == "SELECT * FROM (\nSELECT 1\n) AS _q LIMIT 5"
+    assert ";\n)" not in sent
+
+
+def test_query_limit_survives_trailing_line_comment() -> None:
+    """Trailing `--` must not eat the wrap (same shape as postgres.py #2728)."""
+    connector, ctx = _make_mock_connector()
+    connector.query("SELECT 1 AS x -- pick", limit=5)
+    (sent,), _ = ctx.query.call_args
+    assert sent == "SELECT * FROM (\nSELECT 1 AS x -- pick\n) AS _q LIMIT 5"
 
 
 def test_query_without_limit_is_unwrapped() -> None:
     connector, ctx = _make_mock_connector()
     connector.query("SELECT 1;")
     (sent,), _ = ctx.query.call_args
-    # No limit -> no subquery wrapping; passed through verbatim.
-    assert sent == "SELECT 1;"
+    # No limit -> no subquery wrapping; still strip trailing terminator
+    # so DataFusion does not treat the SQL as a multi-statement batch.
+    assert sent == "SELECT 1"
 
 
 def test_helper_preserves_semicolon_inside_string_literal() -> None:
@@ -60,3 +68,25 @@ def test_helper_preserves_semicolon_inside_string_literal() -> None:
 
 def test_helper_no_trailing_semicolon_unchanged() -> None:
     assert _strip_trailing_semicolon("SELECT 1") == "SELECT 1"
+
+
+def test_dry_run_strips_trailing_semicolon() -> None:
+    connector, ctx = _make_mock_connector()
+    connector.dry_run("SELECT 1;")
+    (sent,), _ = ctx.dry_run.call_args
+    assert sent == "SELECT 1"
+    assert not sent.endswith(";")
+
+
+def test_dry_run_strips_semicolon_and_whitespace() -> None:
+    connector, ctx = _make_mock_connector()
+    connector.dry_run("SELECT 1;  \n")
+    (sent,), _ = ctx.dry_run.call_args
+    assert sent == "SELECT 1"
+
+
+def test_dry_run_preserves_semicolon_inside_string_literal() -> None:
+    connector, ctx = _make_mock_connector()
+    connector.dry_run("SELECT ';' AS x")
+    (sent,), _ = ctx.dry_run.call_args
+    assert sent == "SELECT ';' AS x"

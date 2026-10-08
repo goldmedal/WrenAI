@@ -90,12 +90,46 @@ def _parse_time_dimension(spec: str) -> dict:
     return td
 
 
+def _parse_order_by(spec: str) -> dict:
+    """Parse a single ``--order-by`` spec ``member:direction``.
+
+    Surrounding whitespace is trimmed. The spelling and case of ``direction``
+    are wren-core's to judge — it owns the closed ``asc`` / ``desc`` enum — so
+    they are passed through unchanged.
+    """
+    parts = spec.split(":")
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        raise typer.BadParameter(f"--order-by expects 'member:direction', got '{spec}'")
+    return {"member": parts[0].strip(), "direction": parts[1].strip()}
+
+
+def _parse_order_by_specs(specs: list[str]) -> list[dict]:
+    """Parse ``--order-by`` values into CubeQuery ``orderBy`` entries.
+
+    Accepts the comma-separated form (like ``--measures``) and the repeatable
+    form (like ``--filter``). Blank segments inside a value are tolerated, as
+    in ``--measures``; a value that contributes no spec at all is rejected, as
+    in ``--filter`` — silently dropping it would hand back an unordered query,
+    the failure ordering exists to prevent.
+    """
+    entries: list[dict] = []
+    for spec in specs:
+        items = [s.strip() for s in spec.split(",") if s.strip()]
+        if not items:
+            raise typer.BadParameter(
+                f"--order-by expects 'member:direction', got '{spec}'"
+            )
+        entries.extend(_parse_order_by(item) for item in items)
+    return entries
+
+
 def _build_cube_query(
     cube: str,
     measures: str,
     dimensions: str,
     time_dimension: str | None,
     filters: list[str],
+    order_by: list[str],
     limit: int | None,
     offset: int | None,
 ) -> dict:
@@ -109,6 +143,8 @@ def _build_cube_query(
         q["timeDimensions"] = [_parse_time_dimension(time_dimension)]
     if filters:
         q["filters"] = [_parse_filter(f) for f in filters]
+    if order_by:
+        q["orderBy"] = _parse_order_by_specs(order_by)
     if limit is not None:
         q["limit"] = limit
     if offset is not None:
@@ -150,7 +186,78 @@ def _load_manifest_dict(mdl: str | None) -> dict:
     if not isinstance(manifest, dict):
         typer.echo("Error: MDL JSON must be an object.", err=True)
         raise typer.Exit(1)
+    _require_cubes_list(manifest)
     return manifest
+
+
+def _require_cubes_list(manifest: dict) -> list:
+    """mdl.json is a build artifact: fail loud on malformed cubes.
+
+    Project YAML is normalised in load_cubes + reported by validate_project.
+    The CLI reads target/mdl.json from `wren context build`. Skipping bad
+    rows here would hide a producer bug and look like an empty listing.
+    """
+    if "cubes" not in manifest:
+        return []
+    cubes = manifest["cubes"]
+    if cubes is None or not isinstance(cubes, list):
+        kind = "null" if cubes is None else f"not a list (got {type(cubes).__name__})"
+        typer.echo(
+            f"Error: malformed cubes in mdl.json (cubes is {kind}).\n"
+            "  Hint: re-run `wren context build`.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    member_hint = (
+        "  Hint: fix the cube definition in cubes/*/metadata.yml, "
+        "then re-run `wren context build`."
+    )
+    for i, cube in enumerate(cubes):
+        if not isinstance(cube, dict):
+            typer.echo(
+                f"Error: malformed cubes in mdl.json (entry {i} is not an object).\n"
+                "  Hint: re-run `wren context build`.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        for key in ("measures", "dimensions", "timeDimensions"):
+            # Explicit null must not slip through: list_cubes joins members
+            # with cube.get(key, []), which still returns None when the key
+            # is present and null — bare TypeError two frames later.
+            if key not in cube:
+                continue
+            members = cube[key]
+            if members is None or not isinstance(members, list):
+                name = cube.get("name", f"entry {i}")
+                kind = (
+                    "null"
+                    if members is None
+                    else f"not a list (got {type(members).__name__})"
+                )
+                typer.echo(
+                    f"Error: malformed cubes in mdl.json ({name!r} {key} is {kind}).\n"
+                    f"{member_hint}",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            for j, item in enumerate(members):
+                if not isinstance(item, dict):
+                    name = cube.get("name", f"entry {i}")
+                    typer.echo(
+                        f"Error: malformed cubes in mdl.json ({name!r} {key}[{j}] is not an object).\n"
+                        f"{member_hint}",
+                        err=True,
+                    )
+                    raise typer.Exit(1)
+                if not isinstance(item.get("name"), str):
+                    name = cube.get("name", f"entry {i}")
+                    typer.echo(
+                        f"Error: malformed cubes in mdl.json ({name!r} {key}[{j}].name is not a string).\n"
+                        f"{member_hint}",
+                        err=True,
+                    )
+                    raise typer.Exit(1)
+    return cubes
 
 
 # ── wren cube list ─────────────────────────────────────────────────────────
@@ -160,7 +267,7 @@ def _load_manifest_dict(mdl: str | None) -> dict:
 def list_cubes(mdl: _MdlOpt = None) -> None:
     """List all cubes defined in the project."""
     manifest = _load_manifest_dict(mdl)
-    cubes = manifest.get("cubes", []) or []
+    cubes = manifest.get("cubes") or []
     if not cubes:
         typer.echo("No cubes defined.")
         return
@@ -233,6 +340,16 @@ def query(
             ),
         ),
     ] = None,
+    order_by: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--order-by",
+            help=(
+                "Repeatable. Format: member:direction (asc|desc). "
+                "Comma-separated for multiple: 'revenue:desc,status:asc'."
+            ),
+        ),
+    ] = None,
     limit: Annotated[
         Optional[int], typer.Option("--limit", "-l", help="Max rows to return")
     ] = None,
@@ -288,6 +405,7 @@ def query(
             dimensions or "",
             time_dimension,
             filter_ or [],
+            order_by or [],
             limit,
             offset,
         )
