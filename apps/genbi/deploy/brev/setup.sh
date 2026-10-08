@@ -3,7 +3,8 @@
 #
 # What this installs on a fresh Ubuntu VM:
 #   1. Node.js (pinned major) and the published `@wrenai/genbi` package
-#   2. `uv` and the `wren` CLI (pinned `wrenai` release) for the service user
+#   2. `uv` and the `wren` CLI (the GenBI Wren fork wheel, pinned by URL and
+#      sha256) for the service user
 #   3. A small synthetic sample dataset (CSV) the setup wizard can bind to
 #   4. A systemd service that runs the GenBI BFF on 127.0.0.1:${GENBI_PORT}
 #
@@ -24,14 +25,18 @@
 #                    restart the service.
 #   GENBI_MODEL      model id on NVIDIA endpoints (default below)
 #   GENBI_VERSION    published @wrenai/genbi version to install (default below)
-#   WRENAI_VERSION   wren CLI release to install (default below)
+#   WRENAI_WHEEL_URL     wren CLI wheel to install (default below)
+#   WRENAI_WHEEL_SHA256  expected sha256 of that wheel; a mismatch aborts
 #
 # Idempotent: re-running re-asserts the pinned versions, rewrites the env file
 # and restarts the service. It never upgrades past the pins on its own.
 set -euo pipefail
 
 GENBI_VERSION="${GENBI_VERSION:-0.0.4}"
-WRENAI_VERSION="${WRENAI_VERSION:-0.13.0}"
+# The PyPI `wrenai` lacks APIs the pinned GenBI release calls, so install the
+# GenBI-compatible fork wheel, verified by checksum before it is installed.
+WRENAI_WHEEL_URL="${WRENAI_WHEEL_URL:-https://github.com/goldmedal/WrenAI/releases/download/wrenai-genbi-v0.15.0-genbi.1/wrenai-0.15.0+genbi.1-py3-none-any.whl}"
+WRENAI_WHEEL_SHA256="${WRENAI_WHEEL_SHA256:-5c937bd428cfab9aa5db19f5db73a86ced68c396d11879bbf41f8097b6ccf114}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 GENBI_MODEL="${GENBI_MODEL:-nvidia/nemotron-3-super-120b-a12b}"
 NVIDIA_API_BASE="${NVIDIA_API_BASE:-https://integrate.api.nvidia.com/v1}"
@@ -85,7 +90,7 @@ SAMPLE_DIR="${GENBI_ROOT}/sample-data/jaffle"
 SAMPLE_DUCKDB_DIR="${GENBI_ROOT}/sample-data/jaffle-duckdb"
 
 run_root rm -f "$SENTINEL"
-info "GenBI ${GENBI_VERSION} · wren ${WRENAI_VERSION} · Node ${NODE_MAJOR} · model ${GENBI_MODEL} · user ${RUN_USER}"
+info "GenBI ${GENBI_VERSION} · wren $(basename "$WRENAI_WHEEL_URL") · Node ${NODE_MAJOR} · model ${GENBI_MODEL} · user ${RUN_USER}"
 
 # ── 1. OS packages ───────────────────────────────────────────────────────────
 info "installing OS packages"
@@ -119,14 +124,20 @@ GENBI_BIN="$(command -v genbi || true)"
 [ -n "$GENBI_BIN" ] || fail "genbi binary not on PATH after install"
 info "genbi at ${GENBI_BIN}"
 
-# ── 4. wren CLI for the service user (uv tool, pinned) ───────────────────────
-info "installing wren CLI ${WRENAI_VERSION} for ${RUN_USER}"
-run_user env HOME="$RUN_HOME" WRENAI_VERSION="$WRENAI_VERSION" bash -c '
+# ── 4. wren CLI for the service user (uv tool, wheel pinned by sha256) ───────
+info "installing wren CLI $(basename "$WRENAI_WHEEL_URL") for ${RUN_USER}"
+run_user env HOME="$RUN_HOME" WRENAI_WHEEL_URL="$WRENAI_WHEEL_URL" WRENAI_WHEEL_SHA256="$WRENAI_WHEEL_SHA256" bash -c '
   set -euo pipefail
   if [ ! -x "$HOME/.local/bin/uv" ]; then
     curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
   fi
-  "$HOME/.local/bin/uv" tool install --force "wrenai==${WRENAI_VERSION}" >/dev/null
+  wheel_dir="$(mktemp -d)"
+  trap '"'"'rm -rf "$wheel_dir"'"'"' EXIT
+  wheel="$wheel_dir/$(basename "$WRENAI_WHEEL_URL")"
+  curl -fsSL --retry 3 --retry-delay 5 -o "$wheel" "$WRENAI_WHEEL_URL"
+  echo "${WRENAI_WHEEL_SHA256}  ${wheel}" | sha256sum -c - >/dev/null \
+    || { echo "ERROR: sha256 mismatch for ${WRENAI_WHEEL_URL}; refusing to install" >&2; exit 1; }
+  "$HOME/.local/bin/uv" tool install --force "$wheel" >/dev/null
   "$HOME/.local/bin/wren" --version
 '
 

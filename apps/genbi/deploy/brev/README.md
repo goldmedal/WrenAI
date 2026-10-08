@@ -14,7 +14,7 @@ GenBI talks to it over the OpenAI-compatible API.
 | Piece | Where |
 | --- | --- |
 | GenBI UI + BFF (`@wrenai/genbi`, pinned) | `http://127.0.0.1:4787` on the VM, reached through the **`genbi` Secure Link** |
-| `wren` CLI (pinned `wrenai` release) | `~/.local/bin/wren` for the `ubuntu` user |
+| `wren` CLI (GenBI Wren fork wheel, pinned by URL + sha256) | `~/.local/bin/wren` for the `ubuntu` user |
 | Synthetic sample data (customers, orders, payments) | `~/genbi/sample-data/jaffle/*.csv` |
 | Service | `systemd` unit `genbi.service`; logs via `journalctl -u genbi` |
 | Install log | `/tmp/genbi-launchable.log`; readiness marker `/var/run/genbi-launchable-ready` |
@@ -39,7 +39,8 @@ you want to try the app; everyone who opens it shares the **same** GenBI workspa
 | `NVIDIA_API_KEY` | _(empty)_ | Key for NVIDIA endpoints. Effectively required. Stored root-owned, mode 0640, readable by the service user only. Never printed. |
 | `GENBI_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | Any chat model id on NVIDIA endpoints with tool calling. |
 | `GENBI_VERSION` | see `setup.sh` | Published `@wrenai/genbi` version. |
-| `WRENAI_VERSION` | see `setup.sh` | `wren` CLI release. |
+| `WRENAI_WHEEL_URL` | see `setup.sh` | URL of the `wren` CLI wheel (the GenBI Wren fork build; PyPI `wrenai` lacks APIs GenBI calls). |
+| `WRENAI_WHEEL_SHA256` | see `setup.sh` | sha256 of that wheel. The download is verified before install; a mismatch aborts the setup. Override both together. |
 
 ## First run
 
@@ -87,7 +88,7 @@ the key cannot.
 
 ## Updating
 
-Re-run `setup.sh` with a newer `GENBI_VERSION` / `WRENAI_VERSION`; it re-asserts
+Re-run `setup.sh` with a newer `GENBI_VERSION` / `WRENAI_WHEEL_URL` + `WRENAI_WHEEL_SHA256`; it re-asserts
 the pins, rewrites the env file and restarts the service. The Launchable itself
 pins a git ref of this script — publishing a new GenBI release means updating that
 ref in the Launchable definition.

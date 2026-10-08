@@ -14,7 +14,7 @@ _Anyone with the link_): <https://brev.nvidia.com/launchable/deploy/now?launchab
 | Setup script | **Paste Script** with the full contents of `setup.sh` (Brev requires the first line to be `#!/bin/bash`; limit 16 KiB, the script is ~10.6 KiB). Alternative once the ref is public: `curl -fsSL https://raw.githubusercontent.com/Canner/WrenAI/<REF>/apps/genbi/deploy/brev/setup.sh \| bash` |
 | Secure Link | name `genbi`, port `4787`, shown as the call-to-action on the deployment page |
 | TCP/UDP ports | none |
-| Launch parameters | `NVIDIA_API_KEY` (secret, optional), `GENBI_MODEL` (default `nvidia/nemotron-3-super-120b-a12b`), `GENBI_VERSION` (default from `setup.sh`), `WRENAI_VERSION` (default from `setup.sh`) |
+| Launch parameters | `NVIDIA_API_KEY` (secret, optional), `GENBI_MODEL` (default `nvidia/nemotron-3-super-120b-a12b`), `GENBI_VERSION` (default from `setup.sh`), `WRENAI_WHEEL_URL` and `WRENAI_WHEEL_SHA256` (defaults from `setup.sh`) |
 | Visibility | **Everyone (published)** so it appears in Brev's Community Explore |
 | Description | "Open-source GenBI over your data with Nemotron. Ask questions, get verified tables, charts and KPIs. Runs the web app on this VM; the model runs on NVIDIA endpoints. CPU-only." |
 
@@ -53,7 +53,7 @@ mode would require the BFF to bind `0.0.0.0` inside the container.
 ## Known blocker for a fully unattended run (as of @wrenai/genbi 0.0.4)
 
 The published `@wrenai/genbi@0.0.4` calls `resolve_profile_for_project(..., strict=True)`, a wren API that no PyPI
-`wrenai` release has (0.13.x–0.15.0), so the wizard's "Build data model" step fails until a genbi release stops
+`wrenai` release has (0.13.x–0.15.0); `setup.sh` therefore installs the GenBI Wren fork wheel, which has it. Without that wheel the wizard's "Build data model" step fails until a genbi release stops
 depending on it. On the live VM it was worked around by stripping `, strict=True` from two files under
 `dist-server/server/`. Separately, the connect gate rejects a project whose `data_source:` line still carries the
 scaffold's inline comment, and the agent-led steps (connect, build) needed several retries and manual repairs with
@@ -61,7 +61,7 @@ Nemotron Super and Ultra. Treat the Launchable as a demo you drive, not a hands-
 
 ## Keeping it fresh
 
-The Launchable pins `<REF>`. When a new `@wrenai/genbi` or `wrenai` is released:
+The Launchable pins `<REF>`. When a new `@wrenai/genbi` or a new `wren` wheel is released (update the wheel URL and sha256 together):
 
 1. Bump the defaults in `setup.sh` on a branch, run the verification above.
 2. Merge, then edit the Launchable's setup-script line to the new ref.
