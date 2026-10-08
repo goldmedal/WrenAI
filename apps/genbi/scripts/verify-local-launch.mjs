@@ -276,7 +276,7 @@ async function runWarbleContractProbe({ bin, profile, setupIr, enrichIr, analysi
         if (composed) {
           const plan = readExecutionPlan(JSON.stringify(bundleJson), { digest: bundleJson.bundle_sha256, inputIrDigest: planDigest(irDocument),
             declarations: Object.fromEntries(irDocument.components.map((node) => [node.id, node])), contextBinding: irDocument.context_binding });
-          loadBundle(describeComponentPlan(plan, bundleJson.profile), { irVersion: "0.8", bundleVersions: ["0.2"] });
+          loadBundle(describeComponentPlan(plan, bundleJson.profile), { irVersion: "0.9", bundleVersions: ["0.2"] });
         } else loadBundle(bundleJson);
       } catch (error) { throw new GateError("describe", `Warble Vercel bundle for ${label} failed the harness describe/compat check: ${error instanceof Error ? error.message : String(error)}`); }
     }

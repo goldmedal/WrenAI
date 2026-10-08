@@ -47,8 +47,8 @@ bump after it):
    already in use provides no protection and just accumulates as dead weight
    that quietly widens the exclusion list over time). Edit the file by hand
    after `pnpm install` to enforce the replacement.
-4. Re-run `pnpm run check:warble-peers` to confirm the new versions still satisfy the `0.6.x` peer range the
-   three packages declare on `@warble/ir-spec`. This catches a version
+4. Re-run `pnpm run check:warble-peers` to confirm the new versions still satisfy the peer range the
+   three packages declare on `@warble/ir-spec` (`0.9.x` as of Warble 0.17.0). This catches a version
    mismatch that plain `pnpm install` accepts silently; it does not check
    `file:`/`link:`-satisfied peers, so it is only meaningful against the
    registry-pinned dependency graph described here.
@@ -154,19 +154,26 @@ the key.
 
 ### Why `@warble/ir-spec` stays behind
 
-`@warble/ir-spec` is pinned at `0.6.0` and does not move in lockstep with the
-other three `@warble/*` packages, by design. The other three packages declare
-`@warble/ir-spec` as a peer dependency with a `0.6.x` range, not an exact
-version — which is what actually makes this safe: as long as ir-spec stays
-inside `0.6.x`, the pinned trio's own version can advance every week without
-requiring an ir-spec bump in lockstep. `@warble/ir-spec` is not itself a
-build output of Warble's normal release train; it is a hand-maintained
-projection of the IR literal that genbi consumes directly, kept intentionally
-decoupled from Warble's weekly cadence so it only needs to change when the IR
-*shape* actually changes, not on every Warble release.
+`@warble/ir-spec` is pinned at `0.9.0` and does not move in lockstep with the
+other three `@warble/*` packages' own version numbers. The other three packages
+declare `@warble/ir-spec` as a peer dependency with a `0.9.x` range (Warble
+0.17.0), not an exact version — which is what makes this safe: as long as
+ir-spec stays inside `0.9.x`, the pinned trio can advance release by release
+without an ir-spec bump. `@warble/ir-spec` versions follow the IR *shape*, not
+Warble's release cadence (the package version *is* the IR version), so it only
+needs to change when the IR line changes.
 
-Bump `@warble/ir-spec` only when Warble ships a new IR line (a `0.7.0`-class
-change, not a patch inside `0.6.x`) — and when that happens, re-verify the
-peer range in step 4 above still resolves, because widening past `0.6.x`
-crosses out of what the other three packages currently declare compatible,
-and their own peer ranges will need updating too.
+Bump `@warble/ir-spec` only when Warble ships a new IR line (a `0.9` → `0.10`
+class change, not a patch inside `0.9.x`). An IR line is a versioned shape
+change, not a widening: in the `0.8` → `0.9` move (a profile with no context now
+emits `context_binding: null` at the root and on every component) a `0.9` reader
+accepts only `0.9` and a `0.8` reader rejects `0.9`. So when the IR line moves,
+move every IR-version literal in this package with it in the same change —
+`HARNESS_SUPPORT.irVersion` in `harness/bundle/version.ts`, the
+`warble_ir_version` schema literals in `harness/components/` and `server/`, the
+compat windows in `harness/` and `scripts/`, and the test helpers that default
+to the current line (`git grep` for the old literal) — recompile every
+`ir.golden.json` with the newly-pinned CLI (see above; the expected golden diff
+is the `warble_ir_version` literal and nothing else unless the IR change itself
+says otherwise), and re-run step 4, since the trio's peer range must name the
+new line.

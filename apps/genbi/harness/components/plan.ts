@@ -52,7 +52,7 @@ const realization = z.union([
     failure_input: z.string().optional(), on_exhaustion: z.literal("fail").optional() }).strict(),
 ]);
 const shared = {
-  warble_ir_version: z.literal("0.8"), protocol: z.literal("warble-component-host/1"),
+  warble_ir_version: z.literal("0.9"), protocol: z.literal("warble-component-host/1"),
   execution_status: z.literal("not_executed"), profile: z.string(),
   input_ir_sha256: digest, context_binding: record, system_prompt: z.string().nullable().optional(),
   limits, model_turn_hard_limit: z.literal(false), monetary_hard_limit: z.literal(false),
@@ -67,7 +67,7 @@ const vercel = z.object({
   }).strict()),
 }).strict();
 const sessionComponent = z.object({
-  session_plan_version: z.literal("2"), producer_version: z.string(), warble_ir_version: z.literal("0.8"),
+  session_plan_version: z.literal("2"), producer_version: z.string(), warble_ir_version: z.literal("0.9"),
   input_ir_sha256: digest, host_contract_sha256: digest, context_identity_sha256: digest, plan_sha256: digest,
   profile: z.string(), component: z.string(), declaration,
   instructions: z.object({ brief: z.string().nullable() }).strict(),
