@@ -154,3 +154,57 @@ test("recognizes fork and source-archive workspaces, while npm-packed copies can
   await writeFile(path.join(unpackedRoot, "pnpm-workspace.yaml"), "packages: []\n");
   assert.equal(await isRepositorySourcePackage(unpackedPackage), false);
 });
+
+const generator = fileURLToPath(new URL("../scripts/generate-release-manifest.mjs", import.meta.url));
+
+async function writeArchive(dir, name, binary) {
+  const archive = gzipSync(tarEntry("wren-context-loader", binary));
+  await writeFile(path.join(dir, name), archive);
+  return archive;
+}
+
+test("release manifest generator emits one digest row per target and the installer picks the row for its platform", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "context-loader-manifest-"));
+  const binaries = { "darwin-arm64": Buffer.from("darwin"), "linux-arm64": Buffer.from("linux-arm"), "linux-x64": Buffer.from("linux-x64") };
+  const archives = {};
+  const args = [];
+  for (const [target, binary] of Object.entries(binaries)) {
+    archives[target] = await writeArchive(dir, `${target}.tar.gz`, binary);
+    args.push(target, path.join(dir, `${target}.tar.gz`), `https://example.invalid/${target}.tar.gz`);
+  }
+  await writeFile(path.join(dir, "package.json"), JSON.stringify({ name: "@wrenai/context-loader", version: "9.9.9" }));
+  execFileSync(process.execPath, [generator, dir, "9.9.9", "abc123", ...args], { stdio: "pipe" });
+  const manifest = JSON.parse(await readFile(path.join(dir, "artifacts.json"), "utf8"));
+  assert.deepEqual(Object.keys(manifest.artifacts).sort(), Object.keys(binaries).sort());
+  for (const [target, binary] of Object.entries(binaries)) {
+    assert.equal(manifest.artifacts[target].archiveSha256, sha256(archives[target]));
+    assert.equal(manifest.artifacts[target].binarySha256, sha256(binary));
+  }
+  for (const [platform, arch, target] of [["linux", "x64", "linux-x64"], ["linux", "arm64", "linux-arm64"], ["darwin", "arm64", "darwin-arm64"]]) {
+    const root = await mkdtemp(path.join(os.tmpdir(), "context-loader-pick-"));
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "@wrenai/context-loader", version: "9.9.9" }));
+    await writeFile(path.join(root, "artifacts.json"), JSON.stringify({ ...manifest, artifacts: Object.fromEntries(Object.entries(manifest.artifacts).map(([key, row]) => [key, { ...row, url: `https://example.invalid/${key}` }])) }));
+    const requested = [];
+    const { binary } = await installContextLoader({
+      packageRoot: root,
+      platform,
+      arch,
+      fetchImpl: async (url) => {
+        requested.push(url);
+        return { ok: true, arrayBuffer: async () => archives[target] };
+      },
+    });
+    assert.deepEqual(requested, [`https://example.invalid/${target}`]);
+    assert.deepEqual(await readFile(binary), binaries[target]);
+  }
+});
+
+test("release manifest generator keeps the single-archive darwin-arm64 form and rejects bad targets", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "context-loader-manifest-legacy-"));
+  await writeArchive(dir, "a.tar.gz", Buffer.from("darwin"));
+  execFileSync(process.execPath, [generator, dir, "1.0.0", "abc", path.join(dir, "a.tar.gz"), "https://example.invalid/a"], { stdio: "pipe" });
+  assert.deepEqual(Object.keys(JSON.parse(await readFile(path.join(dir, "artifacts.json"), "utf8")).artifacts), ["darwin-arm64"]);
+  const bad = (...extra) => () => execFileSync(process.execPath, [generator, dir, "1.0.0", "abc", ...extra], { stdio: "pipe" });
+  assert.throws(bad("win32-x64", path.join(dir, "a.tar.gz"), "https://example.invalid/a"));
+  assert.throws(bad("linux-x64", path.join(dir, "a.tar.gz"), "https://example.invalid/a", "linux-x64", path.join(dir, "a.tar.gz"), "https://example.invalid/b"));
+});
