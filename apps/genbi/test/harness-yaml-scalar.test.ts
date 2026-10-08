@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readYamlScalarField } from "../server/yaml-scalar.js";
+import { readYamlScalarField } from "../harness/setup/yaml-scalar.js";
 
 describe("readYamlScalarField", () => {
   it.each([

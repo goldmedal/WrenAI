@@ -288,6 +288,35 @@ describe("parseSetupTerminal", () => {
       expect(result.message).toContain('no "profile:" pin');
       expect(result.message).toMatch(/check the profile, not \.env/i);
     });
+
+    it("scaffolded `data_source: duckdb  # comment` with a matching selection -> ok", () => {
+      const context = { ...makeContext("acme"), stepKey: "connect_resume", expectedSourceType: "duckdb" };
+      mkdirSync(path.join(context.root, context.name), { recursive: true });
+      writeFileSync(
+        path.join(context.root, context.name, "wren_project.yml"),
+        "name: test\nprofile: acme  # pinned by set-profile\ndata_source: duckdb  # change to your datasource type\n",
+      );
+      markValidated(context);
+
+      const result = parseSetupTerminal("SETUP_STATUS: ok - connected to duckdb", context);
+
+      expect(result).toEqual({ status: "ok", message: "connected to duckdb" });
+    });
+
+    it("scaffolded `profile:  # not set yet` is unpinned, not the comment text", () => {
+      const context = { ...makeContext("acme"), stepKey: "connect_resume", expectedSourceType: "duckdb" };
+      mkdirSync(path.join(context.root, context.name), { recursive: true });
+      writeFileSync(
+        path.join(context.root, context.name, "wren_project.yml"),
+        "name: test\nprofile:  # not set yet\ndata_source: duckdb\n",
+      );
+      markValidated(context);
+
+      const result = parseSetupTerminal("SETUP_STATUS: ok - connected", context);
+
+      expect(result.status).toBe("error");
+      expect(result.diagnostic).toMatchObject({ kind: "host_contract", code: "connection_profile_missing" });
+    });
   });
 
   describe("stepKey: 'context' checks target/mdl.json has >=1 model, not wren_project.yml/.wren-validated", () => {

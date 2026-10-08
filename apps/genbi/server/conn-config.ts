@@ -35,7 +35,7 @@
  * so a small line-based parser is enough here; pulling in a full YAML
  * library for one flat file would be overkill. `wren_project.yml` only ever
  * needs two scalar fields read out of it, so it gets the same small-parser
- * treatment (shares `readYamlScalarField` with `server/adopt.ts`, from `server/yaml-scalar.ts`).
+ * treatment (shares `readYamlScalarField` with `server/adopt.ts`, from `harness/setup/yaml-scalar.ts`).
  *
  * SECURITY: `describeConnection` only ever reads from a fixed ALLOWLIST of
  * non-secret field names (host/port/database/project id/…) when building the
@@ -48,7 +48,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { loadProfileStore } from "./wren-profiles.js";
-import { readYamlScalarField } from "./yaml-scalar.js";
+import { readYamlScalarField } from "../harness/setup/yaml-scalar.js";
 
 export interface ConnConfig {
   readonly datasource?: string;

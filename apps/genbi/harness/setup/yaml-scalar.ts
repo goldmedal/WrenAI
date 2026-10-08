@@ -14,11 +14,16 @@
  *   anything after the closing quote is a comment;
  * - a blank value, or one that is only a comment, reads as `""` (unset).
  *
+ * Double-quoted escapes are NOT unescaped (`"a\"b"` yields `a\"b`): only plain
+ * identifiers (data source types, profile names) are ever read through here.
+ * A leading BOM is ignored.
+ *
  * Returns `undefined` only when the field's key line is absent.
  */
 export function readYamlScalarField(content: string, field: string): string | undefined {
   const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`^${escaped}:[ \\t]*(.*)$`, "m").exec(content);
+  const text = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  const match = new RegExp(`^${escaped}:[ \\t]*(.*)$`, "m").exec(text);
   if (!match) return undefined;
   return parseScalarValue(match[1]!.replace(/\r$/, ""));
 }

@@ -65,6 +65,7 @@ import { buildUniformTierBinding } from "../route/tier-binding.js";
 import { createNativeToolRegistry, createSetupExecutionTool, SETUP_EXECUTION_TOOL_NAME } from "../tools/index.js";
 import { withResolvedTools } from "../tools/wiring.js";
 import { CodexSetupEventMapper } from "./codex-events.js";
+import { readYamlScalarField } from "./yaml-scalar.js";
 
 /** The warble component the setup wizard's connect step dispatches. */
 export const CONNECT_SOURCE_AGENT_ID = "connect_source";
@@ -961,7 +962,9 @@ export interface SetupWorklogEntry {
  * rather than pulling in a YAML parser dependency. Matches only an unindented
  * `field:` key (so it can't be fooled by a same-named key nested under
  * another mapping), strips a single layer of surrounding quotes, and returns
- * `undefined` if the file is missing/unreadable or the field isn't present.
+ * `undefined` if the file is missing/unreadable or the field isn't present. Values
+ * are read as YAML scalars (trailing comments dropped; blank or comment-only is `""`),
+ * via `./yaml-scalar.ts`.
  */
 function readProjectYamlField(yamlPath: string, field: string): string | undefined {
   let content: string;
@@ -970,14 +973,7 @@ function readProjectYamlField(yamlPath: string, field: string): string | undefin
   } catch {
     return undefined;
   }
-  const pattern = new RegExp(`^${field}:\\s*(.+?)\\s*$`, "m");
-  const match = pattern.exec(content);
-  if (!match) {
-    return undefined;
-  }
-  const raw = match[1]!;
-  const unquoted = /^"(.*)"$/.exec(raw) ?? /^'(.*)'$/.exec(raw);
-  return (unquoted ? unquoted[1]! : raw).trim();
+  return readYamlScalarField(content, field);
 }
 
 /** Parses the small KEY=value subset of a project .env file used by Wren profiles. */
@@ -1172,7 +1168,7 @@ export function contextLifecycleIdentityFingerprint(
     const declaredSourceType = readProjectYamlField(projectYml, "data_source");
     const normalizedSelectedSourceType = selectedSourceType.trim().toLowerCase();
     const normalizedDeclaredSourceType = declaredSourceType?.trim().toLowerCase();
-    if (profile === undefined || normalizedDeclaredSourceType === undefined || normalizedDeclaredSourceType !== normalizedSelectedSourceType) return undefined;
+    if (!profile || normalizedDeclaredSourceType === undefined || normalizedDeclaredSourceType !== normalizedSelectedSourceType) return undefined;
     const connectionTargetDigest = effectiveConnectionTargetDigest(projectDir, normalizedSelectedSourceType);
     if (connectionTargetDigest === undefined) return undefined;
     return createHash("sha256")
