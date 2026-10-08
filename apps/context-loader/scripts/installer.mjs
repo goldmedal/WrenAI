@@ -18,7 +18,10 @@ export async function installContextLoader({ packageRoot, fetchImpl = fetch, pla
 
   await ensureOwnedDirectory(root, "bin");
   const reusable = await existingVerified(root, packageJson.version, target, artifact.archiveSha256, artifact.binarySha256);
-  if (reusable !== undefined) return { binary: reusable, reused: true };
+  if (reusable !== undefined) {
+    await makeReadableByOthers(root, { strict: false });
+    return { binary: reusable, reused: true };
+  }
 
   const binary = path.join(root, CANONICAL_BINARY);
   const statePath = path.join(root, "install-state.json");
@@ -50,6 +53,7 @@ export async function installContextLoader({ packageRoot, fetchImpl = fetch, pla
     await writeNewOwnedFile(root, stateName, `${JSON.stringify(state)}\n`, 0o600);
     await rename(stateTmp, statePath);
     await ownedRegularFile(root, "install-state.json");
+    await makeReadableByOthers(root, { strict: true });
     return { binary: installedBinary, reused: false };
   } catch (error) {
     if (stagingCreated) await removeOwnedFile(root, path.join("bin", path.basename(staging)));
@@ -132,6 +136,24 @@ async function ensureOwnedDirectory(root, relativePath) {
     if ((await realpath(directory)) !== directory) throw new Error("linked directory");
   } catch {
     throw new ContextLoaderPackageError("unsafe-path", "package-local binary directory is linked or outside the package root");
+  }
+}
+
+/**
+ * A root-owned global install is later read by a different service user, and a
+ * restrictive umask would otherwise strip the read/search bits. Only read and
+ * search permission is widened; nothing becomes group- or world-writable.
+ * Reuse is best-effort because the installing user may not own the files.
+ */
+async function makeReadableByOthers(root, { strict }) {
+  if (process.platform === "win32") return;
+  try {
+    await ensureOwnedDirectory(root, "bin");
+    await chmod(path.join(root, "bin"), 0o755);
+    await chmod(await ownedRegularFile(root, CANONICAL_BINARY), 0o755);
+    await chmod(await ownedRegularFile(root, "install-state.json"), 0o644);
+  } catch (error) {
+    if (strict) throw error;
   }
 }
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -207,4 +207,40 @@ test("release manifest generator keeps the single-archive darwin-arm64 form and 
   const bad = (...extra) => () => execFileSync(process.execPath, [generator, dir, "1.0.0", "abc", ...extra], { stdio: "pipe" });
   assert.throws(bad("win32-x64", path.join(dir, "a.tar.gz"), "https://example.invalid/a"));
   assert.throws(bad("linux-x64", path.join(dir, "a.tar.gz"), "https://example.invalid/a", "linux-x64", path.join(dir, "a.tar.gz"), "https://example.invalid/b"));
+});
+
+const modeOf = async (file) => (await stat(file)).mode & 0o777;
+const posixOnly = { skip: process.platform === "win32" };
+
+async function withUmask(mask, run) {
+  const previous = process.umask(mask);
+  try {
+    return await run();
+  } finally {
+    process.umask(previous);
+  }
+}
+
+test("install leaves state, binary and bin directory readable by other users even under a restrictive umask", posixOnly, async () => {
+  const { root, archive } = await fixture();
+  await withUmask(0o077, () => installContextLoader({ packageRoot: root, fetchImpl: fetchArchive(archive) }));
+  assert.equal((await modeOf(path.join(root, "install-state.json"))).toString(8), "644");
+  assert.equal((await modeOf(path.join(root, "bin", "wren-context-loader"))).toString(8), "755");
+  assert.equal((await modeOf(path.join(root, "bin"))).toString(8), "755");
+  assert.deepEqual((await readdir(path.join(root, "bin"))).sort(), ["wren-context-loader"]);
+  assert.deepEqual((await readdir(root)).filter((name) => name.includes(".tmp-")), []);
+});
+
+test("reusing an existing install keeps, and repairs, other-user readability", posixOnly, async () => {
+  const { root, archive } = await fixture();
+  await installContextLoader({ packageRoot: root, fetchImpl: fetchArchive(archive) });
+  const reused = await withUmask(0o077, () => installContextLoader({ packageRoot: root, fetchImpl: async () => { throw new Error("offline"); } }));
+  assert.equal(reused.reused, true);
+  assert.equal((await modeOf(path.join(root, "install-state.json"))).toString(8), "644");
+  await chmod(path.join(root, "install-state.json"), 0o600);
+  await chmod(path.join(root, "bin"), 0o700);
+  await installContextLoader({ packageRoot: root, fetchImpl: async () => { throw new Error("offline"); } });
+  assert.equal((await modeOf(path.join(root, "install-state.json"))).toString(8), "644");
+  assert.equal((await modeOf(path.join(root, "bin"))).toString(8), "755");
+  assert.equal((await modeOf(path.join(root, "bin", "wren-context-loader"))).toString(8), "755");
 });
