@@ -68,8 +68,8 @@ sudo systemctl restart genbi    # after editing /etc/genbi/genbi.env
 tail -f /tmp/genbi-launchable.log
 ```
 
-To change the model or key later, edit `/etc/genbi/genbi.env` (root; set both
-`WREN_HARNESS_API_KEY` and `OPENAI_API_KEY` to the same value) and restart the
+To change the model or key later, edit `/etc/genbi/genbi.env` (root; set
+`WREN_HARNESS_API_KEY`, `OPENAI_API_KEY` and `GENBI_GATEWAY_API_KEY` to the same value) and restart the
 service. The model and endpoint can also be changed in the app's runtime settings;
 the key cannot.
 

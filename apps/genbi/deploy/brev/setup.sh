@@ -208,11 +208,14 @@ run_root install -d -m 0750 -o root -g "$RUN_USER" "$ENV_DIR"
     # The in-app runtime settings re-read the key for the openai-compatible
     # adapter from OPENAI_API_KEY; the key itself is never persisted by GenBI.
     echo "OPENAI_API_KEY=${NVIDIA_API_KEY}"
+    # Saving the gateway runtime in the wizard checks GENBI_GATEWAY_API_KEY, not
+    # the boot key, so set it too or that save is refused.
+    echo "GENBI_GATEWAY_API_KEY=${NVIDIA_API_KEY}"
   fi
   echo "NODE_ENV=production"
 } | run_root install -m 0640 -o root -g "$RUN_USER" /dev/stdin "$ENV_FILE"
 if [ -z "${NVIDIA_API_KEY:-}" ]; then
-  info "NVIDIA_API_KEY not provided; add WREN_HARNESS_API_KEY and OPENAI_API_KEY to ${ENV_FILE}, then: sudo systemctl restart genbi"
+  info "NVIDIA_API_KEY not provided; add WREN_HARNESS_API_KEY, OPENAI_API_KEY and GENBI_GATEWAY_API_KEY to ${ENV_FILE}, then: sudo systemctl restart genbi"
 fi
 
 # ── 7. systemd service ───────────────────────────────────────────────────────
