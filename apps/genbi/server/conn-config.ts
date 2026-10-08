@@ -35,7 +35,7 @@
  * so a small line-based parser is enough here; pulling in a full YAML
  * library for one flat file would be overkill. `wren_project.yml` only ever
  * needs two scalar fields read out of it, so it gets the same small-parser
- * treatment (mirrors `server/adopt.ts`'s own `readYamlScalarField`).
+ * treatment (shares `readYamlScalarField` with `server/adopt.ts`, from `server/yaml-scalar.ts`).
  *
  * SECURITY: `describeConnection` only ever reads from a fixed ALLOWLIST of
  * non-secret field names (host/port/database/project id/…) when building the
@@ -48,6 +48,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { loadProfileStore } from "./wren-profiles.js";
+import { readYamlScalarField } from "./yaml-scalar.js";
 
 export interface ConnConfig {
   readonly datasource?: string;
@@ -173,28 +174,14 @@ export interface ProjectManifest {
   readonly profile?: string;
 }
 
-/**
- * Matches a `wren_project.yml` top-level `field: value` scalar line — a
- * second small instance of `server/adopt.ts`'s own `readYamlScalarField`
- * rather than an import from it: this module only ever needs the same two
- * fields (`data_source`, `profile`), and adopt.ts's function isn't exported
- * for reuse, so a four-line regex duplicated here is cheaper than adding a
- * cross-module export just for it.
- */
-function readManifestScalar(content: string, field: string): string | undefined {
-  const re = new RegExp(`^${field}:\\s*(.+?)\\s*$`, "m");
-  const match = re.exec(content);
-  return match ? stripQuotes(match[1]!.trim()) : undefined;
-}
-
 /** Reads `<projectDir>/wren_project.yml`'s persistent `data_source:`/`profile:` scalars. Unlike `conn.yml`, this file always exists on a bound wren project. Returns `undefined` only when the manifest itself is missing/unreadable — never throws. */
 export function loadProjectManifest(projectDir: string): ProjectManifest | undefined {
   const manifestPath = path.join(projectDir, "wren_project.yml");
   if (!existsSync(manifestPath)) return undefined;
   try {
     const content = readFileSync(manifestPath, "utf-8");
-    const dataSource = readManifestScalar(content, "data_source");
-    const profile = readManifestScalar(content, "profile");
+    const dataSource = readYamlScalarField(content, "data_source") || undefined;
+    const profile = readYamlScalarField(content, "profile") || undefined;
     return { ...(dataSource !== undefined ? { dataSource } : {}), ...(profile !== undefined ? { profile } : {}) };
   } catch {
     return undefined;
