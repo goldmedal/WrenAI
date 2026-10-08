@@ -89,20 +89,26 @@ info "GenBI ${GENBI_VERSION} · wren ${WRENAI_VERSION} · Node ${NODE_MAJOR} · 
 # ── 1. OS packages ───────────────────────────────────────────────────────────
 info "installing OS packages"
 run_root systemctl stop unattended-upgrades 2>/dev/null || true
-retry 3 10 "apt-get update" run_root apt-get update -qq
-retry 3 10 "apt-get install" run_root apt-get install -y -qq --no-install-recommends \
+# `apt-get update` exits non-zero when ANY configured repository fails, including
+# third-party ones the image ships (a mirror mid-sync is enough). The Ubuntu
+# indexes we need are still refreshed, so report and continue.
+run_root apt-get -o DPkg::Lock::Timeout=600 update -qq \
+  || info "apt-get update reported errors for some repositories; continuing with the indexes that did refresh"
+retry 5 20 "apt-get install" run_root apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends \
   ca-certificates curl git python3 build-essential
 
 # ── 2. Node.js (pinned major) ────────────────────────────────────────────────
 if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" != "$NODE_MAJOR" ]; then
   info "installing Node.js ${NODE_MAJOR}.x"
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | run_root bash - >/dev/null
-  retry 3 10 "apt-get install nodejs" run_root apt-get install -y -qq nodejs
+  retry 5 20 "apt-get install nodejs" run_root apt-get -o DPkg::Lock::Timeout=600 install -y -qq nodejs
 fi
 info "node $(node -v), npm $(npm -v)"
 
 # ── 3. @wrenai/genbi (published package; postinstall fetches pinned Warble) ──
-installed_genbi="$(npm ls -g @wrenai/genbi --depth=0 --json 2>/dev/null \
+# `npm ls` exits 1 when the package is absent; under `pipefail` that would abort
+# the script, so neutralise its status and let the JSON parse decide.
+installed_genbi="$( (npm ls -g @wrenai/genbi --depth=0 --json 2>/dev/null || true) \
   | node -p 'try{JSON.parse(require("fs").readFileSync(0,"utf8")).dependencies["@wrenai/genbi"].version}catch{""}')"
 if [ "$installed_genbi" != "$GENBI_VERSION" ]; then
   info "installing @wrenai/genbi@${GENBI_VERSION}"
