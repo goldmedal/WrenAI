@@ -82,6 +82,7 @@ GENBI_ROOT="${RUN_HOME}/genbi"
 WORKSPACE_ROOT="${GENBI_ROOT}/workspace"
 OUT_DIR="${GENBI_ROOT}/out"
 SAMPLE_DIR="${GENBI_ROOT}/sample-data/jaffle"
+SAMPLE_DUCKDB_DIR="${GENBI_ROOT}/sample-data/jaffle-duckdb"
 
 run_root rm -f "$SENTINEL"
 info "GenBI ${GENBI_VERSION} · wren ${WRENAI_VERSION} · Node ${NODE_MAJOR} · model ${GENBI_MODEL} · user ${RUN_USER}"
@@ -160,6 +161,24 @@ with (out / "payments.csv").open("w", newline="") as f:
             w.writerow((oid, oid, random.choice(["card", "bank_transfer", "invoice"]), amount))
 print(f"sample data: {len(customers)} customers, {len(orders)} orders -> {out}")
 PY
+# wren's DuckDB connector only enumerates tables for `format: duckdb`; with
+# `format: csv` the files are queryable via read_csv_auto() but invisible to
+# information_schema, which is what GenBI's schema discovery reads. So also
+# load the CSVs into one DuckDB file and point the wizard at that directory.
+run_user mkdir -p "$SAMPLE_DUCKDB_DIR"
+run_user tee "$SAMPLE_DUCKDB_DIR/.build-duckdb.py" >/dev/null <<'PY2'
+import duckdb, sys, pathlib
+src = pathlib.Path(sys.argv[1]); db = pathlib.Path(sys.argv[2])
+if db.exists(): db.unlink()
+con = duckdb.connect(str(db))
+for f in sorted(src.glob("*.csv")):
+    con.execute(f"CREATE TABLE {f.stem} AS SELECT * FROM read_csv_auto('{f}', header=true)")
+print({r[0]: con.execute(f"SELECT count(*) FROM {r[0]}").fetchone()[0] for r in con.execute("SHOW TABLES").fetchall()})
+con.close()
+PY2
+# wren's uv tool venv ships duckdb; run the loader with that interpreter.
+run_user env HOME="$RUN_HOME" bash -c '"$(sed -n "1s/^#!//p" "$HOME/.local/bin/wren")" "$@"' _ \
+  "$SAMPLE_DUCKDB_DIR/.build-duckdb.py" "$SAMPLE_DIR" "$SAMPLE_DUCKDB_DIR/jaffle.duckdb"
 
 # ── 6. Environment file (the key is never printed) ──────────────────────────
 info "writing ${ENV_FILE}"
@@ -214,9 +233,23 @@ run_root systemctl restart genbi.service
 info "waiting for GenBI on 127.0.0.1:${GENBI_PORT}"
 for _ in $(seq 1 60); do
   if curl -fsS -o /dev/null "http://127.0.0.1:${GENBI_PORT}/"; then
+    # The setup wizard reads the persisted runtime settings, not the boot env, so
+    # bind the NVIDIA endpoint there too: the "API key (BYO)" mode with the
+    # OpenAI-compatible adapter, both compiled tiers on ${GENBI_MODEL}. The key
+    # itself stays in the env file (OPENAI_API_KEY); nothing here persists it.
+    if [ -n "${NVIDIA_API_KEY:-}" ]; then
+      runtime_json=$(printf '{"authMode":"byo","apiKeyAdapter":"openai-compatible","apiKeyBaseURL":"%s","apiKeyModel":"%s","tierModels":[{"tier":"cheap","model":"%s"},{"tier":"strong","model":"%s"}]}' \
+        "$NVIDIA_API_BASE" "$GENBI_MODEL" "$GENBI_MODEL" "$GENBI_MODEL")
+      if curl -fsS -o /dev/null -X PUT -H 'content-type: application/json' \
+           "http://127.0.0.1:${GENBI_PORT}/api/config/runtime" -d "$runtime_json"; then
+        info "runtime bound: OpenAI-compatible adapter → ${NVIDIA_API_BASE}, model ${GENBI_MODEL} (both tiers)"
+      else
+        info "could not pre-bind the runtime settings; pick 'API key (BYO)' → OpenAI-compatible in the setup wizard"
+      fi
+    fi
     run_root touch "$SENTINEL"
     info "=== Ready === open the 'genbi' Secure Link (port ${GENBI_PORT})"
-    info "sample data for the setup wizard: ${SAMPLE_DIR} (datasource duckdb, format csv)"
+    info "sample data for the setup wizard: URL=${SAMPLE_DUCKDB_DIR} FORMAT=duckdb (Local file → DuckDB); raw CSVs in ${SAMPLE_DIR}"
     exit 0
   fi
   sleep 2
