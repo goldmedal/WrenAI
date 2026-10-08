@@ -10,15 +10,15 @@ permissions:
   id-token: write
 
 jobs:
-  publish-darwin-arm64:
-    name: Build and publish darwin-arm64 context loader
-    runs-on: macos-14
-    environment: npm
+  prepare:
+    name: Verify explicit tag version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.ref_name }}
-          fetch-depth: 0
 
       - name: Verify explicit tag version
         id: version
@@ -29,19 +29,42 @@ jobs:
           test "$(node -p "require('./apps/context-loader/package.json').version")" = "$version"
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
 
+  build:
+    name: Build ${{ matrix.target }} context loader
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    # The Linux legs build inside an old-glibc image so the binary runs on
+    # Ubuntu 22.04+ and Debian 11+; the macOS leg builds on the runner itself.
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: darwin-arm64
+            rust_target: aarch64-apple-darwin
+            runner: macos-14
+            container: ''
+          - target: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            container: rust:1.89-bullseye
+          - target: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            container: rust:1.89-bullseye
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
       - name: Set up locked Rust toolchain
+        if: matrix.container == ''
         uses: dtolnay/rust-toolchain@1.89.0
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.rust_target }}
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-
-      - name: Ensure npm supports trusted publishing
-        run: npm install -g npm@latest
+      - name: Add Rust components
+        run: rustup component add rustfmt clippy
 
       - name: Test generator source
         working-directory: core/wren-context-loader
@@ -54,29 +77,113 @@ jobs:
         id: archive
         shell: bash
         run: |
-          cargo build --locked --release --target aarch64-apple-darwin --manifest-path core/wren-context-loader/Cargo.toml
-          name="wren-context-loader-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz"
+          cargo build --locked --release --target "${{ matrix.rust_target }}" --manifest-path core/wren-context-loader/Cargo.toml
+          bin_dir="core/wren-context-loader/target/${{ matrix.rust_target }}/release"
+          name="wren-context-loader-${{ needs.prepare.outputs.version }}-${{ matrix.target }}.tar.gz"
           mkdir -p release
-          tar -C core/wren-context-loader/target/aarch64-apple-darwin/release -czf "release/$name" wren-context-loader
-          printf 'name=%s\n' "$name" >> "$GITHUB_OUTPUT"
+          tar -C "$bin_dir" -czf "release/$name" wren-context-loader
+          printf 'name=%s\nbin_dir=%s\n' "$name" "$bin_dir" >> "$GITHUB_OUTPUT"
 
-      - name: Create immutable release asset
+      - name: Smoke-run the built binary
+        shell: bash
+        run: |
+          out="$("${{ steps.archive.outputs.bin_dir }}/wren-context-loader" --help 2>&1 || true)"
+          grep -q "usage: wren-context-loader" <<<"$out"
+
+      - name: Enforce the glibc floor
+        if: startsWith(matrix.target, 'linux-')
+        shell: bash
+        run: |
+          max="$(objdump -T "${{ steps.archive.outputs.bin_dir }}/wren-context-loader" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1)"
+          echo "max glibc symbol version: $max"
+          test "$(printf '%s\nGLIBC_2.31\n' "$max" | sort -V | tail -n 1)" = "GLIBC_2.31"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: release/${{ steps.archive.outputs.name }}
+          if-no-files-found: error
+
+  publish:
+    name: Release and publish context loader
+    needs: [prepare, build]
+    runs-on: macos-14
+    environment: npm
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Set up locked Rust toolchain
+        uses: dtolnay/rust-toolchain@1.89.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Ensure npm supports trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Download every target archive
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: release
+          merge-multiple: true
+
+      - name: Require exactly the three certified archives
+        shell: bash
+        run: |
+          for target in darwin-arm64 linux-arm64 linux-x64; do
+            test -f "release/wren-context-loader-${VERSION}-${target}.tar.gz"
+          done
+          test "$(find release -type f | wc -l | tr -d ' ')" = "3"
+
+      - name: Create immutable release assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
-          files: release/${{ steps.archive.outputs.name }}
+          files: |
+            release/wren-context-loader-${{ needs.prepare.outputs.version }}-darwin-arm64.tar.gz
+            release/wren-context-loader-${{ needs.prepare.outputs.version }}-linux-arm64.tar.gz
+            release/wren-context-loader-${{ needs.prepare.outputs.version }}-linux-x64.tar.gz
 
       - name: Generate embedded manifest
         shell: bash
         run: |
-          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${{ steps.archive.outputs.name }}"
-          node apps/context-loader/scripts/generate-release-manifest.mjs apps/context-loader "${{ steps.version.outputs.version }}" "$GITHUB_SHA" "release/${{ steps.archive.outputs.name }}" "$url" > release/context-loader-manifest.json
-          cp release/context-loader-manifest.json "release/${{ steps.archive.outputs.name }}.manifest.json"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/wren-context-loader-${VERSION}"
+          node apps/context-loader/scripts/generate-release-manifest.mjs apps/context-loader "$VERSION" "$GITHUB_SHA" \
+            darwin-arm64 "release/wren-context-loader-${VERSION}-darwin-arm64.tar.gz" "${base}-darwin-arm64.tar.gz" \
+            linux-arm64 "release/wren-context-loader-${VERSION}-linux-arm64.tar.gz" "${base}-linux-arm64.tar.gz" \
+            linux-x64 "release/wren-context-loader-${VERSION}-linux-x64.tar.gz" "${base}-linux-x64.tar.gz" \
+            > release/context-loader-manifest.json
+          cp release/context-loader-manifest.json "release/wren-context-loader-${VERSION}.manifest.json"
 
       - name: Validate installer contract
         working-directory: apps/context-loader
         run: node --test test/*.test.mjs
+
+      - name: Verify every released row through the real installer
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { cp, mkdtemp } from "node:fs/promises";
+          import os from "node:os";
+          import path from "node:path";
+          import { installContextLoader } from "./apps/context-loader/scripts/installer.mjs";
+          for (const [platform, arch] of [["darwin", "arm64"], ["linux", "arm64"], ["linux", "x64"]]) {
+            const root = await mkdtemp(path.join(os.tmpdir(), `context-loader-${platform}-${arch}-`));
+            for (const file of ["package.json", "artifacts.json"]) await cp(path.join("apps/context-loader", file), path.join(root, file));
+            await installContextLoader({ packageRoot: root, platform, arch });
+            console.log(`verified ${platform}-${arch} release row`);
+          }
+          NODE
 
       - name: Run fresh GenBI package-binding contract
         run: |
@@ -95,4 +202,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: release/${{ steps.archive.outputs.name }}.manifest.json
+          files: release/wren-context-loader-${{ needs.prepare.outputs.version }}.manifest.json
