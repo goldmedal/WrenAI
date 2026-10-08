@@ -52,7 +52,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { readYamlScalarField } from "./yaml-scalar.js";
+import { readYamlScalarField } from "../harness/setup/yaml-scalar.js";
 import { listCandidateProfiles, loadProfileStore, type ProfileCandidate } from "./wren-profiles.js";
 
 export type { ProfileCandidate };

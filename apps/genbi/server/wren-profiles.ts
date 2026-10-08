@@ -51,7 +51,7 @@ export function profilesFilePath(): string {
   return path.join(wrenHomeDir(), "profiles.yml");
 }
 
-/** Strips one layer of matching quotes — same convention as `server/yaml-scalar.ts`. */
+/** Strips one layer of matching quotes — same convention as `harness/setup/yaml-scalar.ts`. */
 function unquote(raw: string): string {
   const match = /^(['"])(.*)\1$/.exec(raw);
   return match ? match[2]! : raw;
