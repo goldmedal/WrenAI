@@ -34,6 +34,22 @@ mode would require the BFF to bind `0.0.0.0` inside the container.
 4. Stop and start the instance; the service comes back and the workspace persists.
 5. Delete the test instance.
 
+## Observed on the first live deploy (2026-10-08)
+
+- GCP `n2-standard-4`-class CPU VM (4 vCPU / 16 GiB / 43 GB) in asia-south1: **Provisioning 31 s, Building 3 min 21 s**
+  to `Running`; the setup script then needs about 1 more minute on a warm image (first run installs ~250 MB of apt
+  packages plus Node and `@wrenai/genbi`, so budget 3–5 minutes).
+- Brev runs the pasted script as a transient systemd unit (`oncreate-lifecycle-script-<id>.service`, user `ubuntu`
+  with passwordless sudo, launch parameters via `PassEnvironment`), and in parallel runs its own bootstrap
+  (NetBird, metrics stack, Docker) which also calls `apt`. Two consequences the script now handles:
+  `apt-get update` exits non-zero when any of Brev's third-party repositories is mid-sync, so it is non-fatal; and
+  apt calls wait for the dpkg lock (`DPkg::Lock::Timeout`).
+- `npm ls -g <pkg>` exits 1 when the package is absent; under `set -o pipefail` that aborted the first run silently.
+- Brev's console "Startup script logs" panel can stay on *Loading…*; the authoritative log is
+  `~/.lifecycle-script-<id>.log` on the VM, plus the script's own `/tmp/genbi-launchable.log`. SSH:
+  `brev org set <org>` then `brev shell <instance>`, or `ssh -F ~/.brev/ssh_config <instance>`.
+- The Secure Link redirects to NVIDIA SSO before proxying to port 4787 (expected: it is login-protected by default).
+
 ## Keeping it fresh
 
 The Launchable pins `<REF>`. When a new `@wrenai/genbi` or `wrenai` is released:
