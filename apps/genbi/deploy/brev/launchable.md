@@ -50,6 +50,15 @@ mode would require the BFF to bind `0.0.0.0` inside the container.
   `brev org set <org>` then `brev shell <instance>`, or `ssh -F ~/.brev/ssh_config <instance>`.
 - The Secure Link redirects to NVIDIA SSO before proxying to port 4787 (expected: it is login-protected by default).
 
+## Known blocker for a fully unattended run (as of @wrenai/genbi 0.0.4)
+
+The published `@wrenai/genbi@0.0.4` calls `resolve_profile_for_project(..., strict=True)`, a wren API that no PyPI
+`wrenai` release has (0.13.x–0.15.0), so the wizard's "Build data model" step fails until a genbi release stops
+depending on it. On the live VM it was worked around by stripping `, strict=True` from two files under
+`dist-server/server/`. Separately, the connect gate rejects a project whose `data_source:` line still carries the
+scaffold's inline comment, and the agent-led steps (connect, build) needed several retries and manual repairs with
+Nemotron Super and Ultra. Treat the Launchable as a demo you drive, not a hands-off deploy, until those land.
+
 ## Keeping it fresh
 
 The Launchable pins `<REF>`. When a new `@wrenai/genbi` or `wrenai` is released:
