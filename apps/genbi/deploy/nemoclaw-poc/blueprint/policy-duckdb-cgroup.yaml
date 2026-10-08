@@ -1,0 +1,28 @@
+# NemoClaw custom policy preset. DuckDB (a wren dependency) reads cgroup v2
+# resource limits while initialising and aborts when the reads are denied.
+# Allow exactly these two metadata files read-only; nothing else under /sys.
+#
+# The preset validator requires a network_policies section with a public host,
+# so this preset also carries a no-op entry that only re-states a read the
+# sandbox already has through the pypi preset (GET on pypi.org).
+preset:
+  name: duckdb-cgroup
+  description: "Read-only access to cgroup v2 memory.max and cpu.max so DuckDB can start"
+
+filesystem_policy:
+  read_only:
+    - /sys/fs/cgroup/memory.max
+    - /sys/fs/cgroup/cpu.max
+
+network_policies:
+  duckdb_cgroup_noop:
+    name: duckdb_cgroup_noop
+    endpoints:
+      - host: pypi.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/simple/duckdb/**" }
+    binaries:
+      - { path: /usr/bin/curl }

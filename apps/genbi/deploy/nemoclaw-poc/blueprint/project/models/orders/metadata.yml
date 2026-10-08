@@ -1,0 +1,26 @@
+name: orders
+properties:
+  description: "One row per order. amount is USD; status is completed, refunded or pending."
+table_reference:
+  catalog: poc
+  schema: main
+  table: orders
+primary_key: order_id
+columns:
+  - name: order_id
+    type: BIGINT
+    not_null: true
+    properties: { description: "Unique order id." }
+  - name: customer_id
+    type: BIGINT
+    not_null: true
+    properties: { description: "Customer who placed the order (customers.customer_id)." }
+  - name: order_date
+    type: DATE
+    properties: { description: "Order date." }
+  - name: amount
+    type: DOUBLE
+    properties: { description: "Order amount in USD." }
+  - name: status
+    type: VARCHAR
+    properties: { description: "completed, refunded or pending. Revenue counts completed only." }

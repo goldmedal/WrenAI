@@ -1,0 +1,23 @@
+name: payments
+properties:
+  description: "One row per payment for a completed order."
+table_reference:
+  catalog: poc
+  schema: main
+  table: payments
+primary_key: payment_id
+columns:
+  - name: payment_id
+    type: BIGINT
+    not_null: true
+    properties: { description: "Unique payment id." }
+  - name: order_id
+    type: BIGINT
+    not_null: true
+    properties: { description: "Paid order (orders.order_id)." }
+  - name: method
+    type: VARCHAR
+    properties: { description: "card, bank_transfer or invoice." }
+  - name: amount
+    type: DOUBLE
+    properties: { description: "Paid amount in USD." }
