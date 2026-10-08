@@ -52,6 +52,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { readYamlScalarField } from "./yaml-scalar.js";
 import { listCandidateProfiles, loadProfileStore, type ProfileCandidate } from "./wren-profiles.js";
 
 export type { ProfileCandidate };
@@ -77,23 +78,6 @@ export interface AdoptVerifyError {
 }
 
 export type AdoptVerifyResult = AdoptVerifyOk | AdoptVerifyNeedsProfile | AdoptVerifyError;
-
-/**
- * Matches a `wren_project.yml` top-level `field: value` scalar line — same
- * single-purpose-regex convention as `server/app.ts`'s `ENV_KEY_LINE`. Only
- * ever reads a handful of known scalar fields (`profile`, `data_source`);
- * never a general YAML parser (matches this repo's existing convention of
- * avoiding a YAML dependency for single-field reads).
- */
-function readYamlScalarField(content: string, field: string): string | undefined {
-  const re = new RegExp(`^${field}:\\s*(.+?)\\s*$`, "m");
-  const match = re.exec(content);
-  if (!match) return undefined;
-  const raw = match[1]!;
-  // Strip one layer of matching quotes (wren_project.yml sometimes quotes scalars, e.g. `version: '1.0'`) — never unescape further, this only ever reads plain identifiers.
-  const unquoted = /^(['"])(.*)\1$/.exec(raw);
-  return unquoted ? unquoted[2] : raw;
-}
 
 function execWren(
   args: readonly string[],
