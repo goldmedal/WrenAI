@@ -31,7 +31,7 @@ fn msg(s: impl Into<String>) -> LoadError {
 
 // --- on-disk (authored, snake_case) shapes ------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ProjectFile {
     #[serde(default)]
     catalog: Option<String>,
@@ -73,32 +73,88 @@ struct ColumnFile {
 }
 
 #[derive(Debug, Deserialize)]
-struct RelationshipFile {
-    name: String,
-    models: Vec<String>,
-    join_type: String,
-    condition: String,
+pub(crate) struct RelationshipFile {
+    pub(crate) name: String,
+    pub(crate) models: Vec<String>,
+    pub(crate) join_type: String,
+    pub(crate) condition: String,
+}
+
+/// Parse a YAML document the way wren's own reader does (`yaml.safe_load(...) or {}`): an empty
+/// file, a comment-only file, or a bare key with no value (all YAML null) is the type's empty
+/// default rather than a parse failure. Anything else must deserialize as `T`.
+pub(crate) fn parse_doc_or_default<T>(yml: &str) -> Result<T, serde_yaml::Error>
+where
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value: serde_yaml::Value = serde_yaml::from_str(yml)?;
+    if value.is_null() {
+        return Ok(T::default());
+    }
+    serde_yaml::from_value(value)
+}
+
+/// Like [`parse_doc_or_default`] for a document that holds one optional record (a cube's
+/// `metadata.yml`): null and non-mapping documents are `None`, as wren skips them.
+pub(crate) fn parse_mapping_doc<T>(yml: &str) -> Result<Option<T>, serde_yaml::Error>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let value: serde_yaml::Value = serde_yaml::from_str(yml)?;
+    if !value.is_mapping() {
+        return Ok(None);
+    }
+    serde_yaml::from_value(value).map(Some)
 }
 
 /// `relationships.yml` has two authored shapes: the original bare list, and the
-/// `relationships:` keyed mapping that the wren CLI (project schema_version 5) scaffolds
-/// and requires. Accept both; rejecting the keyed form would silently strip every join
-/// from any project authored with the current CLI.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RelationshipsDoc {
-    Bare(Vec<RelationshipFile>),
-    Keyed {
-        relationships: Vec<RelationshipFile>,
-    },
+/// `relationships:` keyed mapping that the wren CLI (project schema_version 5) scaffolds and
+/// requires. Accept both; rejecting the keyed form would silently strip every join from any
+/// project authored with the current CLI. Wren treats an empty file, a comment-only file, a bare
+/// `relationships:` key (null) and `{}` as "no relationships"; so does this. Any other shape
+/// (a scalar, a mapping with other keys, a list of non-mappings) is an error naming the reason.
+pub(crate) fn parse_relationships(yml: &str) -> Result<Vec<RelationshipFile>, String> {
+    use serde_yaml::Value;
+    let value: Value = serde_yaml::from_str(yml).map_err(|e| e.to_string())?;
+    let list = match value {
+        Value::Null => return Ok(Vec::new()),
+        Value::Sequence(_) => value,
+        Value::Mapping(map) => match map.get("relationships") {
+            Some(Value::Null) => return Ok(Vec::new()),
+            Some(inner) => inner.clone(),
+            None if map.is_empty() => return Ok(Vec::new()),
+            None => {
+                return Err(
+                    "expected a `relationships:` list (or a bare list); found a mapping without a `relationships` key"
+                        .to_string(),
+                )
+            }
+        },
+        other => {
+            return Err(format!(
+                "expected a list of relationships or a `relationships:` list, found {}",
+                yaml_kind(&other)
+            ))
+        }
+    };
+    if !list.is_sequence() {
+        return Err(format!(
+            "`relationships` must be a list, found {}",
+            yaml_kind(&list)
+        ));
+    }
+    serde_yaml::from_value(list).map_err(|e| e.to_string())
 }
 
-impl RelationshipsDoc {
-    fn into_vec(self) -> Vec<RelationshipFile> {
-        match self {
-            RelationshipsDoc::Bare(v) => v,
-            RelationshipsDoc::Keyed { relationships } => relationships,
-        }
+fn yaml_kind(v: &serde_yaml::Value) -> &'static str {
+    match v {
+        serde_yaml::Value::Null => "null",
+        serde_yaml::Value::Bool(_) => "a boolean",
+        serde_yaml::Value::Number(_) => "a number",
+        serde_yaml::Value::String(_) => "a string",
+        serde_yaml::Value::Sequence(_) => "a list",
+        serde_yaml::Value::Mapping(_) => "a mapping",
+        serde_yaml::Value::Tagged(_) => "a tagged value",
     }
 }
 
@@ -322,7 +378,7 @@ pub struct ProjectSources {
 /// Assemble read project sources into a canonical [`Manifest`]. Returns a [`LoadError`] if any file
 /// fails to parse or the assembled manifest is not a valid MDL manifest.
 pub fn assemble(sources: &ProjectSources) -> Result<LoadedProject, LoadError> {
-    let project: ProjectFile = serde_yaml::from_str(&sources.wren_project_yml)
+    let project: ProjectFile = parse_doc_or_default(&sources.wren_project_yml)
         .map_err(|e| msg(format!("wren_project.yml: {e}")))?;
 
     let mut models = Vec::with_capacity(sources.model_ymls.len());
@@ -332,25 +388,11 @@ pub fn assemble(sources: &ProjectSources) -> Result<LoadedProject, LoadError> {
     }
 
     let relationships = match &sources.relationships_yml {
-        Some(yml) => {
-            // A project with no relationships (e.g. a single-table onboarding scaffolded by the
-            // wren CLI) ships a comment-only / empty relationships.yml, which parses to YAML null
-            // and matches neither RelationshipsDoc variant. Treat an empty/null document as "no
-            // relationships" rather than failing the whole project's parse.
-            let is_empty = serde_yaml::from_str::<serde_yaml::Value>(yml)
-                .map(|v| v.is_null())
-                .unwrap_or(false);
-            if is_empty {
-                Vec::new()
-            } else {
-                let doc: RelationshipsDoc = serde_yaml::from_str(yml)
-                    .map_err(|e| msg(format!("relationships.yml: {e}")))?;
-                doc.into_vec()
-                    .into_iter()
-                    .map(relationship_to_json)
-                    .collect()
-            }
-        }
+        Some(yml) => parse_relationships(yml)
+            .map_err(|e| msg(format!("relationships.yml: {e}")))?
+            .into_iter()
+            .map(relationship_to_json)
+            .collect(),
         None => Vec::new(),
     };
 
@@ -360,18 +402,21 @@ pub fn assemble(sources: &ProjectSources) -> Result<LoadedProject, LoadError> {
     let cubes = match &sources.cubes_yml {
         Some(yml) => {
             let cubes: Vec<CubeFile> =
-                serde_yaml::from_str(yml).map_err(|e| msg(format!("cubes.yml: {e}")))?;
+                parse_doc_or_default(yml).map_err(|e| msg(format!("cubes.yml: {e}")))?;
             cubes.into_iter().map(cube_to_json).collect()
         }
         None => sources
             .cube_ymls
             .iter()
             .map(|yml| {
-                let cube: CubeFile =
-                    serde_yaml::from_str(yml).map_err(|e| msg(format!("cube metadata: {e}")))?;
-                Ok(cube_to_json(cube))
+                let cube: Option<CubeFile> =
+                    parse_mapping_doc(yml).map_err(|e| msg(format!("cube metadata: {e}")))?;
+                Ok(cube.map(cube_to_json))
             })
-            .collect::<Result<Vec<_>, LoadError>>()?,
+            .collect::<Result<Vec<_>, LoadError>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
     };
 
     let mut views = Vec::with_capacity(sources.views.len());

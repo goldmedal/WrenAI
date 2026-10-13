@@ -13,7 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::project::ProjectSources;
+use crate::project::{
+    parse_doc_or_default, parse_mapping_doc, parse_relationships, ProjectSources,
+};
 
 /// Bumped when the shape below changes incompatibly; the host checks it before reading.
 pub const CATALOG_VERSION: u32 = 1;
@@ -30,7 +32,7 @@ struct Properties {
     enum_values: Option<serde_yaml::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ProjectFile {
     #[serde(default)]
     name: Option<String>,
@@ -63,23 +65,6 @@ struct ModelFile {
     columns: Vec<ColumnFile>,
     #[serde(default)]
     properties: Properties,
-}
-
-#[derive(Debug, Deserialize)]
-struct RelationshipFile {
-    name: String,
-    models: Vec<String>,
-    join_type: String,
-    condition: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RelationshipsDoc {
-    Bare(Vec<RelationshipFile>),
-    Keyed {
-        relationships: Vec<RelationshipFile>,
-    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,7 +274,7 @@ fn cube(c: CubeFile) -> CatalogCube {
 /// are recorded in `diagnostics` and the file is skipped; the catalog never fails as a whole.
 pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
     let mut diagnostics = Vec::new();
-    let project = match serde_yaml::from_str::<ProjectFile>(&sources.wren_project_yml) {
+    let project = match parse_doc_or_default::<ProjectFile>(&sources.wren_project_yml) {
         Ok(p) => CatalogProject {
             name: p.name,
             data_source: p.data_source,
@@ -331,38 +316,28 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
 
     let mut relationships = Vec::new();
     if let Some(yml) = &sources.relationships_yml {
-        let is_empty = serde_yaml::from_str::<serde_yaml::Value>(yml)
-            .map(|v| v.is_null())
-            .unwrap_or(false);
-        if !is_empty {
-            match serde_yaml::from_str::<RelationshipsDoc>(yml) {
-                Ok(doc) => {
-                    let list = match doc {
-                        RelationshipsDoc::Bare(v) => v,
-                        RelationshipsDoc::Keyed { relationships } => relationships,
-                    };
-                    relationships.extend(list.into_iter().map(|r| CatalogRelationship {
-                        name: r.name,
-                        models: r.models,
-                        join_type: r.join_type,
-                        condition: r.condition,
-                    }));
-                }
-                Err(e) => diagnostics.push(format!("relationships.yml: {e}")),
-            }
+        match parse_relationships(yml) {
+            Ok(list) => relationships.extend(list.into_iter().map(|r| CatalogRelationship {
+                name: r.name,
+                models: r.models,
+                join_type: r.join_type,
+                condition: r.condition,
+            })),
+            Err(e) => diagnostics.push(format!("relationships.yml: {e}")),
         }
     }
 
     let mut cubes = Vec::new();
     match &sources.cubes_yml {
-        Some(yml) => match serde_yaml::from_str::<Vec<CubeFile>>(yml) {
+        Some(yml) => match parse_doc_or_default::<Vec<CubeFile>>(yml) {
             Ok(list) => cubes.extend(list.into_iter().map(cube)),
             Err(e) => diagnostics.push(format!("cubes.yml: {e}")),
         },
         None => {
             for (index, yml) in sources.cube_ymls.iter().enumerate() {
-                match serde_yaml::from_str::<CubeFile>(yml) {
-                    Ok(c) => cubes.push(cube(c)),
+                match parse_mapping_doc::<CubeFile>(yml) {
+                    Ok(Some(c)) => cubes.push(cube(c)),
+                    Ok(None) => {}
                     Err(e) => diagnostics.push(format!("cube[{index}]: {e}")),
                 }
             }
