@@ -576,3 +576,50 @@ describe("createSetupExecutionTool — bounded subprocess execution", () => {
     });
   });
 });
+
+describe("createSetupExecutionTool — default exec cwd for a bound project", () => {
+  it("runs at the workspace root before the project exists, then at the project once it does", async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      const { env, cwds } = cwdCapturingExecEnv();
+      const projectDir = path.join(workspaceRoot, "jaffle");
+      const tool = createSetupExecutionTool({ env, policy: POLICY, workspaceRoot, defaultExecCwd: projectDir });
+
+      await tool.execute!({ action: "exec", command: "wren context validate" }, { toolCallId: "t1", messages: [], context: undefined });
+      await mkdir(projectDir);
+      await tool.execute!({ action: "exec", command: "wren context validate" }, { toolCallId: "t2", messages: [], context: undefined });
+
+      expect(cwds()).toEqual([workspaceRoot, projectDir]);
+    });
+  });
+
+  it("lets an explicit cwd win and still rejects one outside the workspace", async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      const { env, cwds } = cwdCapturingExecEnv();
+      const projectDir = path.join(workspaceRoot, "jaffle");
+      const other = path.join(workspaceRoot, "other");
+      await mkdir(projectDir);
+      await mkdir(other);
+      const tool = createSetupExecutionTool({ env, policy: POLICY, workspaceRoot, defaultExecCwd: projectDir });
+
+      await tool.execute!({ action: "exec", command: "pwd", cwd: other }, { toolCallId: "t1", messages: [], context: undefined });
+      expect(cwds()).toEqual([other]);
+      await expect(
+        tool.execute!({ action: "exec", command: "pwd", cwd: os.tmpdir() }, { toolCallId: "t2", messages: [], context: undefined }),
+      ).rejects.toBeInstanceOf(SetupExecCwdScopeError);
+    });
+  });
+
+  it("keeps the workspace root default when no project is bound", async () => {
+    await withWorkspace(async (workspaceRoot) => {
+      const { env, cwds } = cwdCapturingExecEnv();
+      const tool = createSetupExecutionTool({ env, policy: POLICY, workspaceRoot });
+      await tool.execute!({ action: "exec", command: "pwd" }, { toolCallId: "t1", messages: [], context: undefined });
+      expect(cwds()).toEqual([workspaceRoot]);
+    });
+  });
+
+  it("states the default in the tool description", () => {
+    const tool = createSetupExecutionTool({ env: countingExecEnv().env, policy: POLICY, workspaceRoot: os.tmpdir() });
+    expect(tool.description).toMatch(/bound project directory/);
+  });
+});

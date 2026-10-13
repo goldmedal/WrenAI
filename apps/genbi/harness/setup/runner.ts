@@ -214,6 +214,21 @@ function resolveDispatchedUserProject(runOptions: SetupStepRunOptions, agentId: 
   return canonicalProject;
 }
 
+/**
+ * The project directory a project-bound step (`connect_resume`/`context`) runs
+ * against, as the default exec cwd of the in-process `setup_execution` tool.
+ * `undefined` for the initial `connect` step, which scaffolds the project from
+ * the workspace root, and for a missing/unsafe project name. The tool applies
+ * it only while the directory actually exists.
+ */
+function boundSetupProjectDir(runOptions: SetupStepRunOptions, agentId: string): string | undefined {
+  const stepKey = runOptions.stepKey ?? (agentId === BUILD_CONTEXT_AGENT_ID ? "context" : "connect");
+  if (stepKey === "connect") return undefined;
+  const projectName = runOptions.projectName;
+  if (projectName === undefined || !SAFE_PROJECT_NAME.test(projectName)) return undefined;
+  return path.resolve(runOptions.workspaceRoot, projectName);
+}
+
 export interface DispatchedSetupRunnerOptions {
   /** Path to the committed genbi-setup IR (e.g. `profiles/genbi-setup/ir.golden.json`) — see `resolveSetupIrPath`. */
   readonly irPath: string;
@@ -718,9 +733,15 @@ export class InProcessSetupRunner implements SetupStepRunner {
       const policy: ExecutionPolicy = { readOnly: false, artifactWriteScope: "." };
       const env = createLocalExecutionEnv({ rootDir: runOptions.workspaceRoot });
 
+      const boundProjectDir = boundSetupProjectDir(runOptions, agentId);
       const nativeTools = createNativeToolRegistry();
       nativeTools.register(SETUP_EXECUTION_TOOL_NAME, () =>
-        createSetupExecutionTool({ env, policy, workspaceRoot: runOptions.workspaceRoot }),
+        createSetupExecutionTool({
+          env,
+          policy,
+          workspaceRoot: runOptions.workspaceRoot,
+          ...(boundProjectDir !== undefined ? { defaultExecCwd: boundProjectDir } : {}),
+        }),
       );
 
       // Kept in lockstep with `effectiveMaxTurns()` above via the shared
@@ -1453,6 +1474,61 @@ const SCHEMA_INTROSPECTION_COMMANDS = [
   /\bbq\s+query\b/i,
 ] as const;
 
+/**
+ * Where the bound project lives, so a recorded command's optional
+ * `cd <dir> &&` prefix can be resolved against it. Absent binding means the
+ * prefix cannot be verified and is not accepted.
+ */
+export interface ProjectBinding {
+  readonly root: string;
+  readonly projectDir: string;
+}
+
+const CD_PREFIX = /^\s*cd\s+("[^"$`\\]*"|'[^']*'|[^\s;&|<>()$`\\'"~]+)\s*&&\s*([\s\S]*)$/;
+const STARTS_WITH_CD = /^\s*cd(?:\s|$)/;
+
+function samePath(a: string, b: string): boolean {
+  const resolvedA = path.resolve(a);
+  const resolvedB = path.resolve(b);
+  if (resolvedA === resolvedB) return true;
+  try {
+    return realpathSync(resolvedA) === realpathSync(resolvedB);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The ONE recogniser rule shared by schema discovery and the context
+ * lifecycle: a recorded command counts only as the bare command or as exactly
+ * one `cd <dir> && <cmd>` whose `<dir>` is the bound project. Returns the
+ * command to match against the per-stage patterns (the `cd` prefix stripped),
+ * or `undefined` when the shape is not recognised (another directory, a second
+ * `cd`, a dynamic or `~` directory, or no binding to verify against).
+ *
+ * `<dir>` resolves against the exec's explicit `cwd` when the entry recorded
+ * one. Otherwise the effective cwd was not recorded, so the target is accepted
+ * if it names the project from either candidate default (workspace root, the
+ * pre-binding default; or the project itself, the post-binding default). The
+ * entry already exited 0, so the `cd` really resolved to that directory.
+ */
+function projectLocalCommand(entry: SetupWorklogEntry, command: string, binding: ProjectBinding | undefined): string | undefined {
+  if (!STARTS_WITH_CD.test(command)) return command;
+  if (binding === undefined) return undefined;
+  const match = CD_PREFIX.exec(command);
+  if (!match) return undefined;
+  const raw = match[1]!;
+  const dir = raw.startsWith('"') || raw.startsWith("'") ? raw.slice(1, -1) : raw;
+  const inner = match[2]!;
+  if (dir.length === 0 || STARTS_WITH_CD.test(inner)) return undefined;
+  const explicitCwd = (entry.input as { cwd?: unknown } | undefined)?.cwd;
+  const bases =
+    typeof explicitCwd === "string" && explicitCwd.length > 0
+      ? [path.resolve(binding.root, explicitCwd)]
+      : [binding.root, binding.projectDir];
+  return bases.some((base) => samePath(path.resolve(base, dir), binding.projectDir)) ? inner : undefined;
+}
+
 export type RecordedSchemaDiscovery =
   | { readonly kind: "successful"; readonly command: string }
   | { readonly kind: "failed"; readonly command: string; readonly exitCode?: number }
@@ -1466,14 +1542,21 @@ export type RecordedSchemaDiscovery =
  * this for both terminal acceptance and the no-introspection diagnostic,
  * rather than reimplementing the allowlist elsewhere.
  */
-export function classifyRecordedSchemaDiscovery(worklog: readonly SetupWorklogEntry[]): RecordedSchemaDiscovery {
+export function classifyRecordedSchemaDiscovery(
+  worklog: readonly SetupWorklogEntry[],
+  binding?: ProjectBinding,
+): RecordedSchemaDiscovery {
   let failed: Extract<RecordedSchemaDiscovery, { readonly kind: "failed" }> | undefined;
   for (const entry of worklog) {
     const command = isSetupExecutionEntry(entry) ? execCommandOf(entry) : undefined;
+    if (command === undefined) continue;
+    // Without a binding (legacy callers) the matching below is unchanged; with
+    // one, a leading `cd` must satisfy the shared project-local rule.
+    const recognised = binding === undefined ? command : projectLocalCommand(entry, command, binding);
     if (
-      command === undefined ||
-      !SCHEMA_DISCOVERY_EVIDENCE.test(command) ||
-      !SCHEMA_INTROSPECTION_COMMANDS.some((pattern) => pattern.test(command))
+      recognised === undefined ||
+      !SCHEMA_DISCOVERY_EVIDENCE.test(recognised) ||
+      !SCHEMA_INTROSPECTION_COMMANDS.some((pattern) => pattern.test(recognised))
     ) {
       continue;
     }
@@ -1504,7 +1587,11 @@ const DIRECT_CONTEXT_LIFECYCLE_COMMAND = new RegExp(
  * context build`, each recorded as a successful setup execution. An artifact
  * alone or merely naming a command in the final message is not evidence.
  */
-function contextLifecycleStage(command: string): Exclude<ContextLifecycleStage, "discovery"> | undefined {
+function contextLifecycleStage(
+  entry: SetupWorklogEntry,
+  command: string,
+  binding: ProjectBinding | undefined,
+): Exclude<ContextLifecycleStage, "discovery"> | undefined {
   // This evidence must describe the actual lifecycle invocation, rather than
   // merely mention it. `setup_execution` already supplies the project cwd as
   // a separate structured field; the only shell prefixes we accept here are
@@ -1513,16 +1600,20 @@ function contextLifecycleStage(command: string): Exclude<ContextLifecycleStage, 
   // command cwd to the canonical project, so this is the same project-local
   // lifecycle operation emitted by some Wren guidance. Arbitrary paths, other
   // flags, shell sequencing, quoted text, and wrappers remain unrecognized.
-  const match = DIRECT_CONTEXT_LIFECYCLE_COMMAND.exec(command);
+  // The one additional shape is a single `cd <project> &&` prefix, decided by
+  // the shared `projectLocalCommand` rule (also used for schema discovery).
+  const inner = projectLocalCommand(entry, command, binding);
+  if (inner === undefined) return undefined;
+  const match = DIRECT_CONTEXT_LIFECYCLE_COMMAND.exec(inner);
   return match?.[1]?.toLowerCase() as Exclude<ContextLifecycleStage, "discovery"> | undefined;
 }
 
 export type RecordedContextLifecycle =
   | { readonly kind: "successful" }
   | { readonly kind: "missing_discovery" }
-  | { readonly kind: "validate_missing"; readonly observed: string }
-  | { readonly kind: "build_missing"; readonly observed: string }
-  | { readonly kind: "out_of_order"; readonly observed: string };
+  | { readonly kind: "validate_missing"; readonly observed: string; readonly unrecognised?: string }
+  | { readonly kind: "build_missing"; readonly observed: string; readonly unrecognised?: string }
+  | { readonly kind: "out_of_order"; readonly observed: string; readonly unrecognised?: string };
 
 function stageAfter(prefix: ContextLifecyclePrefix): ContextLifecycleStage {
   if (prefix === "discovery") return "validate";
@@ -1535,28 +1626,45 @@ function prefixFor(stage: ContextLifecycleStage): ContextLifecyclePrefix {
   return stage === "build" ? "validate" : "none";
 }
 
-function scanRecordedContextLifecycle(worklog: readonly SetupWorklogEntry[], prior: ContextLifecyclePrefix) {
+const CONTEXT_LIFECYCLE_MENTION = /\bwren\s+context\s+(validate|build)\b/i;
+
+function scanRecordedContextLifecycle(
+  worklog: readonly SetupWorklogEntry[],
+  prior: ContextLifecyclePrefix,
+  binding?: ProjectBinding,
+) {
   let stage = stageAfter(prior);
   let completed = prior === "build";
   let outOfOrderObserved: string | undefined;
+  // Successful commands that mention a lifecycle command but were not
+  // recognised as one, so a failure can quote them instead of claiming the
+  // command never ran.
+  const unrecognisedMentions: { command: string; stage: string }[] = [];
 
   for (const entry of worklog) {
     if (!isSetupExecutionEntry(entry) || execSucceeded(entry) !== true) continue;
     const command = execCommandOf(entry);
     if (command === undefined) continue;
+    const noteUnrecognised = (candidate: SetupWorklogEntry, text: string): void => {
+      if (contextLifecycleStage(candidate, text, binding) !== undefined) return;
+      const mention = CONTEXT_LIFECYCLE_MENTION.exec(text);
+      if (mention) unrecognisedMentions.push({ command: text, stage: mention[1]!.toLowerCase() });
+    };
 
     if (stage === "discovery") {
-      if (classifyRecordedSchemaDiscovery([entry]).kind === "successful") {
+      if (classifyRecordedSchemaDiscovery([entry], binding).kind === "successful") {
         stage = "validate";
         continue;
       }
-      if (contextLifecycleStage(command) !== undefined) {
+      if (contextLifecycleStage(entry, command, binding) !== undefined) {
         outOfOrderObserved ??= `successful \`${command}\` ran before successful schema discovery`;
       }
+      noteUnrecognised(entry, command);
       continue;
     }
 
-    const nativeStage = contextLifecycleStage(command);
+    const nativeStage = contextLifecycleStage(entry, command, binding);
+    if (nativeStage === undefined) noteUnrecognised(entry, command);
     if (stage === "validate") {
       if (nativeStage === "validate") {
         stage = "build";
@@ -1569,7 +1677,7 @@ function scanRecordedContextLifecycle(worklog: readonly SetupWorklogEntry[], pri
     if (nativeStage === "build") completed = true;
   }
 
-  return { stage, completed, outOfOrderObserved };
+  return { stage, completed, outOfOrderObserved, unrecognisedMentions };
 }
 
 /**
@@ -1581,27 +1689,162 @@ function scanRecordedContextLifecycle(worklog: readonly SetupWorklogEntry[], pri
 export function recordedContextLifecyclePrefix(
   worklog: readonly SetupWorklogEntry[],
   prior: ContextLifecyclePrefix = "none",
+  binding?: ProjectBinding,
 ): ContextLifecyclePrefix {
-  const scan = scanRecordedContextLifecycle(worklog, prior);
+  const scan = scanRecordedContextLifecycle(worklog, prior, binding);
   return scan.completed ? "build" : prefixFor(scan.stage);
 }
 
 export function classifyRecordedContextLifecycle(
   worklog: readonly SetupWorklogEntry[],
   prior: ContextLifecyclePrefix = "none",
+  binding?: ProjectBinding,
 ): RecordedContextLifecycle {
-  const { stage, completed, outOfOrderObserved } = scanRecordedContextLifecycle(worklog, prior);
+  const { stage, completed, outOfOrderObserved, unrecognisedMentions } = scanRecordedContextLifecycle(worklog, prior, binding);
+  const wanted = stage === "validate" ? "validate" : "build";
+  const unrecognised = (unrecognisedMentions.find((mention) => mention.stage === wanted) ?? unrecognisedMentions[0])?.command;
 
   if (completed) return { kind: "successful" };
-  if (outOfOrderObserved !== undefined) return { kind: "out_of_order", observed: outOfOrderObserved };
+  const withUnrecognised = unrecognised !== undefined ? { unrecognised } : {};
+  if (outOfOrderObserved !== undefined) return { kind: "out_of_order", observed: outOfOrderObserved, ...withUnrecognised };
   if (stage === "discovery") return { kind: "missing_discovery" };
-  if (stage === "validate") return { kind: "validate_missing", observed: "no successful `wren context validate` followed successful schema discovery" };
-  return { kind: "build_missing", observed: "no successful `wren context build` followed successful `wren context validate`" };
+  if (stage === "validate") {
+    return { kind: "validate_missing", observed: "no recognised successful `wren context validate` followed successful schema discovery", ...withUnrecognised };
+  }
+  return { kind: "build_missing", observed: "no recognised successful `wren context build` followed successful `wren context validate`", ...withUnrecognised };
 }
 
 /** A narrow terminal-message check: only override a context error that explicitly claims a zero-table/model outcome. */
 function claimsNoTablesOrModels(message: string): boolean {
   return /\b(?:no|zero)\s+(?:tables?|models?)\b|\b0\s+(?:tables?|models?)\b/i.test(message);
+}
+
+/** Quotes a command for an error message, bounded so a long script cannot flood it. */
+function quoteCommand(command: string): string {
+  const flat = command.replace(/\s+/g, " ").trim();
+  return `\`${flat.length > 300 ? `${flat.slice(0, 300)}...` : flat}\``;
+}
+
+const UNRECOGNISED_LIFECYCLE_HINT =
+  "It exited successfully but is not a recognised lifecycle invocation: only the bare command (optionally with environment assignments or `--path .`) or a single `cd <project directory> &&` prefix naming this step's project directory is accepted. Run it again as the bare command and set the `setup_execution` `cwd` field to the project directory instead of shell chaining.";
+
+function projectBindingOf(context: SetupTerminalContext): ProjectBinding {
+  return { root: context.root, projectDir: path.join(context.root, context.name) };
+}
+
+/**
+ * The host-held evidence gate for a successful `context` step: the recorded
+ * discovery -> validate -> build lifecycle, then the built `target/mdl.json`.
+ * Returns the failure, or `undefined` when the evidence supports success. It
+ * never looks at the agent's own status line.
+ */
+function verifyContextEvidence(context: SetupTerminalContext): SetupTerminalResult | undefined {
+  if (context.worklog !== undefined) {
+    const lifecycle = classifyRecordedContextLifecycle(context.worklog, context.priorContextLifecycle, projectBindingOf(context));
+    if (lifecycle.kind === "missing_discovery") {
+      return hostContractFailure(
+        "context_schema_discovery_missing",
+        "The agent never completed recognized schema discovery in its recorded worklog, so its model/build result cannot be accepted. This is an agent-workflow failure, not evidence that the connection or data source lacks tables.",
+        "the recorded worklog has no successful recognized schema-discovery command",
+        [
+          "run a recognized schema-discovery command against the connected source and make sure it exits successfully",
+          "build target/mdl.json only from that discovered schema, with at least one model",
+        ],
+        "no_successful_schema_discovery",
+      );
+    }
+    const discovery = classifyRecordedSchemaDiscovery(context.worklog, projectBindingOf(context));
+    if (discovery.kind === "failed") {
+      const exitCodeSuffix = discovery.exitCode !== undefined ? ` with exit code ${discovery.exitCode}` : "";
+      return hostContractFailure(
+        "context_schema_discovery_failed",
+        `\`${discovery.command}\` failed${exitCodeSuffix} during schema discovery — a model/build result cannot be accepted until that command/tool failure is resolved; this is not evidence that the connection or data source lacks tables.`,
+        discovery.exitCode !== undefined
+          ? `the recorded schema-discovery command exited with code ${discovery.exitCode}`
+          : "the recorded schema-discovery command failed",
+        [
+          "resolve the schema-discovery command failure and run a recognized discovery command successfully",
+          "build target/mdl.json only from that discovered schema, with at least one model",
+        ],
+      );
+    }
+    if (lifecycle.kind === "validate_missing") {
+      return hostContractFailure(
+        "context_validate_missing",
+        lifecycle.unrecognised !== undefined
+          ? `The agent ran ${quoteCommand(lifecycle.unrecognised)} successfully, but it was not recognised as \`wren context validate\` after schema discovery. ${UNRECOGNISED_LIFECYCLE_HINT}`
+          : "The agent did not successfully run `wren context validate` after recognized schema discovery, so its model/build result cannot be accepted.",
+        lifecycle.unrecognised !== undefined
+          ? `${lifecycle.observed}; unrecognised successful command: ${quoteCommand(lifecycle.unrecognised)}`
+          : lifecycle.observed,
+        [
+          "run a recognized schema-discovery command successfully",
+          "run `wren context validate` successfully before `wren context build`",
+          "build target/mdl.json only after validation, with at least one model",
+          ...(lifecycle.unrecognised !== undefined
+            ? ["pass the project directory through the `setup_execution` `cwd` field rather than `cd`/shell chaining"]
+            : []),
+        ],
+      );
+    }
+    if (lifecycle.kind === "build_missing") {
+      return hostContractFailure(
+        "context_build_missing",
+        lifecycle.unrecognised !== undefined
+          ? `The agent ran ${quoteCommand(lifecycle.unrecognised)} successfully, but it was not recognised as \`wren context build\` after \`wren context validate\`. ${UNRECOGNISED_LIFECYCLE_HINT}`
+          : "The agent did not successfully run `wren context build` after `wren context validate`, so its claimed context success cannot be accepted.",
+        lifecycle.unrecognised !== undefined
+          ? `${lifecycle.observed}; unrecognised successful command: ${quoteCommand(lifecycle.unrecognised)}`
+          : lifecycle.observed,
+        [
+          "run a recognized schema-discovery command successfully",
+          "run `wren context validate` successfully",
+          "run `wren context build` successfully after validation and produce target/mdl.json with at least one model",
+          ...(lifecycle.unrecognised !== undefined
+            ? ["pass the project directory through the `setup_execution` `cwd` field rather than `cd`/shell chaining"]
+            : []),
+        ],
+      );
+    }
+    if (lifecycle.kind === "out_of_order") {
+      return hostContractFailure(
+        "context_lifecycle_out_of_order",
+        lifecycle.unrecognised !== undefined
+          ? `The native context lifecycle ran out of order; Setup requires successful schema discovery followed by \`wren context validate\` and then \`wren context build\`. The agent also ran ${quoteCommand(lifecycle.unrecognised)} successfully, but it was not recognised. ${UNRECOGNISED_LIFECYCLE_HINT}`
+          : "The native context lifecycle ran out of order; Setup requires successful schema discovery followed by `wren context validate` and then `wren context build`.",
+        lifecycle.unrecognised !== undefined
+          ? `${lifecycle.observed}; unrecognised successful command: ${quoteCommand(lifecycle.unrecognised)}`
+          : lifecycle.observed,
+        [
+          "run a recognized schema-discovery command successfully",
+          "run `wren context validate` successfully before `wren context build`",
+          "produce target/mdl.json with at least one schema-derived model",
+          ...(lifecycle.unrecognised !== undefined
+            ? ["pass the project directory through the `setup_execution` `cwd` field rather than `cd`/shell chaining"]
+            : []),
+        ],
+      );
+    }
+  }
+  const mdlPath = path.join(context.root, context.name, "target", "mdl.json");
+  if (!existsSync(mdlPath)) {
+    return hostContractFailure(
+      "context_mdl_missing",
+      `the setup agent reported "ok" but ${mdlPath} does not exist — treating this as a failed context build`,
+      "target/mdl.json is missing after the claimed context build",
+      ["target/mdl.json must exist", "target/mdl.json must contain at least one model"],
+    );
+  }
+  const modelCount = countMdlModels(mdlPath);
+  if (modelCount < 1) {
+    return hostContractFailure(
+      "context_mdl_empty",
+      `the setup agent reported "ok" but ${mdlPath} has ${modelCount} models — treating this as a failed context build`,
+      `target/mdl.json has ${modelCount} models after the claimed context build`,
+      ["target/mdl.json must contain at least one model"],
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -1648,6 +1891,12 @@ export function parseSetupTerminal(finalText: string, context: SetupTerminalCont
   }
 
   if (!matched) {
+    // For the context step the status line is advisory: recorded execution
+    // evidence plus the built project decide success. Anything short of that
+    // keeps the missing-status failure (and its bounded correction turn).
+    if (context.stepKey === "context" && context.worklog !== undefined && verifyContextEvidence(context) === undefined) {
+      return { status: "ok", message: defaultMessageFor("ok") };
+    }
     return {
       status: "error",
       message: "the setup agent's final message did not contain a SETUP_STATUS line",
@@ -1657,90 +1906,8 @@ export function parseSetupTerminal(finalText: string, context: SetupTerminalCont
 
   if (matched.status === "ok") {
     if (context.stepKey === "context") {
-      if (context.worklog !== undefined) {
-        const lifecycle = classifyRecordedContextLifecycle(context.worklog, context.priorContextLifecycle);
-        if (lifecycle.kind === "missing_discovery") {
-          return hostContractFailure(
-            "context_schema_discovery_missing",
-            "The agent never completed recognized schema discovery in its recorded worklog, so its model/build result cannot be accepted. This is an agent-workflow failure, not evidence that the connection or data source lacks tables.",
-            "the recorded worklog has no successful recognized schema-discovery command",
-            [
-              "run a recognized schema-discovery command against the connected source and make sure it exits successfully",
-              "build target/mdl.json only from that discovered schema, with at least one model",
-            ],
-            "no_successful_schema_discovery",
-          );
-        }
-        const discovery = classifyRecordedSchemaDiscovery(context.worklog);
-        if (discovery.kind === "failed") {
-          const exitCodeSuffix = discovery.exitCode !== undefined ? ` with exit code ${discovery.exitCode}` : "";
-          return hostContractFailure(
-            "context_schema_discovery_failed",
-            `\`${discovery.command}\` failed${exitCodeSuffix} during schema discovery — a model/build result cannot be accepted until that command/tool failure is resolved; this is not evidence that the connection or data source lacks tables.`,
-            discovery.exitCode !== undefined
-              ? `the recorded schema-discovery command exited with code ${discovery.exitCode}`
-              : "the recorded schema-discovery command failed",
-            [
-              "resolve the schema-discovery command failure and run a recognized discovery command successfully",
-              "build target/mdl.json only from that discovered schema, with at least one model",
-            ],
-          );
-        }
-        if (lifecycle.kind === "validate_missing") {
-          return hostContractFailure(
-            "context_validate_missing",
-            "The agent did not successfully run `wren context validate` after recognized schema discovery, so its model/build result cannot be accepted.",
-            lifecycle.observed,
-            [
-              "run a recognized schema-discovery command successfully",
-              "run `wren context validate` successfully before `wren context build`",
-              "build target/mdl.json only after validation, with at least one model",
-            ],
-          );
-        }
-        if (lifecycle.kind === "build_missing") {
-          return hostContractFailure(
-            "context_build_missing",
-            "The agent did not successfully run `wren context build` after `wren context validate`, so its claimed context success cannot be accepted.",
-            lifecycle.observed,
-            [
-              "run a recognized schema-discovery command successfully",
-              "run `wren context validate` successfully",
-              "run `wren context build` successfully after validation and produce target/mdl.json with at least one model",
-            ],
-          );
-        }
-        if (lifecycle.kind === "out_of_order") {
-          return hostContractFailure(
-            "context_lifecycle_out_of_order",
-            "The native context lifecycle ran out of order; Setup requires successful schema discovery followed by `wren context validate` and then `wren context build`.",
-            lifecycle.observed,
-            [
-              "run a recognized schema-discovery command successfully",
-              "run `wren context validate` successfully before `wren context build`",
-              "produce target/mdl.json with at least one schema-derived model",
-            ],
-          );
-        }
-      }
-      const mdlPath = path.join(context.root, context.name, "target", "mdl.json");
-      if (!existsSync(mdlPath)) {
-        return hostContractFailure(
-          "context_mdl_missing",
-          `the setup agent reported "ok" but ${mdlPath} does not exist — treating this as a failed context build`,
-          "target/mdl.json is missing after the claimed context build",
-          ["target/mdl.json must exist", "target/mdl.json must contain at least one model"],
-        );
-      }
-      const modelCount = countMdlModels(mdlPath);
-      if (modelCount < 1) {
-        return hostContractFailure(
-          "context_mdl_empty",
-          `the setup agent reported "ok" but ${mdlPath} has ${modelCount} models — treating this as a failed context build`,
-          `target/mdl.json has ${modelCount} models after the claimed context build`,
-          ["target/mdl.json must contain at least one model"],
-        );
-      }
+      const failure = verifyContextEvidence(context);
+      if (failure !== undefined) return failure;
     } else {
       const markerName = context.stepKey === "connect_resume" ? ".wren-validated" : "wren_project.yml";
       const marker = path.join(context.root, context.name, markerName);
@@ -1806,7 +1973,7 @@ export function parseSetupTerminal(finalText: string, context: SetupTerminalCont
         message: `${command} failed${exitCodeSuffix} during this step — a command in this step's own history failed, so this step's error framing can't be trusted until that's ruled out; this is a command/tool failure, not by itself evidence that the connection or data source lacks tables. The agent's own report was: "${matched.message}"`,
       };
     }
-    if (claimsNoTablesOrModels(matched.message) && classifyRecordedSchemaDiscovery(context.worklog).kind === "none") {
+    if (claimsNoTablesOrModels(matched.message) && classifyRecordedSchemaDiscovery(context.worklog, projectBindingOf(context)).kind === "none") {
       return {
         status: "error",
         failureKind: "no_successful_schema_discovery",
