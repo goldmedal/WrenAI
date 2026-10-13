@@ -21,7 +21,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
 /// The lineage-relevant slice of a `knowledge/sql/<slug>.md` frontmatter.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct KnowledgeFrontmatter {
     #[serde(default)]
     sql: Option<String>,
@@ -32,8 +32,8 @@ struct KnowledgeFrontmatter {
 /// file is tried as bare YAML. Returns a human reason on failure so the caller can record it.
 pub(crate) fn knowledge_sql(contents: &str) -> Result<String, String> {
     let yaml = frontmatter_block(contents).unwrap_or(contents);
-    let front: KnowledgeFrontmatter =
-        serde_yaml::from_str(yaml).map_err(|e| format!("frontmatter is not valid yaml: {e}"))?;
+    let front: KnowledgeFrontmatter = crate::project::parse_doc_or_default(yaml)
+        .map_err(|e| format!("frontmatter is not valid yaml: {e}"))?;
     front
         .sql
         .filter(|sql| !sql.trim().is_empty())
@@ -58,7 +58,7 @@ fn frontmatter_block(contents: &str) -> Option<&str> {
 }
 
 /// The root `dashboards.yml` document.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct DashboardsFile {
     #[serde(default)]
     pub dashboards: Vec<DashboardSpec>,
@@ -88,7 +88,8 @@ pub(crate) struct PanelSpec {
 }
 
 pub(crate) fn parse_dashboards(yml: &str) -> Result<DashboardsFile, String> {
-    serde_yaml::from_str(yml).map_err(|e| format!("dashboards.yml is not valid yaml: {e}"))
+    crate::project::parse_doc_or_default(yml)
+        .map_err(|e| format!("dashboards.yml is not valid yaml: {e}"))
 }
 
 /// Every relation (table-position) name referenced by `sql`, by parsing it with sqlparser's
