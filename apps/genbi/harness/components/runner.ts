@@ -203,10 +203,10 @@ const SECRET_PATTERNS: readonly [RegExp, string][] = [
   [/\b([A-Za-z_]*(?:api[_-]?key|token|secret|password|authorization)[A-Za-z_]*)\s*[=:]\s*\S+/gi, "$1=[redacted]"],
 ];
 /** One line, secrets removed, bounded: safe for a server log, never for the client. */
-export function redactForLog(text: string): string {
+export function redactForLog(text: string, limit: number = LOG_DETAIL_LIMIT): string {
   let out = text.replace(/\s+/g, " ").trim();
   for (const [pattern, replacement] of SECRET_PATTERNS) out = out.replace(pattern, replacement);
-  return out.length > LOG_DETAIL_LIMIT ? `${out.slice(0, LOG_DETAIL_LIMIT)}...` : out;
+  return out.length > limit ? `${out.slice(0, limit)}...` : out;
 }
 interface FailureOrigin { readonly component: string; readonly step?: string; readonly depth: number }
 const failureOrigins = new WeakMap<object, FailureOrigin>();

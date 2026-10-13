@@ -6,6 +6,7 @@ import path from "node:path";
 import { z } from "zod";
 import { hashDirectory } from "../compile/fingerprint.js";
 import type { ComponentAccess } from "./broker.js";
+import { redactForLog } from "./runner.js";
 
 /**
  * The closed vocabulary of governed query failures a model may see. The wire carries the
@@ -28,7 +29,10 @@ const GOVERNED_ERROR_TEXT: Readonly<Record<GovernedErrorClass, string>> = Object
   internal: "The governed operation failed for an unclassified reason.",
   transport: "Governed Wren operation is unavailable.",
 });
+const LOGGED_SQL_LIMIT = 2000;
 export class GovernedWrenError extends Error {
+  /** The wire's own message, for the server log only: it never reaches `message`, a frame or a model. */
+  wireMessage?: string;
   constructor(readonly errorClass: GovernedErrorClass) {
     super(`Governed Wren query failed [${errorClass}]: ${GOVERNED_ERROR_TEXT[errorClass]}`);
     this.name = "GovernedWrenError";
@@ -38,7 +42,16 @@ export class GovernedWrenError extends Error {
 function governedError(wire: string | { class: string }): GovernedWrenError {
   const named = typeof wire === "string" ? undefined : wire.class;
   const known = GOVERNED_ERROR_CLASSES.find((candidate) => candidate === named && candidate !== "transport");
-  return new GovernedWrenError(known ?? "internal");
+  const error = new GovernedWrenError(known ?? "internal");
+  if (typeof wire !== "string" && "message" in wire && typeof wire.message === "string") error.wireMessage = wire.message;
+  return error;
+}
+/** One server-log line per rejected governed query: the SQL the model submitted (never sent to a client) and the wire's class and message. */
+function logRejectedQuery(sql: unknown, error: GovernedWrenError): void {
+  const fields = { site: "governed_query", code: error.errorClass,
+    ...(typeof sql === "string" ? { sql: redactForLog(sql, LOGGED_SQL_LIMIT) } : {}),
+    ...(error.wireMessage ? { wire: redactForLog(error.wireMessage) } : {}) };
+  console.error(`[component-failure] ${JSON.stringify(fields)}`);
 }
 const PROTOCOLS = ["wren-governed/1", "wren-governed/2"] as const;
 const reply = z.object({ id: z.number().int().nonnegative(), protocol: z.enum(PROTOCOLS).optional(), result: z.unknown().optional(),
@@ -175,6 +188,9 @@ export async function openWrenComponentAccess(options: {
         signal.throwIfAborted();
         await assertProject();
         return value;
+      } catch (error) {
+        if (error instanceof GovernedWrenError && payload["operation"] === "query") logRejectedQuery(payload["sql"], error);
+        throw error;
       } finally { signal.removeEventListener("abort", abort); }
     });
     tail = operation.then(() => {}, () => {});
