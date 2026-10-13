@@ -11,7 +11,7 @@ _Anyone with the link_): <https://brev.nvidia.com/launchable/deploy/now?launchab
 | Name | `Wren GenBI (Nemotron via NVIDIA endpoints)` |
 | Compute | CPU, x86_64, ≥ 4 vCPU / 8 GB RAM, ≥ 40 GB disk (pick the cheapest stoppable SKU; no GPU) |
 | Runtime mode | **VM mode** (no container, no Jupyter) |
-| Setup script | **Paste Script** with the full contents of `setup.sh` (Brev requires the first line to be `#!/bin/bash`; limit 16 KiB, the script is ~10.6 KiB). Alternative once the ref is public: `curl -fsSL https://raw.githubusercontent.com/Canner/WrenAI/<REF>/apps/genbi/deploy/brev/setup.sh \| bash` |
+| Setup script | **Paste Script** with the full contents of `setup.sh` (Brev requires the first line to be `#!/bin/bash`; limit 16 KiB, the script is ~14.4 KiB). Alternative once the ref is public: `curl -fsSL https://raw.githubusercontent.com/Canner/WrenAI/<REF>/apps/genbi/deploy/brev/setup.sh \| bash` |
 | Secure Link | name `genbi`, port `4787`, shown as the call-to-action on the deployment page |
 | TCP/UDP ports | none |
 | Launch parameters | `NVIDIA_API_KEY` (secret, optional), `GENBI_MODEL` (default `nvidia/nemotron-3-super-120b-a12b`), `GENBI_VERSION` (default from `setup.sh`), `WRENAI_WHEEL_URL` and `WRENAI_WHEEL_SHA256` (defaults from `setup.sh`) |
@@ -50,14 +50,20 @@ mode would require the BFF to bind `0.0.0.0` inside the container.
   `brev org set <org>` then `brev shell <instance>`, or `ssh -F ~/.brev/ssh_config <instance>`.
 - The Secure Link redirects to NVIDIA SSO before proxying to port 4787 (expected: it is login-protected by default).
 
-## Known blocker for a fully unattended run (as of @wrenai/genbi 0.0.4)
+## Known limits for a fully unattended run (as of @wrenai/genbi 0.0.5)
 
-The published `@wrenai/genbi@0.0.4` calls `resolve_profile_for_project(..., strict=True)`, a wren API that no PyPI
-`wrenai` release has (0.13.x–0.15.0); `setup.sh` therefore installs the GenBI Wren fork wheel, which has it. Without that wheel the wizard's "Build data model" step fails until a genbi release stops
-depending on it. On the live VM it was worked around by stripping `, strict=True` from two files under
-`dist-server/server/`. Separately, the connect gate rejects a project whose `data_source:` line still carries the
-scaffold's inline comment, and the agent-led steps (connect, build) needed several retries and manual repairs with
-Nemotron Super and Ultra. Treat the Launchable as a demo you drive, not a hands-off deploy, until those land.
+The published `@wrenai/genbi` calls `resolve_profile_for_project(..., strict=True)`, a wren API that no PyPI
+`wrenai` release has (0.13.x–0.15.0); `setup.sh` therefore installs the GenBI Wren fork wheel, which has it. Without
+that wheel the wizard's "Build data model" step fails until a genbi release stops depending on it.
+
+Fixed in 0.0.5 and no longer worked around: `GET /api/config/runtime` reports the boot gateway env until the user
+saves, the gateway runtime can be saved when `GENBI_GATEWAY_API_KEY` is set (so `setup.sh` pre-binds it with the model
+on both tiers and the key never in the request), and the connect gate reads `data_source:` without the scaffold's
+inline comment.
+
+Still open: the agent-led steps (connect, build) were observed needing retries and manual repairs with Nemotron
+Super and Ultra on 0.0.4; that has not been re-verified on 0.0.5 with a live model. Treat the Launchable as a demo
+you drive, not a hands-off deploy, until it is.
 
 ## Keeping it fresh
 
