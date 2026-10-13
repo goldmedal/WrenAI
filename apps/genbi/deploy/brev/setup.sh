@@ -25,6 +25,7 @@
 #                    restart the service.
 #   GENBI_MODEL      model id on NVIDIA endpoints (default below)
 #   GENBI_VERSION    published @wrenai/genbi version to install (default below)
+#   GENBI_PROVIDER   pi-ai provider id label for the endpoint (default nvidia)
 #   WRENAI_WHEEL_URL     wren CLI wheel to install (default below)
 #   WRENAI_WHEEL_SHA256  expected sha256 of that wheel; a mismatch aborts
 #
@@ -32,7 +33,7 @@
 # and restarts the service. It never upgrades past the pins on its own.
 set -euo pipefail
 
-GENBI_VERSION="${GENBI_VERSION:-0.0.4}"
+GENBI_VERSION="${GENBI_VERSION:-0.0.5}"
 # The PyPI `wrenai` lacks APIs the pinned GenBI release calls, so install the
 # GenBI-compatible fork wheel, verified by checksum before it is installed.
 WRENAI_WHEEL_URL="${WRENAI_WHEEL_URL:-https://github.com/goldmedal/WrenAI/releases/download/wrenai-genbi-v0.15.0-genbi.1/wrenai-0.15.0+genbi.1-py3-none-any.whl}"
@@ -41,6 +42,8 @@ NODE_MAJOR="${NODE_MAJOR:-22}"
 GENBI_MODEL="${GENBI_MODEL:-nvidia/nemotron-3-super-120b-a12b}"
 NVIDIA_API_BASE="${NVIDIA_API_BASE:-https://integrate.api.nvidia.com/v1}"
 GENBI_PORT="${GENBI_PORT:-4787}"
+# pi-ai provider id for the custom endpoint (only a label: the base URL is set).
+GENBI_PROVIDER="${GENBI_PROVIDER:-nvidia}"
 
 LAUNCH_LOG="${LAUNCH_LOG:-/tmp/genbi-launchable.log}"
 SENTINEL="/var/run/genbi-launchable-ready"
@@ -201,21 +204,19 @@ run_root install -d -m 0750 -o root -g "$RUN_USER" "$ENV_DIR"
   # `gateway` = a remote OpenAI-compatible endpoint with a key. (`api-key` mode
   # passes only key+model to the adapter and would ignore the endpoint.)
   echo "WREN_HARNESS_MODE=gateway"
+  echo "WREN_HARNESS_PROVIDER=${GENBI_PROVIDER}"
   echo "WREN_HARNESS_ENDPOINT=${NVIDIA_API_BASE}"
   echo "WREN_HARNESS_MODEL=${GENBI_MODEL}"
   if [ -n "${NVIDIA_API_KEY:-}" ]; then
     echo "WREN_HARNESS_API_KEY=${NVIDIA_API_KEY}"
-    # The in-app runtime settings re-read the key for the openai-compatible
-    # adapter from OPENAI_API_KEY; the key itself is never persisted by GenBI.
-    echo "OPENAI_API_KEY=${NVIDIA_API_KEY}"
-    # Saving the gateway runtime in the wizard checks GENBI_GATEWAY_API_KEY, not
-    # the boot key, so set it too or that save is refused.
+    # Gateway mode reads its credential from GENBI_GATEWAY_API_KEY at request
+    # time, and saving the gateway runtime requires it; GenBI never persists it.
     echo "GENBI_GATEWAY_API_KEY=${NVIDIA_API_KEY}"
   fi
   echo "NODE_ENV=production"
 } | run_root install -m 0640 -o root -g "$RUN_USER" /dev/stdin "$ENV_FILE"
 if [ -z "${NVIDIA_API_KEY:-}" ]; then
-  info "NVIDIA_API_KEY not provided; add WREN_HARNESS_API_KEY, OPENAI_API_KEY and GENBI_GATEWAY_API_KEY to ${ENV_FILE}, then: sudo systemctl restart genbi"
+  info "NVIDIA_API_KEY not provided; add WREN_HARNESS_API_KEY and GENBI_GATEWAY_API_KEY to ${ENV_FILE}, then: sudo systemctl restart genbi"
 fi
 
 # ── 7. systemd service ───────────────────────────────────────────────────────
@@ -247,18 +248,18 @@ run_root systemctl restart genbi.service
 info "waiting for GenBI on 127.0.0.1:${GENBI_PORT}"
 for _ in $(seq 1 60); do
   if curl -fsS -o /dev/null "http://127.0.0.1:${GENBI_PORT}/"; then
-    # The setup wizard reads the persisted runtime settings, not the boot env, so
-    # bind the NVIDIA endpoint there too: the "API key (BYO)" mode with the
-    # OpenAI-compatible adapter, both compiled tiers on ${GENBI_MODEL}. The key
-    # itself stays in the env file (OPENAI_API_KEY); nothing here persists it.
+    # The wizard's runtime step is only marked done by a save. Bind exactly what
+    # the boot env says (gateway, same provider/endpoint/model) with both tiers
+    # on ${GENBI_MODEL}, so no typing is needed. The key is never in the body;
+    # GenBI reads GENBI_GATEWAY_API_KEY from its own environment.
     if [ -n "${NVIDIA_API_KEY:-}" ]; then
-      runtime_json=$(printf '{"authMode":"byo","apiKeyAdapter":"openai-compatible","apiKeyBaseURL":"%s","apiKeyModel":"%s","tierModels":[{"tier":"cheap","model":"%s"},{"tier":"strong","model":"%s"}]}' \
-        "$NVIDIA_API_BASE" "$GENBI_MODEL" "$GENBI_MODEL" "$GENBI_MODEL")
+      runtime_json=$(printf '{"authMode":"gateway","gatewayProvider":"%s","gatewayModel":"%s","gatewayBaseURL":"%s","tierModels":[{"tier":"cheap","model":"%s"},{"tier":"strong","model":"%s"}]}' \
+        "$GENBI_PROVIDER" "$GENBI_MODEL" "$NVIDIA_API_BASE" "$GENBI_MODEL" "$GENBI_MODEL")
       if curl -fsS -o /dev/null -X PUT -H 'content-type: application/json' \
            "http://127.0.0.1:${GENBI_PORT}/api/config/runtime" -d "$runtime_json"; then
-        info "runtime bound: OpenAI-compatible adapter → ${NVIDIA_API_BASE}, model ${GENBI_MODEL} (both tiers)"
+        info "runtime bound: gateway ${GENBI_PROVIDER} → ${NVIDIA_API_BASE}, model ${GENBI_MODEL} (both tiers)"
       else
-        info "could not pre-bind the runtime settings; pick 'API key (BYO)' → OpenAI-compatible in the setup wizard"
+        info "could not pre-bind the runtime settings; in the setup wizard choose gateway and enter the model on each tier"
       fi
     fi
     run_root touch "$SENTINEL"

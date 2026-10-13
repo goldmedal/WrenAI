@@ -15,7 +15,7 @@ GenBI talks to it over the OpenAI-compatible API.
 | --- | --- |
 | GenBI UI + BFF (`@wrenai/genbi`, pinned) | `http://127.0.0.1:4787` on the VM, reached through the **`genbi` Secure Link** |
 | `wren` CLI (GenBI Wren fork wheel, pinned by URL + sha256) | `~/.local/bin/wren` for the `ubuntu` user |
-| Synthetic sample data (customers, orders, payments) | `~/genbi/sample-data/jaffle/*.csv` |
+| Synthetic sample data (customers, orders, payments) | `~/genbi/sample-data/jaffle-duckdb/` (DuckDB) and `~/genbi/sample-data/jaffle/*.csv` |
 | Service | `systemd` unit `genbi.service`; logs via `journalctl -u genbi` |
 | Install log | `/tmp/genbi-launchable.log`; readiness marker `/var/run/genbi-launchable-ready` |
 
@@ -38,7 +38,8 @@ you want to try the app; everyone who opens it shares the **same** GenBI workspa
 | --- | --- | --- |
 | `NVIDIA_API_KEY` | _(empty)_ | Key for NVIDIA endpoints. Effectively required. Stored root-owned, mode 0640, readable by the service user only. Never printed. |
 | `GENBI_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | Any chat model id on NVIDIA endpoints with tool calling. |
-| `GENBI_VERSION` | see `setup.sh` | Published `@wrenai/genbi` version. |
+| `GENBI_VERSION` | see `setup.sh` (0.0.5) | Published `@wrenai/genbi` version. |
+| `GENBI_PROVIDER` | `nvidia` | Gateway provider id label for the endpoint (the base URL is always set, so it is only a name). |
 | `WRENAI_WHEEL_URL` | see `setup.sh` | URL of the `wren` CLI wheel (the GenBI Wren fork build; PyPI `wrenai` lacks APIs GenBI calls). |
 | `WRENAI_WHEEL_SHA256` | see `setup.sh` | sha256 of that wheel. The download is verified before install; a mismatch aborts the setup. Override both together. |
 
@@ -46,11 +47,12 @@ you want to try the app; everyone who opens it shares the **same** GenBI workspa
 
 1. Deploy the Launchable and wait for the instance to report ready (the setup log
    ends with `=== Ready ===`; on a fresh VM this takes a few minutes).
-2. Open the **`genbi`** Secure Link from the instance page.
+2. Open the **`genbi`** Secure Link from the instance page. The setup script has already bound the
+   runtime (gateway mode, your model on both tiers), so the wizard's runtime step is complete.
 3. In the setup wizard, connect a data source. To use the bundled sample data:
    - data source: **DuckDB**
-   - `url`: `/home/ubuntu/genbi/sample-data/jaffle`
-   - `format`: `csv`
+   - `url`: `/home/ubuntu/genbi/sample-data/jaffle-duckdb`
+   - `format`: `duckdb`
 4. Let the wizard build the semantic model, then ask a question, for example
    *"total completed order amount by region"*.
 
@@ -69,7 +71,7 @@ tail -f /tmp/genbi-launchable.log
 ```
 
 To change the model or key later, edit `/etc/genbi/genbi.env` (root; set
-`WREN_HARNESS_API_KEY`, `OPENAI_API_KEY` and `GENBI_GATEWAY_API_KEY` to the same value) and restart the
+`WREN_HARNESS_API_KEY` and `GENBI_GATEWAY_API_KEY` to the same value) and restart the
 service. The model and endpoint can also be changed in the app's runtime settings;
 the key cannot.
 
