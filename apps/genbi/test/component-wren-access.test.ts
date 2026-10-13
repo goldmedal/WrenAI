@@ -50,6 +50,11 @@ describe("owned Wren access", () => {
       await expect(access.query({ sql: "SELECT 1", limit: 1 }, signal)).rejects.toThrow("changed");
     } finally { await access.close(); }
   }));
+  it("rehashes after async project validation and before spawning Wren", async () => fixture(ready, async (project) => {
+    await expect(openWrenComponentAccess({ executable: "/nonexistent/wren", project, fingerprint: await hashDirectory(project), signal: new AbortController().signal,
+      assertExecutableCurrent() { throw Error("executable changed after project validation"); },
+    })).rejects.toThrow("executable changed after project validation");
+  }));
   it("cancels a hung query and closes the owned process", async () => fixture(ready + 'process.stdin.resume();', async (project, executable) => {
     const controller = new AbortController();
     const access = await openWrenComponentAccess({ executable, project, fingerprint: await hashDirectory(project), signal: controller.signal });

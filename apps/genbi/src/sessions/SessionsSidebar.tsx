@@ -19,6 +19,7 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
   const openSession = useNativeSessions((state) => state.openSession);
   const loadNativeSessions = useNativeSessions((state) => state.load);
   const startStructuredSession = useSessionStore((state) => state.startStructuredSession);
+  const structuredReadiness = useSessionStore((state) => state.structuredReadiness);
   const sessions = useNativeSessions((state) => state.sessions);
   const [open, setOpen] = useState(false);
   const [purpose, setPurpose] = useState<NativeSessionPurpose>('analysis');
@@ -84,8 +85,8 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
     <Typography.Text strong>New session</Typography.Text>
     <section aria-label="Structured Ask session">
       <Typography.Text strong>Structured Ask</Typography.Text>
-      <Typography.Paragraph type="secondary">Chart-first answers, dashboards, and follow-up questions.</Typography.Paragraph>
-      <Button type="primary" loading={creating} onClick={() => void startStructuredAsk()}>Start Structured Ask</Button>
+      <Typography.Paragraph type="secondary">{structuredReadiness?.backend === 'openshell' ? 'Answer a question with an OpenShell model and host Wren queries. Dashboards are unavailable.' : 'Chart-first answers, dashboards, and follow-up questions.'}</Typography.Paragraph>
+      <Button type="primary" loading={creating} disabled={live && (!structuredReadiness || !structuredReadiness.ask)} onClick={() => void startStructuredAsk()}>Start Structured Ask</Button>
     </section>
     <section aria-label="Native terminal session">
       <Typography.Text strong>Native terminal</Typography.Text>
@@ -164,9 +165,12 @@ export function SessionsSidebar() {
   const structuredSessions = useSessionStore((state) => state.sessionList);
   const structuredSessionData = useSessionStore((state) => state.sessionsById);
   const loadStructuredSessions = useSessionStore((state) => state.loadSessions);
+  const loadStructuredReadiness = useSessionStore((state) => state.loadStructuredReadiness);
+  const structuredReadiness = useSessionStore((state) => state.structuredReadiness);
   const live = isBffEnabled();
   useEffect(() => { if (live) void load(); }, [live, load]);
   useEffect(() => { if (live) loadStructuredSessions(); }, [live, loadStructuredSessions]);
+  useEffect(() => { if (live) void loadStructuredReadiness(); }, [live, loadStructuredReadiness]);
   useEffect(() => {
     if (live) void refreshReadiness();
   }, [live, refreshReadiness]);
@@ -206,7 +210,7 @@ export function SessionsSidebar() {
     {live && readinessError ? <div className="sessions-sidebar-state" role="alert">Native host is unavailable. {readinessError}</div> : null}
     {live && readinessLoading && !readiness && !readinessError ? <div className="sessions-sidebar-state" role="status">Checking native terminal availability…</div> : null}
     {live && selectedRuntime && selectedRuntime.state !== 'ready' ? <div className="sessions-sidebar-state" role="status">Runtime host: {selectedRuntime.message}</div> : null}
-    {live && readinessPurposeMap && !newSessionPurposes.some((purpose) => readinessPurposeMap[purpose]?.available) ? <div className="sessions-sidebar-state" role="alert">No native terminal target is available on this host. Structured Ask remains available.</div> : null}
+    {live && readinessPurposeMap && !newSessionPurposes.some((purpose) => readinessPurposeMap[purpose]?.available) ? <div className="sessions-sidebar-state" role="alert">No native terminal target is available on this host.{structuredReadiness?.ask ? ' Structured Ask is available.' : ''}</div> : null}
     {live && error ? <div className="sessions-sidebar-state" role="alert">Sessions are unavailable. {error}</div> : null}
     {structuredList}
     {live && !error && !loading && sessions.length === 0 ? <div className="sessions-sidebar-state">No native sessions yet. Start a native terminal session or a Structured Ask.</div> : null}

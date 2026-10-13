@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import { createCodexRuntimeComposition, readCodexBootConfiguration } from "./codex-runtime-composition.js";
 import { createCodexStructuredAdapter } from "./codex-structured-ask.js";
+import { createOpenShellRuntimeComposition, selectNativeRuntimeBackend } from "./openshell-runtime-composition.js";
+import { createOpenShellStructuredAdapter } from "./openshell-structured-ask.js";
+import { createOpenShellStructuredProvisioner, resolveStructuredClaudeModels } from "./openshell-structured-provisioner.js";
+import { resolveOpenShellClaudeModel } from "./runtime-host/openshell-claude-boot.js";
 import { StructuredRuntime } from "./structured-runtime.js";
 import { shutdownNativeResources } from "./native-shutdown.js";
 /**
@@ -439,6 +443,7 @@ async function main(): Promise<void> {
     return boundAuthChoice;
   }
   function setAuthChoice(choice: AuthChoice): void {
+    deps?.structuredRuntime?.revoke();
     boundAuthChoice = choice;
   }
 
@@ -655,11 +660,24 @@ async function main(): Promise<void> {
     producerBinary: producerExecutable?.executable ?? "", profileSource: harnessProfileSources.analysis, store,
     getBinding: currentInteractiveBinding, sourceWrenHome: nativeSourceWrenHome, artifacts: nativeArtifacts,
     componentLimits: executionLimits.componentLimits });
+  const openshellComposition = await createOpenShellRuntimeComposition({ env: process.env, store, stateRoot: nativeMaterializationState.root, currentProject: getUserProject });
+  const openshellStructured = createOpenShellStructuredAdapter(createOpenShellStructuredProvisioner({
+    composition: openshellComposition, store, producerBinary: producerExecutable?.executable ?? "", wrenBinary: nativeWrenExecutable?.executable ?? "",
+    profileSource, hostHome: nativeHome, sourceWrenHome: nativeSourceWrenHome, getBinding: currentInteractiveBinding,
+    assertConfigurationCurrent() { if (!openshellComposition.claudeBoot) throw new Error("OpenShell model configuration unavailable"); openshellComposition.claudeBoot.assertCurrent(); },
+    modelsFor(settings) {
+      const boot = openshellComposition.claudeBoot;
+      if (!boot) throw new Error("OpenShell model configuration unavailable");
+      boot.assertCurrent();
+      return resolveStructuredClaudeModels(settings, (model, driver) => resolveOpenShellClaudeModel(model, driver, boot.descriptor));
+    },
+  }));
   const nativeRuntimeHost = new RuntimeHost({
-    selected: codexConfiguration.selected,
+    selected: (vendor) => selectNativeRuntimeBackend({ vendor: vendor ?? store.getNativeRuntimeBinding().provider,
+      codexBackend: codexConfiguration.selected, claudeOpenShell: openshellComposition.selected }),
     deployment: process.env["NODE_ENV"] === "production" ? "production" : "development",
     localAvailable: () => codexConfiguration.allowLocal ? nativeTerminalHostAvailable() : false,
-    vendorProbes: { "codex-app-server": codexComposition.probe },
+    vendorProbes: { "codex-app-server": codexComposition.probe, openshell: openshellComposition.probe },
   });
   const nativeSessions = new NativeSessionService({
     store,
@@ -719,8 +737,9 @@ async function main(): Promise<void> {
 
   // Explicit opt-in remains behind the packaged exact-version certification gate.
   const structuredRuntime = new StructuredRuntime({
-    selected: { codex: codexConfiguration.selected, claude: "local" }, allowLocal: codexConfiguration.allowLocal, deployment,
-    adapters: { codex: createCodexStructuredAdapter(codexComposition.structured) },
+    selected: { codex: codexConfiguration.selected, claude: openshellComposition.selected ? "openshell" : "local" }, allowLocal: codexConfiguration.allowLocal, deployment,
+    adapters: { codex: createCodexStructuredAdapter(codexComposition.structured), ...(openshellComposition.selected ? { claude: openshellStructured } : {}) },
+    onRevoke: openshellComposition.revokeRuntime,
     localRoute: route, localSetupFor: (choice) => setupRunnerFor?.(choice) ?? setupRunner,
   });
   deps = {
@@ -823,7 +842,7 @@ async function main(): Promise<void> {
     const deadline = setTimeout(() => process.exit(1), 12_000);
     void shutdownNativeResources({
       shutdownSessions: async () => {
-        const results = await Promise.allSettled([nativeSessions.shutdown(), structuredRuntime.shutdown(), codexComposition.shutdown()]);
+        const results = await Promise.allSettled([nativeSessions.shutdown(), structuredRuntime.shutdown(), codexComposition.shutdown(), openshellComposition.shutdown()]);
         if (results.some((result) => result.status === "rejected")) throw new Error("Session cleanup failed");
       },
       closeTerminals: () => interactiveTerminal?.closeAll(),

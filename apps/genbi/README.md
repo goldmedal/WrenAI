@@ -222,3 +222,165 @@ not proof of business semantics; ambiguous definitions still require clarificati
 Structured Ask allows up to five minutes for the outer conversation (including the bounded
 component call and explanation). Individual component/step deadlines remain unchanged. An
 explicit caller timeout is preserved, and outer timeout failures are reported distinctly.
+
+### OpenShell lifecycle backend
+
+OpenShell is opt-in. Structured Ask supports only `answer_query`: the model runs in a fresh
+OpenShell worker, while read-only Wren queries execute on the host through the governed component
+broker. Only a verified host root produces a successful answer; model prose or artifact files
+cannot declare verification. Query rows and SQL are grounded; interpretation is not certified.
+Setup, dashboards, enrichment, native conversations/terminals and hybrid/disclosure modes remain
+unsupported. Container readiness alone does not certify account or query readiness.
+
+An administrator can select `GENBI_CLAUDE_RUNTIME=openshell` and point
+`GENBI_OPENSHELL_CONFIG` at an absolute, private JSON configuration file. The host configuration
+contains `executable`, `executableDigest`, `version`, `gateway`, `workspace`, `image`,
+`supervisorImage`, `policy`, `policyDigest`, `home`, `configHome`, `stateHome`,
+`dockerExecutable`, `dockerRealpath`, `dockerDigest`, `dockerSocket`, `dockerNamespace`, and
+`exclusive: true`. Digests use `sha256:<64 hex digits>`; images are immutable local IDs.
+Executable, policy, private environment directories and Docker paths are absolute host paths.
+The Docker launcher may be a multicall symlink; its resolved target and bytes are checked.
+The browser cannot supply these values or launch arbitrary commands. The default remains off.
+
+Model Ask additionally requires `GENBI_OPENSHELL_CLAUDE_BOOT` to name a canonical absolute JSON
+file owned by the BFF user, mode `0600`, under a canonical owner-only `0700` parent. Its strict
+version-1 shape contains `verifyRetainedAccount: true`, absolute `vaultRoot`, `caCert`, `clientCert`
+and `clientKey` paths, `gatewayUrl` (the HTTPS OpenShell gateway), an `expected` tuple
+(`accountUuid`, `organizationUuid`, `email`, `subscription`), and a closed `models` map with only
+optional `sonnet`, `opus`, `haiku` keys holding explicit concrete model IDs. The PKI files have the
+same owner-only file/parent rules. No credential bundle, vendor endpoint override or arbitrary
+model-map key is accepted. Missing or unsafe configuration leaves Ask unavailable.
+
+This explicit boot opt-in refreshes and verifies an **existing** retained account through fixed
+host endpoints in the same BFF process. It does not enroll an account or discover ambient login.
+Without this opt-in, restart retains no verified identity authority. Runtime tier selection comes
+from validated explicit server settings; `inherit` resolves their explicit driver model, and any
+alias must have a host pin. Missing/recursive mappings fail closed. Configuration, models, account,
+project/binding and runtime generations are rechecked through tools, results and persistence.
+Ordinary runtime/binding revocation aborts work and retains the login; explicit account disconnect
+still removes its retained credentials. Readiness/UI expose availability and execution location,
+without account identity, paths or credentials. Synthetic validation does not imply a real-model
+acceptance run.
+
+This backend requires a **GenBI-exclusive gateway/workspace with no other resource writer**,
+and one lifecycle controller per private state root. Shared gateways are unsupported.
+OpenShell's name-based deletion has no atomic expected-ID precondition. GenBI uses unique
+never-reused names and exact remote ID/owner checks; a privileged administrator violating
+gateway exclusivity is outside that guarantee.
+
+SQLite records intent before remote create. Cancellation revokes the host lease before
+cleanup. Uncertain create/delete responses retain `cleanup_pending` ownership and block new
+admission. A lost create response followed by an empty list cannot prove absence; the intent
+is retained until an owned resource can be reconciled. Startup marks unfinished owned work
+interrupted and reclaims resources, without resuming execution. Cleanup requires a complete
+remote listing and container/owned-volume absence; local process termination alone is not
+proof of remote cancellation. Readiness reasons are fixed public messages; configuration,
+subprocess output and credentials are not included.
+
+#### Immutable project snapshots
+
+The host composition exposes publication and delivery permits for synthetic static files
+and quiescent local DuckDB projects. The host must supply the currently accepted Store
+binding, fresh project/context callbacks and an exact relative file allowlist. Without
+these callbacks the snapshot capability remains unavailable. There is no browser path
+selector or model command API, and governed Wren execution is not enabled.
+
+Snapshot configuration requires all of `dataPolicy`, `dataPolicyDigest` and
+`snapshotCapture`. The latter declares `executable`, `realpath`, `digest`, `helperDigest`
+and `approvedFiles`. The packaged helper requires an explicitly configured Python 3.11+
+interpreter with descriptor-relative directory operations and `O_NOFOLLOW`; both the
+resolved interpreter bytes and helper bytes are attested. No ambient Python fallback is
+used. Helper tests and packed-install verification require the explicit
+`GENBI_SNAPSHOT_CAPTURE_PYTHON` test interpreter path.
+
+The version 1 manifest is UTF-8 JSON with recursively sorted object keys, compact
+separators and no trailing newline. Its `sha256:` digest hashes the canonical object
+without the `digest` field. It includes `version`, `project`, `bindingGeneration`,
+`bindingRevision`, `context`, `source` (the canonical approved source inventory hash)
+and sorted `files` entries containing `path`, byte `size` and lowercase hex `sha256`.
+Payload files include approved project content and a closed worker-safe configuration
+projection. Runtime, account and session identities live in separate durable references.
+
+Capture accepts at most 4094 approved files; the final payload has at most 4096 files,
+256 MiB total and 128 MiB per file. Paths are relative POSIX ASCII paths with at most
+16 components and 240 bytes; components start with an alphanumeric character and contain
+only alphanumerics, underscores, dots or hyphens. The manifest is limited to 1 MiB.
+The whole source root must match the approved files and their parent directories exactly.
+Symlinks, hardlinks, nonregular files, case aliases, undeclared content, database sidecars
+and changed source inventories are rejected. This deliberately excludes ordinary project
+roots containing extra files until the host approves a suitable closed source root.
+
+Publication uses a separate owned local Docker volume and bounded network-disabled
+helpers, followed by an independent full-content verification and source recheck.
+Only a designated data worker receives one snapshot at `/opt/genbi-project`, read-only;
+agent and supervisor roles receive none. Each delivery acquires a new session reference.
+Active or uncertain references and any remaining remote mounts prevent deletion.
+Startup reconciles workers before references and orphan publications, without resuming
+interrupted work. These guarantees require the same exclusive gateway/controller contract
+as the lifecycle backend.
+
+### Host-only Claude component transport
+
+An internal OpenShell provider can run one governed Claude component step per fresh
+Linux arm64 model worker. It is separate from Ask and native-session browser routing;
+those routes remain unavailable until their own certification gates pass. There is no
+local fallback. The host retains the OAuth refresh material in a private locked vault,
+verifies the host-approved account UUID, organization UUID, email and subscription
+with authenticated minimal refresh grants and a same-access profile observation,
+then binds account fingerprint and enrollment generation to
+server-owned session, turn, binding, plan, context and step identities. Imported or
+restart-interrupted bundles remain unavailable until verified again.
+
+Only a short-lived access credential travels in a private one-shot stdin bootstrap.
+It never enters SDK options, RPC command/environment metadata or argv. The worker
+creates transient isolated HOME/configuration and executes pinned Claude Code 2.1.259.
+The direct host SDK is 0.3.259; Warble's transitive SDK 0.1.77 remains separate. The
+model image contains no Wren/project data or host/admin mounts. Its policy permits
+only the declared Anthropic model API; refresh runs on the host against the exact
+public CLI OAuth endpoint/client contract. No startup provisioning, account import,
+login, refresh or model call happens automatically.
+
+The packaged public OpenShell SDK closure is pinned to
+`7e7a8d5610f336f5f7f9f60da0951adbf295475d`, with complete asset hashes, Apache-2.0
+license and exact runtime dependencies. Normal install/build/pack needs no Git, Buf
+or Rust for this transport. An explicit maintainer regeneration check is available:
+`node scripts/regenerate-openshell-sdk.mjs /absolute/public/OpenShell-checkout`.
+The minimal worker recipe and policy are in `runtime-assets/claude-worker`.
+
+Transport refusal ceilings include encoded envelope bytes: 64 KiB per write chunk,
+2 MiB per newline frame, 16 MiB total admitted input (including the separately
+16 KiB bootstrap), 16 MiB combined stdout/stderr, 4 MiB unread stdout, 1024 combined protocol frames, 32 tools, 120 seconds per step and 15 seconds for owned cleanup.
+Lower component payload limits still apply. These are bounded local admission limits;
+OpenShell has no upstream drain. A producer ignoring `write(false)` remains bounded.
+Stdin half-close is unsupported. Cancellation revokes admission before cleanup;
+success requires settled tools and independently proven remote resource absence.
+Uncertain cleanup remains `cleanup_pending` and blocks reuse.
+
+Real identity verification and two-session retained-login smoke require separate
+human authorization. The operator utility reads only explicitly supplied private
+files, never ambient accounts:
+
+```sh
+# After separate profile and refresh authorization; no prompt/model call:
+node scripts/openshell-claude-live-probe.mjs \
+  --authorize-profile --authorize-refresh --operator-file=/absolute/private/operator.json
+# After separate model authorization; two fresh scopes, one declared echo each:
+node scripts/openshell-claude-live-probe.mjs \
+  --authorize-profile --authorize-refresh --authorize-two-session-models \
+  --operator-file=/absolute/private/operator.json
+```
+
+The mode-0600 operator file must provide `openshellConfig` (absolute private runtime
+configuration path), `pki` (`gateway`, `caCert`, `clientCert`, `clientKey` paths),
+`credentialBundle` (absolute mode-0600 file containing `accessToken`, `refreshToken`,
+`expiresAt`), private `vaultRoot` and `stateRoot`, exact approved `expected` tuple (`accountUuid`, `organizationUuid`, `email`, canonical `subscription`: pro/max/team/enterprise)
+and server-selected `models.cheap`. The configured
+model image/policy must match the built pinned worker tuple, with exclusive gateway
+ownership. Imported or restarted credentials are unverified until refresh grants and same-access profile match. Worker SDK metadata may omit email/subscription; its source/provider must be exact and optional fields must not contradict host identity. Refresh/profile/persistence failure leaves execution unavailable; vendor refresh rotation may require explicit credential re-enrollment. Never restore cached authority or weaken the
+checks. Synthetic peers and anonymous initialization do not certify retained login.
+
+The host identity phase requires independent profile and refresh permission. Add
+`--authorize-worker-observation` only with separate approval for an isolated no-model
+CLI observation. Two-session model permission is separate again. There is no ambient
+credential import. Identity observations establish the token generation; vendor-side
+entitlement changes between observations are not continuously monitored.

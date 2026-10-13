@@ -7,6 +7,7 @@
  */
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { StructuredRuntimeError } from "./structured-runtime.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -769,6 +770,15 @@ async function settleEnrichmentDraft(deps: TurnDeps, run: EnrichmentRunRow, bind
 
 export function createApp(deps: TurnDeps) {
   const app = new Hono();
+  const openShellOperations = new Set(["/api/setup/connect", "/api/setup/adopt", "/api/setup/decision", "/api/setup/connect/resume", "/api/setup/connect/env", "/api/setup/context", "/api/setup/compile-bind", "/api/native-sessions", "/api/context/terminal/sessions", "/api/context/terminal/prepare", "/api/context/enrichment/start"]);
+  app.use("/api/*", async (c, next) => {
+    const pathname = new URL(c.req.url).pathname;
+    if (c.req.method === "POST" && (openShellOperations.has(pathname) || /^\/api\/sessions\/[^/]+\/turns$/.test(pathname))) {
+      try { deps.structuredRuntime?.assertOperationSupported(resolveAuthChoice(deps), pathname.includes("/setup/") ? "setup" : pathname.includes("/turns") ? "ask" : "native"); }
+      catch (error) { if (error instanceof StructuredRuntimeError) return c.json({ error: error.message, code: error.code }, 503); throw error; }
+    }
+    await next();
+  });
   const nativeResumeAvailability = (session: Parameters<NonNullable<TurnDeps["nativeSessions"]>["resumeAvailability"]>[0]): NativeSessionResumeAvailability =>
     typeof deps.nativeSessions?.resumeAvailability === "function" ? deps.nativeSessions.resumeAvailability(session) : { available: false, cause: "no_resume_handle" };
 
@@ -1122,6 +1132,10 @@ export function createApp(deps: TurnDeps) {
   });
   app.post("/api/native-sessions/:id/recovery-action", async (c) => {
     const body = await c.req.json().catch(() => ({})) as { capability?: unknown; expectedVersion?: unknown; action?: unknown };
+    if (body.action !== "stop") {
+      try { deps.structuredRuntime?.assertOperationSupported(resolveAuthChoice(deps), "native"); }
+      catch (error) { if (error instanceof StructuredRuntimeError) return c.json({ error: error.message, code: error.code }, 503); throw error; }
+    }
     if (!deps.nativeSessions || typeof body.capability !== "string" || !Number.isSafeInteger(body.expectedVersion) || (body.action !== "retry" && body.action !== "continue" && body.action !== "stop")) return c.json({ error: "native setup recovery action is invalid" }, 400);
     try {
       const result = await deps.nativeSessions.actOnSetupRecovery({ id: c.req.param("id") ?? "", capability: body.capability, expectedVersion: body.expectedVersion as number, action: body.action });
@@ -1139,7 +1153,7 @@ export function createApp(deps: TurnDeps) {
     } catch { return c.json({ error: "Native session cleanup could not be confirmed." }, 409); }
   });
   app.get("/api/structured-runtime/readiness", async (c) => deps.structuredRuntime
-    ? c.json(await deps.structuredRuntime.readiness()) : c.json({ error: "Structured runtime is not configured." }, 503));
+    ? c.json(await deps.structuredRuntime.readiness(resolveAuthChoice(deps))) : c.json({ error: "Structured runtime is not configured." }, 503));
   app.get("/api/native-sessions/:id/conversation", upgradeWebSocket((c) =>
     conversationSocket(deps.nativeSessions, c.req.param("id") ?? "", c.req.query("cap") ?? "", c.req.query("after") ?? "0")));
   app.get("/api/native-sessions/:id/attach", upgradeWebSocket((c) => {

@@ -67,7 +67,10 @@
     "react-router-dom": "^7.18.1",
     "ws": "^8.21.3",
     "zod": "^4.4.3",
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.14",
+    "@bufbuild/protobuf": "2.12.1",
+    "@connectrpc/connect": "2.1.2",
+    "@connectrpc/connect-node": "2.1.2"
   },
   "devDependencies": {
     "@playwright/test": "1.59.1",
@@ -92,7 +95,8 @@
     "dist-server/harness",
     "dist-server/providers",
     "profiles",
-    "managed-wren"
+    "managed-wren",
+    "dist-server/runtime-assets"
   ],
   "publishConfig": {
     "access": "public"

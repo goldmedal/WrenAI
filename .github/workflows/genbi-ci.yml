@@ -56,6 +56,12 @@ jobs:
       - name: Enable corepack (pnpm via packageManager field)
         run: corepack enable
 
+      - name: Setup snapshot capture Python
+        id: snapshot-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       # The native-session preflight will only run a wren it can trace back to
       # this checkout: it requires an editable install, and checks that the .pth
       # it leaves behind points at core/wren/src inside the same git repository
@@ -113,6 +119,8 @@ jobs:
         run: pnpm run build
 
       - name: Test
+        env:
+          GENBI_SNAPSHOT_CAPTURE_PYTHON: ${{ steps.snapshot-python.outputs.python-path }}
         run: pnpm run test
 
   installed-package-macos:
@@ -132,6 +140,12 @@ jobs:
       - name: Enable corepack
         run: corepack enable
 
+      - name: Setup snapshot capture Python
+        id: snapshot-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install workspace dependencies without source-package lifecycle scripts
         working-directory: .
         run: pnpm install --frozen-lockfile
@@ -140,6 +154,8 @@ jobs:
         run: pnpm run build
 
       - name: Packed-install acceptance
+        env:
+          GENBI_SNAPSHOT_CAPTURE_PYTHON: ${{ steps.snapshot-python.outputs.python-path }}
         # This packs both real npm artifacts, installs them below a fresh temporary
         # project, and invokes npx with no checkout PATH or Rust toolchain.
         run: pnpm run check:installed-package

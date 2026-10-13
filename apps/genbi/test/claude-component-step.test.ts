@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Query, SDKMessage, Options } from "@anthropic-ai/claude-agent-sdk";
 import { runClaudeComponentStep, type ClaudeComponentRuntime } from "../server/runtime-host/claude-component-step.js";
+import { deriveClaudeNativeRuntime } from "../server/runtime-host/openshell-claude-provider.js";
 import type { StepRun } from "../harness/components/runner.js";
 
 const handlers = vi.hoisted(() => new Map<string, (input: unknown) => Promise<unknown>>());
@@ -8,7 +9,7 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   tool: (name: string, _description: string, _schema: unknown, callback: (input: unknown) => Promise<unknown>) => { handlers.set(name, callback); return { name }; },
   createSdkMcpServer: () => ({ type: "sdk", name: "component", instance: {} }),
 }));
-const account = { email: "approved@example.test", tokenSource: "synthetic-subscription", subscriptionType: "synthetic", apiKeySource: "none" };
+const account = { email: "approved@example.test", tokenSource: "synthetic-subscription", subscriptionType: "synthetic", apiKeySource: "none", apiProvider: "firstParty" as const };
 const init = { apiKeySource: "none", type: "system", subtype: "init", uuid: "init", session_id: "session", claude_code_version: "2.1.259", cwd: "/synthetic/work",
   model: "synthetic-model", tools: ["mcp__component__query"], mcp_servers: [{ name: "component", status: "connected" }],
   skills: [], plugins: [], slash_commands: [], permissionMode: "default" };
@@ -33,6 +34,13 @@ function setup(events: unknown[] = [init, result]) {
   return { run, runtime, session, next, options: () => options, prompt: () => prompt };
 }
 describe("governed Claude component step", () => {
+  it("preserves the local native close path and complete SDK account admission", async () => {
+    const test = setup(); const close = vi.fn(async () => { await test.runtime.close(); });
+    const wrapper = deriveClaudeNativeRuntime(test.runtime, () => test.runtime.assertCurrent(), close);
+    await expect(runClaudeComponentStep(wrapper, test.run)).resolves.toMatchObject({ value: "synthetic answer" });
+    expect(close).toHaveBeenCalledTimes(1); expect(test.runtime.close).toHaveBeenCalledTimes(1);
+    expect(test.session.accountInfo).toHaveBeenCalledTimes(2);
+  });
   it("uses exact tools and isolated input with no default vendor spawn", async () => {
     const test = setup([init, async () => { await handlers.get("query")!({ sql: "SELECT 1" }); }, result]);
     await expect(runClaudeComponentStep(test.runtime, test.run)).resolves.toEqual({ value: "synthetic answer", usage: { inputTokens: 5, outputTokens: 2 } });
@@ -41,10 +49,11 @@ describe("governed Claude component step", () => {
     expect(test.runtime.spawn).not.toHaveBeenCalled(); expect(test.runtime.close).toHaveBeenCalledTimes(1);
     expect(test.session.accountInfo).toHaveBeenCalledTimes(2);
   });
-  it.each(["identity", "api-key", "missing-source", "environment", "revocation"])("denies %s before sending input", async (kind) => {
+  it.each(["identity", "api-key", "missing-source", "third-party", "environment", "revocation"])("denies %s before sending input", async (kind) => {
     const test = setup();
     if (kind === "identity") vi.mocked(test.session.accountInfo).mockResolvedValue({ ...account, email: "other@example.test" });
     if (kind === "api-key") vi.mocked(test.session.accountInfo).mockResolvedValue({ ...account, apiKeySource: "ANTHROPIC_API_KEY" });
+    if (kind === "third-party") vi.mocked(test.session.accountInfo).mockResolvedValue({ ...account, apiProvider: "bedrock" });
     if (kind === "missing-source") vi.mocked(test.session.accountInfo).mockResolvedValue({ email: account.email, tokenSource: account.tokenSource, subscriptionType: account.subscriptionType });
     if (kind === "environment") Object.assign(test.runtime.environment, { ANTHROPIC_API_KEY: "synthetic" });
     if (kind === "revocation") vi.mocked(test.runtime.assertCurrent).mockImplementation(() => { throw Error("private"); });
@@ -57,6 +66,20 @@ describe("governed Claude component step", () => {
   ])("denies vendor init authority drift %j", async (changed) => {
     const test = setup([{ ...init, ...changed }, result]);
     await expect(runClaudeComponentStep(test.runtime, test.run)).rejects.toThrow("Claude component protocol"); expect(test.run.tools.query).not.toHaveBeenCalled();
+  });
+  it("keeps thinking progress unavailable to local Claude",async()=>{
+    const test=setup([init,{type:"system",subtype:"thinking_tokens",session_id:"session",uuid:"progress",estimated_tokens:2.5,estimated_tokens_delta:0.5},result]);
+    await expect(runClaudeComponentStep(test.runtime,test.run)).rejects.toThrow("Claude component protocol");
+    expect(test.run.tools.query).not.toHaveBeenCalled();expect(test.runtime.close).toHaveBeenCalledTimes(1);
+  });
+  it("keeps rate-limit events unavailable to local Claude",async()=>{
+    const test=setup([init,{type:"rate_limit_event",session_id:"session",uuid:"rate",rate_limit_info:{status:"allowed"}},result]);
+    await expect(runClaudeComponentStep(test.runtime,test.run)).rejects.toThrow("Claude component protocol");
+    expect(test.run.tools.query).not.toHaveBeenCalled();expect(test.runtime.close).toHaveBeenCalledTimes(1);
+  });
+  it("keeps local Claude builtin metadata unavailable", async () => {
+    const test=setup([{...init,agents:["Explore","Plan","general-purpose","statusline-setup","claude-code-guide"]},result]);
+    await expect(runClaudeComponentStep(test.runtime,test.run)).rejects.toThrow("Claude component protocol");expect(test.run.tools.query).not.toHaveBeenCalled();
   });
   it("fails rather than accepting a model result after tool failure", async () => {
     const test = setup([init, async () => { await handlers.get("query")!({ sql: "SELECT 1" }).catch(() => {}); }, result]);

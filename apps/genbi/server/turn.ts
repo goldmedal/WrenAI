@@ -425,6 +425,7 @@ function artifactKindForAgent(agentId: string): ArtifactKind {
 
 /** POST /api/sessions/:id/turns — persists the user event, runs the D1 clarify pre-flight, and either short-circuits with a clarify prompt or prepares a turn for streaming. */
 export async function postTurn(deps: TurnDeps, sessionId: string, question: string): Promise<PostTurnResult> {
+  deps.structuredRuntime?.assertOperationSupported(resolveAuthChoice(deps), "ask");
   const session = deps.store.getSession(sessionId);
   if (!session) throw new SessionNotFoundError(sessionId);
 

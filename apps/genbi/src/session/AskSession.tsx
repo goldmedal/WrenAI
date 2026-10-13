@@ -9,6 +9,7 @@ import { EventList } from './EventList';
 import { WorkLog } from './WorkLog';
 import { DRAFT_SESSION_ID, useSessionStore } from './useSessionStore';
 import { structuredAskPath } from '@/sessions/structuredAsk';
+import { isBffEnabled } from '@/bff/env';
 
 interface Props {
   sessionId: string;
@@ -31,6 +32,16 @@ export function AskSession({ sessionId }: Props) {
   const publishArtifact = useSessionStore((s) => s.publishArtifact);
   const ensure = useSessionStore((s) => s.getOrCreate);
   const clearDraft = useSessionStore((s) => s.clearDraft);
+  const readiness = useSessionStore((s) => s.structuredReadiness);
+  const readinessError = useSessionStore((s) => s.structuredReadinessError);
+  const loadReadiness = useSessionStore((s) => s.loadStructuredReadiness);
+  useEffect(() => {
+    if (!isBffEnabled()) return;
+    void loadReadiness();
+    const refresh = () => { void loadReadiness(); };
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, [loadReadiness]);
   // Set once the draft's first ask lazily creates its backend session (live
   // mode only) — see the re-key in `useSessionStore.sendMessage`.
   const draftResolvedTo = useSessionStore((s) =>
@@ -75,6 +86,8 @@ export function AskSession({ sessionId }: Props) {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ flex: 1, overflow: 'auto' }}>
         <PageContainer maxWidth={840}>
+          {readiness?.backend === 'openshell' ? <Alert type="info" showIcon message="The model runs in OpenShell. Read-only Wren queries execute on the host." description="Answer a question is supported. Setup, dashboards, native terminals and hybrid modes are unavailable. Verification covers query results and SQL, not interpretation." /> : null}
+          {isBffEnabled() && (readinessError || readiness?.ask === false) ? <Alert type="warning" showIcon message={readinessError ?? 'Structured Ask is unavailable.'} /> : null}
           {events.length === 0 ? (
             <PageState
               status="empty"
@@ -132,7 +145,7 @@ export function AskSession({ sessionId }: Props) {
       </div>
 
       <div style={{ maxWidth: 840, margin: '0 auto', width: '100%', padding: '0 26px 16px', boxSizing: 'border-box' }}>
-        <Composer onSend={(text) => sendMessage(sessionId, text)} disabled={streaming} />
+        <Composer onSend={(text) => sendMessage(sessionId, text)} disabled={streaming || (isBffEnabled() && (!readiness || !readiness.ask))} />
       </div>
     </div>
   );

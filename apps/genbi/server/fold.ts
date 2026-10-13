@@ -17,6 +17,7 @@ import type { AgentEvent, RouteResult, StepTrace } from "../harness/index.js";
 import { BUILD_DASHBOARD_TOOL_NAME, extractEnvelopeFromText, WREN_QUERY_TOOL_NAME } from "../harness/index.js";
 import { extractJsonCandidateFromText } from "../harness/render/envelope.js";
 import { groundOnHostEvidence } from "./host-evidence-grounding.js";
+import { readOpenShellStructuredResult } from "./openshell-structured-ask.js";
 import type { AnswerEvent, ArtifactEvent, ArtifactKind, RefusalEvent, RenderEnvelope, ToolStep } from "./wire-types.js";
 
 /**
@@ -79,6 +80,7 @@ export function toAnswerOrRefusalEvent(
   result: RouteResult,
   worklog: readonly ToolStep[] = [],
 ): AnswerEvent | RefusalEvent {
+  if (result.backend === "openshell") return { id, kind: "answer", answer: { form: "rich", envelope: readOpenShellStructuredResult(result).envelope } };
   if (result.backend === "codex-app-server") {
     return { id, kind: "answer", answer: result.envelope
       ? { form: "rich", envelope: result.envelope }
@@ -206,6 +208,10 @@ export function clarifyDecisionStep(detail: string): ToolStep {
  *    -> `undefined`, so no gate entry is appended.
  */
 export function gateDecisionStep(result: RouteResult): ToolStep | undefined {
+  if (result.backend === "openshell") {
+    readOpenShellStructuredResult(result);
+    return { id: DECISION_GATE_ID, kind: "decision", label: "Verify gate", state: "done", detail: "Query rows and SQL verified by the host; the model runs in OpenShell. Interpretation is not verified." };
+  }
   if (result.backend === "codex-app-server") return result.envelope?.verified === true
     ? { id: DECISION_GATE_ID, kind: "decision", label: "Verify gate", state: "done", detail: "Query rows and SQL captured from successful host execution; interpretation is not verified." }
     : undefined;
@@ -399,6 +405,7 @@ function truncate(text: string, max: number): string {
 
 /** Short text used for `turns.answer_summary` — feeds `server/compose.ts`'s D3 context composition. Never the full envelope. */
 export function summarizeResult(result: RouteResult): string {
+  if (result.backend === "openshell") return truncate(JSON.stringify(readOpenShellStructuredResult(result).envelope.blocks), SUMMARY_MAX_LENGTH);
   if (result.backend === "agent-sdk" || (result.backend === "codex-local" || result.backend === "codex-app-server")) {
     return truncate(result.finalText, SUMMARY_MAX_LENGTH);
   }

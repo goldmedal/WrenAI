@@ -4,6 +4,7 @@ import type { ComponentAccess } from "../harness/components/broker.js";
 import { normalizeComponentEvidence } from "../harness/components/normalize.js";
 import { openWrenComponentAccess, type WrenAccessIdentity } from "../harness/components/wren-access.js";
 import type { NativeComponentBindings } from "./native-component-preparation.js";
+import { deriveClaudeNativeRuntime } from "./runtime-host/openshell-claude-provider.js";
 import { runClaudeComponentStep, type ClaudeComponentRuntime } from "./runtime-host/claude-component-step.js";
 import { runCodexComponentStep, type CodexComponentPolicy } from "./runtime-host/codex-component-step.js";
 import type { RpcTransport } from "./runtime-host/codex-rpc.js";
@@ -18,7 +19,8 @@ export type NativeComponentVendor = {
   assertLive?(): void;
 } & ({
   readonly vendor: "claude";
-  open(model: string, signal: AbortSignal): Promise<ClaudeComponentRuntime>;
+  openStep?(model: string, tier: string, signal: AbortSignal): Promise<ClaudeComponentRuntime>;
+  open(model: string, signal: AbortSignal, tier?: string): Promise<ClaudeComponentRuntime>;
 } | {
   readonly vendor: "codex";
   open(model: string, signal: AbortSignal): Promise<{ readonly transport: RpcTransport; readonly policy: CodexComponentPolicy }>;
@@ -29,6 +31,8 @@ export interface NativeComponentRuntimeOptions extends Pick<NativeComponentBindi
   readonly vendor: NativeComponentVendor;
   /** Optional cheap scope guard; integrity remains mandatory at protected operations. */
   assertLive?(): void;
+  /** Private full executable checkpoint supplied by the OpenShell provisioner. */
+  assertExecutableCurrent?(): void;
   readonly wren: { readonly executable: string; readonly project: string; readonly fingerprint: string; readonly identity: WrenAccessIdentity };
 }
 
@@ -44,7 +48,7 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
   const currentIdentity = options.currentIdentity.bind(options);
   const assertVendor = provider.assertCurrent.bind(provider);
   const open = provider.open.bind(provider);
-  const wren = { ...options.wren };
+  const wren = { ...options.wren, ...(options.assertExecutableCurrent ? { assertExecutableCurrent: options.assertExecutableCurrent } : {}) };
   const persistRoot = options.persistRoot;
   const used = new WeakSet<object>();
   const assertBindingLive = options.assertLive?.bind(options) ?? assertBinding;
@@ -77,7 +81,7 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
       await checkAccess(run.signal);
       const model = models[run.tier];
       if (!model || !component.steps.some((step) => step.tier === run.tier)) throw new Error("Missing native component step binding");
-      const resource = await open(model, run.signal);
+      const resource = await (provider.vendor === "claude" && provider.openStep ? provider.openStep(model, run.tier, run.signal) : open(model, run.signal));
       const transport = "transport" in resource ? resource.transport : resource;
       let closing: Promise<void> | undefined;
       const close = () => closing ??= transport.close();
@@ -95,8 +99,7 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
         }
         if (vendor === "claude" && !("transport" in resource)) {
           if (resource.account.email !== account.accountEmail || resource.model !== model) throw new Error("Native component account or model mismatch");
-          const originalCheck = resource.assertCurrent.bind(resource);
-          return await runClaudeComponentStep({ ...resource, query: resource.query.bind(resource), close, assertCurrent() { check(); originalCheck(); } }, run);
+          return await runClaudeComponentStep(deriveClaudeNativeRuntime(resource, check, close), run);
         }
         throw new Error("Native component vendor mismatch");
       } finally { await close(); }

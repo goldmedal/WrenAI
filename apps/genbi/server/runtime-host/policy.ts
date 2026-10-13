@@ -12,6 +12,19 @@ import {
 } from "./types.js";
 
 const MESSAGES: Record<RuntimeBackendReasonCode, string> = {
+  openshell_unavailable: "The OpenShell lifecycle backend is unavailable.",
+  openshell_configuration_invalid: "The OpenShell host configuration is unavailable or invalid.",
+  openshell_exclusivity_required: "OpenShell requires an exclusive GenBI gateway, workspace and state owner.",
+  openshell_gateway_unavailable: "The configured OpenShell gateway is unavailable or incompatible.",
+  openshell_version_mismatch: "The OpenShell version does not match the configured identity.",
+  openshell_identity_mismatch: "The OpenShell image, policy or host identity does not match.",
+  openshell_protocol_invalid: "OpenShell returned an incomplete or invalid lifecycle response.",
+  openshell_scope_invalid: "The OpenShell launch authority is stale, invalid or already used.",
+  openshell_cancelled: "The OpenShell operation was cancelled.",
+  openshell_journal_failed: "OpenShell ownership state could not be saved or read.",
+  openshell_ownership_mismatch: "OpenShell resource ownership could not be verified.",
+  openshell_remote_unknown: "The OpenShell remote state is unknown; cleanup reconciliation is required.",
+  openshell_cleanup_pending: "OpenShell cleanup is pending; new launch admission is closed.",
   local_runtime_disabled: "The local development runtime is disabled by server policy.",
   local_runtime_host_unavailable: "The local development runtime cannot start a terminal host on this machine.",
   local_runtime_production_forbidden: "The local development runtime is not available in production.",
@@ -53,7 +66,7 @@ const MESSAGES: Record<RuntimeBackendReasonCode, string> = {
   runtime_policy_unavailable: "The runtime policy required by this backend is unavailable.",
 };
 
-const SAFE_VERSION = /^(?:[0-9]+(?:\.[0-9]+){1,3}(?:[-+._][A-Za-z0-9]+)?|development-local)$/;
+const SAFE_VERSION = /^(?:[0-9]+(?:\.[0-9]+){1,3}(?:[-+._][A-Za-z0-9][A-Za-z0-9.+_-]{0,95})?|development-local)$/;
 const SAFE_IDENTITY = /^sha256:[a-f0-9]{64}$/;
 
 export function isRuntimeReasonCode<B extends RuntimeBackendId>(backend: B, code: string): code is RuntimeBackendReasonCode<B> {

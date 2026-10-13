@@ -1,5 +1,8 @@
 node_modules
 dist
+# Pinned public transport closure is source; normal install needs no SDK toolchain.
+!runtime-assets/openshell-sdk/dist/
+!runtime-assets/openshell-sdk/dist/**
 dist-ssr
 dist-server
 *.tsbuildinfo

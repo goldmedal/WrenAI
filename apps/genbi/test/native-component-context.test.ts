@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { access, writeFile } from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { generatePreparedContext } from "../harness/compile/context-loader.js";
@@ -6,6 +6,7 @@ import { hashDirectory } from "../harness/compile/fingerprint.js";
 import { captureWrenAccessIdentity, openWrenComponentAccess } from "../harness/components/wren-access.js";
 import { prepareCapturedCodexDirectTools, prepareCapturedNativeComponentHost, type NativeComponentContextOptions } from "../server/native-component-context.js";
 import { prepareCodexDirectTools } from "../server/runtime-host/codex-direct-tools.js";
+import { assertNativeExecutableIdentity, attestNativeExecutable } from "../server/native-runtime-spec.js";
 vi.mock("../server/runtime-host/codex-direct-tools.js", () => ({ prepareCodexDirectTools: vi.fn() }));
 vi.mock("../harness/compile/context-loader.js", () => ({ generatePreparedContext: vi.fn() }));
 vi.mock("../harness/compile/fingerprint.js", () => ({ hashDirectory: vi.fn() }));
@@ -65,6 +66,21 @@ describe("native captured context preparation", () => {
     const { ir, scope, options, controller } = setup(); controller.abort();
     await expect(prepareCapturedNativeComponentHost(JSON.stringify(ir), scope, options)).rejects.toThrow();
     expect(generatePreparedContext).not.toHaveBeenCalled();
+  });
+  it("rejects same-size executable replacement after async context preparation and before starting the loader", async () => {
+    const { ir, scope, options } = setup();
+    const root = mkdtempSync("/tmp/genbi-context-executable-");
+    try {
+      const executable = `${root}/native`; writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 }); utimesSync(executable, 1700000000, 1700000000);
+      const identity = attestNativeExecutable("node", executable);
+      options.assertExecutableCurrent = () => {
+        const before = statSync(executable); writeFileSync(executable, "#!/bin/sh\nexit 1\n"); utimesSync(executable, before.atime, before.mtime);
+        expect(statSync(executable).size).toBe(before.size); expect(statSync(executable).mtimeMs).toBe(before.mtimeMs);
+        assertNativeExecutableIdentity(identity);
+      };
+      await expect(prepareCapturedNativeComponentHost(JSON.stringify(ir), scope, options)).rejects.toThrow();
+      expect(generatePreparedContext).not.toHaveBeenCalled();
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
 

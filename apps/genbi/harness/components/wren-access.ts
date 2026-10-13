@@ -92,6 +92,8 @@ export async function openWrenComponentAccess(options: {
   readonly signal: AbortSignal;
   readonly environment?: NodeJS.ProcessEnv;
   readonly identity?: WrenAccessIdentity;
+  /** Server-only native executable checkpoint, immediately before spawn. */
+  assertExecutableCurrent?(): void;
 }): Promise<ComponentAccess> {
   options.signal.throwIfAborted();
   const identity = options.identity ?? await captureWrenAccessIdentity(options.project, options.environment);
@@ -102,6 +104,7 @@ export async function openWrenComponentAccess(options: {
     options.signal.throwIfAborted();
   };
   await assertProject();
+  options.assertExecutableCurrent?.();
   if (process.platform === "win32") throw new Error("Governed process cleanup is unavailable on this platform");
   const child = spawn(options.executable, ["governed-stdio", "--project", options.project], {
     cwd: options.project, env: { ...identity.environment }, detached: true, stdio: ["pipe", "pipe", "pipe"],
