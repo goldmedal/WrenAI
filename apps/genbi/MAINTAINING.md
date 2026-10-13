@@ -48,7 +48,7 @@ bump after it):
    that quietly widens the exclusion list over time). Edit the file by hand
    after `pnpm install` to enforce the replacement.
 4. Re-run `pnpm run check:warble-peers` to confirm the new versions still satisfy the peer range the
-   three packages declare on `@warble/ir-spec` (`0.9.x` as of Warble 0.17.0). This catches a version
+   three packages declare on `@warble/ir-spec` (`0.9.x` as of Warble 0.18.0). This catches a version
    mismatch that plain `pnpm install` accepts silently; it does not check
    `file:`/`link:`-satisfied peers, so it is only meaningful against the
    registry-pinned dependency graph described here.
@@ -157,7 +157,7 @@ the key.
 `@warble/ir-spec` is pinned at `0.9.0` and does not move in lockstep with the
 other three `@warble/*` packages' own version numbers. The other three packages
 declare `@warble/ir-spec` as a peer dependency with a `0.9.x` range (Warble
-0.17.0), not an exact version — which is what makes this safe: as long as
+0.18.0), not an exact version — which is what makes this safe: as long as
 ir-spec stays inside `0.9.x`, the pinned trio can advance release by release
 without an ir-spec bump. `@warble/ir-spec` versions follow the IR *shape*, not
 Warble's release cadence (the package version *is* the IR version), so it only
