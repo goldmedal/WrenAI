@@ -33,7 +33,7 @@ function resetStore() {
     {
       sessionsById: {},
       streaming: {},
-      streamError: {},
+      streamError: {}, streamErrorCode: {},
       backendSessionId: {},
       sessionList: [],
     },

@@ -13,6 +13,7 @@ import type { StructuredRuntime } from "./structured-runtime.js";
  */
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { ComponentExecutionError, componentFailureCodeOf, redactForLog } from "../harness/components/runner.js";
 import type { AgentEvent, AuthChoice, Bundle, LoginProbe, RouteOptions, RouteResult, SetupStepRunner, SetupTerminalResult } from "../harness/index.js";
 import type { SubscriptionModelCatalog, SubscriptionProvider } from "./wire-types.js";
 import {
@@ -504,7 +505,9 @@ export async function streamTurn(
 
 async function replayResolvedTurn(store: Store, turn: TurnRow, emit: (frame: SseFrame) => Promise<void>): Promise<void> {
   if (turn.resultKind === "error") {
-    await emit({ event: "error", data: { message: turn.errorMessage ?? "unknown error" } });
+    const message = turn.errorMessage ?? "unknown error";
+    const code = componentFailureCodeOf(message);
+    await emit({ event: "error", data: { message, ...(code !== undefined ? { code } : {}) } });
     return; // spec: on error emit ONLY the error frame, never a trailing done
   }
   const worklog: ToolStep[] = turn.traceJson ? (JSON.parse(turn.traceJson) as ToolStep[]) : [];
@@ -563,6 +566,9 @@ async function executeTurn(
   const failTurn = async (err: unknown) => {
     await chain;
     const message = err instanceof Error ? err.message : String(err);
+    const code = err instanceof ComponentExecutionError ? err.code : undefined;
+    // The public message is generic by construction; the detail is logged where the failure happened.
+    if (code === undefined) console.error(`[turn-failure] ${JSON.stringify({ turn: turn.id, error: err instanceof Error ? err.name : typeof err, detail: redactForLog(message) })}`);
     // Persist the PARTIAL work log on failure — the Route/Clarify
     // decision(s) seeded at postTurn plus whatever step/tool rows the live log
     // captured before the throw, ended with a failure Verify-gate entry saying
@@ -573,7 +579,7 @@ async function executeTurn(
     const partialWorklog = [...preDecisions, ...liveLog.snapshot(), gateFailureStep(message)];
     deps.store.resolveTurn(turn.id, { backend: null, resultKind: "error", answerSummary: null, traceJson: JSON.stringify(partialWorklog), errorMessage: message });
     deps.store.updateSessionStatus(session.id, "active", null);
-    await emit({ event: "error", data: { message } });
+    await emit({ event: "error", data: { message, ...(code !== undefined ? { code } : {}) } });
   };
   let result: RouteResult;
   try {

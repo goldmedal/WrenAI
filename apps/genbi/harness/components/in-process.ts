@@ -23,7 +23,7 @@ import { createModelJudge } from "./egress-judge.js";
 import { normalizeComponentEvidence } from "./normalize.js";
 import { buildSlotTable, isReportComponent, materialiseReportPlan, normalizeReportEvidence, parseReportPlan, reportSteps } from "./report.js";
 import { planDigest } from "./plan.js";
-import { ComponentRunner, type ExecutionPlan } from "./runner.js";
+import { ComponentExecutionError, ComponentRunner, type ExecutionPlan } from "./runner.js";
 import { modelIdOf, summariseUsage, type StepUsage } from "./usage.js";
 import { captureWrenAccessIdentity, openWrenComponentAccess } from "./wren-access.js";
 import { assertZoneGate } from "./zone-gate.js";
@@ -196,7 +196,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       },
     });
     const result = await new ComponentRunner(plan, broker).run(entry, { request: options.question }, signal);
-    if (result.status === "error") throw new Error("Component execution did not complete.");
+    if (result.status === "error") throw new ComponentExecutionError(result.code);
     if (result.status !== "ok") {
       const envelope = { blocks: [], verified: false };
       emitter.emit({ kind: "refusal", reason: result.message, envelope });
@@ -214,7 +214,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     emitter.emit({ kind: "run.finish", status: "answer" });
     return { kind: "answer", envelope, trace: trace() };
   } catch (error) {
-    emitter.emit({ kind: "error", message: "Component preparation or execution failed." });
+    emitter.emit({ kind: "error", message: error instanceof ComponentExecutionError ? error.message : "Component preparation or execution failed." });
     emitter.emit({ kind: "run.finish", status: "error" });
     throw error;
   } finally { controller.abort(); await rm(scratch, { recursive: true, force: true }); }
