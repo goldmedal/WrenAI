@@ -159,17 +159,77 @@ const normalizedResult = z.discriminatedUnion("status", [
 ]);
 
 class ExecutionFailure extends Error {
-  constructor(readonly code: "cancelled" | "budget_exhausted" | "invalid_result" | "callee_failed") {
+  /** `reason` is a static, host-authored phrase (never model or tool text), logged server-side only. */
+  constructor(readonly code: "cancelled" | "budget_exhausted" | "invalid_result" | "callee_failed", readonly reason?: string) {
     super(code);
   }
 }
-function safeError(error: unknown): ComponentInvocationResult {
-  return { status: "error", code: error instanceof ExecutionFailure ? error.code : "callee_failed",
-    message: "Component execution did not complete.", retryable: false };
+
+/** Every code a failed component run can carry to the host; the user-facing text never includes more than this. */
+export const COMPONENT_FAILURE_CODES = ["unsupported_callee", "invalid_request", "invalid_result", "budget_exhausted", "cancelled", "transient_transport", "callee_failed"] as const;
+export type ComponentFailureCode = (typeof COMPONENT_FAILURE_CODES)[number];
+
+const FAILURE_MESSAGES: Readonly<Record<ComponentFailureCode, string>> = {
+  invalid_result: "The component produced a result that could not be assembled or validated",
+  budget_exhausted: "The component exceeded its step or call budget",
+  cancelled: "The component run was cancelled or timed out",
+  callee_failed: "A component step or tool call failed",
+  unsupported_callee: "The component called a component this deployment does not support",
+  invalid_request: "The component received a request it could not accept",
+  transient_transport: "The component lost its connection to the model or data service",
+};
+/** The generic, secret-free text for a failure code. It ends in `(code)` so a stored message still names its code. */
+export function componentFailureMessage(code: ComponentFailureCode): string {
+  return `${FAILURE_MESSAGES[code]} (${code}).`;
+}
+/** The code a message built by {@link componentFailureMessage} names, else undefined. */
+export function componentFailureCodeOf(message: string): ComponentFailureCode | undefined {
+  const found = /\((\w+)\)\.$/.exec(message)?.[1];
+  const code = COMPONENT_FAILURE_CODES.find((candidate) => candidate === found);
+  return code !== undefined && componentFailureMessage(code) === message ? code : undefined;
+}
+/** A component run that ended in an error: `message` is generic and safe to show, `code` is stable. */
+export class ComponentExecutionError extends Error {
+  constructor(readonly code: ComponentFailureCode) {
+    super(componentFailureMessage(code));
+    this.name = "ComponentExecutionError";
+  }
+}
+
+const LOG_DETAIL_LIMIT = 300;
+const SECRET_PATTERNS: readonly [RegExp, string][] = [
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]"],
+  [/\b(sk|pk|nvapi|ghp|gho|xox[a-z])[-_][A-Za-z0-9_-]{8,}/g, "[redacted]"],
+  [/\b([A-Za-z_]*(?:api[_-]?key|token|secret|password|authorization)[A-Za-z_]*)\s*[=:]\s*\S+/gi, "$1=[redacted]"],
+];
+/** One line, secrets removed, bounded: safe for a server log, never for the client. */
+export function redactForLog(text: string): string {
+  let out = text.replace(/\s+/g, " ").trim();
+  for (const [pattern, replacement] of SECRET_PATTERNS) out = out.replace(pattern, replacement);
+  return out.length > LOG_DETAIL_LIMIT ? `${out.slice(0, LOG_DETAIL_LIMIT)}...` : out;
+}
+interface FailureOrigin { readonly component: string; readonly step?: string; readonly depth: number }
+const failureOrigins = new WeakMap<object, FailureOrigin>();
+function noteOrigin(error: unknown, origin: FailureOrigin): void {
+  if (error !== null && typeof error === "object" && !failureOrigins.has(error)) failureOrigins.set(error, origin);
+}
+/** Emits the single structured line that says why a component run failed; the client only ever sees the code. */
+function logComponentFailure(site: string, code: string, error: unknown, origin?: FailureOrigin): void {
+  const known = origin ?? (error !== null && typeof error === "object" ? failureOrigins.get(error) : undefined);
+  const detail = error instanceof ExecutionFailure ? error.reason : error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+  const fields = { site, code, ...(known ? { component: known.component, ...(known.step ? { step: known.step } : {}), depth: known.depth } : {}),
+    ...(error instanceof Error ? { error: error.name } : {}), ...(detail ? { detail: redactForLog(detail) } : {}) };
+  console.error(`[component-failure] ${JSON.stringify(fields)}`);
+}
+function safeError(error: unknown, site = "run"): ComponentInvocationResult {
+  const code = error instanceof ExecutionFailure ? error.code : "callee_failed";
+  logComponentFailure(site, code, error);
+  return { status: "error", code, message: "Component execution did not complete.", retryable: false };
 }
 function copy<T>(value: T, maxBytes: number): T {
   const text = JSON.stringify(value);
-  if (text === undefined || Buffer.byteLength(text) > maxBytes) throw new ExecutionFailure("invalid_result");
+  if (text === undefined) throw new ExecutionFailure("invalid_result", "value is not JSON-serializable");
+  if (Buffer.byteLength(text) > maxBytes) throw new ExecutionFailure("invalid_result", `value is ${Buffer.byteLength(text)} bytes, over the ${maxBytes} byte cap`);
   return JSON.parse(text) as T;
 }
 function freeze<T>(value: T): T {
@@ -260,21 +320,21 @@ export class ComponentRunner {
       result = await this.invoke(entry, request, null, 0);
       this.check();
     } catch (error) {
-      result = safeError(error);
+      result = safeError(error, "run");
     }
     if (result.status !== "ok") this.cancel();
     try {
       // Persistence depends on successful required resource cleanup. Identity
       // checks remain valid after resources close; no more step work is admitted.
       const cleanup = await Promise.allSettled([...this.bindings.values()].map((binding) => this.release(binding)));
-      if (cleanup.some((item) => item.status === "rejected")) return safeError(new ExecutionFailure("callee_failed"));
+      if (cleanup.some((item) => item.status === "rejected")) return safeError(new ExecutionFailure("callee_failed", "resource cleanup rejected"), "cleanup");
       if (result.status === "ok") {
         this.check();
         if (this.host.persistRoot) await this.wait(this.host.persistRoot(result, this.bindings.get(entry)!, this.controller.signal));
       }
       return result;
     } catch (error) {
-      return safeError(error);
+      return safeError(error, "persist");
     } finally {
       this.cancel();
       clearTimeout(timer);
@@ -338,7 +398,7 @@ export class ComponentRunner {
     try {
       return await this.invoke(id, raw, parent, depth);
     } catch (error) {
-      if (error instanceof ExecutionFailure && error.code === "callee_failed") return safeError(error);
+      if (error instanceof ExecutionFailure && error.code === "callee_failed") return safeError(error, "per_slot_child");
       throw error;
     }
   }
@@ -348,7 +408,7 @@ export class ComponentRunner {
     const request = normalizeComponentRequest(raw, COMPONENT_LIMITS.requestBytes);
     if ("error" in request) return request.error;
     if (depth > COMPONENT_LIMITS.depth || (depth > 0 && ++this.calls > COMPONENT_LIMITS.calls)) {
-      throw new ExecutionFailure("budget_exhausted");
+      throw new ExecutionFailure("budget_exhausted", depth > COMPONENT_LIMITS.depth ? "call depth" : "call budget");
     }
     const component = this.plan.components[id]!;
     const binding = this.bindings.get(id)!;
@@ -366,14 +426,16 @@ export class ComponentRunner {
     let executedQueries = 0;
     // The last terminal step's text did not parse and no repair step remains to run for it.
     let unparseable = false;
+    let lastStep: string | undefined;
     const lastPrimary = component.steps.indexOf(component.steps.filter((candidate) => !candidate.repairOf).at(-1)!);
     try {
       for (const step of component.steps) {
         if (step.repairOf && step.repairOf !== failed) continue;
-        if (!step.repairOf && failed) throw new ExecutionFailure("callee_failed");
+        if (!step.repairOf && failed) throw new ExecutionFailure("callee_failed", `step ${failed} failed and no repair step follows`);
         this.check();
+        lastStep = step.name;
         if (++this.steps > COMPONENT_LIMITS.steps || (depth > 0 && ++childSteps > COMPONENT_LIMITS.childSteps)) {
-          throw new ExecutionFailure("budget_exhausted");
+          throw new ExecutionFailure("budget_exhausted", this.steps > COMPONENT_LIMITS.steps ? "step budget" : "child step budget");
         }
         const consumes = object<unknown>();
         for (const name of step.consumes) {
@@ -429,7 +491,11 @@ export class ComponentRunner {
             // an unrepaired failure is still callee_failed), not the whole invocation; a per-slot
             // request treats it as one slot's outcome instead. Cancellation, budget and result
             // limits keep propagating.
-            const tracked = pending.catch((error: unknown) => { if (error instanceof ExecutionFailure) throw error; toolErrored = true; });
+            const tracked = pending.catch((error: unknown) => {
+              if (error instanceof ExecutionFailure) throw error;
+              toolErrored = true;
+              logComponentFailure("tool", "callee_failed", error, { component: id, step: step.name, depth });
+            });
             queued.push(tracked);
             void tracked.catch(() => {});
             return pending;
@@ -468,7 +534,7 @@ export class ComponentRunner {
               children.push(freeze(copy(result, COMPONENT_LIMITS.resultBytes)));
               // Tool transports may catch a rejection or ignore the returned value.
               // Retain failure in the host queue so root success cannot hide it.
-              if (result.status !== "ok") throw new ExecutionFailure("callee_failed");
+              if (result.status !== "ok") throw new ExecutionFailure("callee_failed", `child ${edge.component} returned ${result.status}`);
               return result;
             }, callId));
             queue = pending.catch(() => {});
@@ -526,13 +592,18 @@ export class ComponentRunner {
           throw error;
         } finally { active = false; }
       }
-      if (failed) throw new ExecutionFailure("callee_failed");
+      if (failed) throw new ExecutionFailure("callee_failed", `step ${failed} failed and its repair step did not recover`);
       const result = unparseable ? unanswerableBatch(request.value)
         : copy(await this.wait(binding.normalize(freeze({ steps: products, tools, children, egress }), this.controller.signal)), COMPONENT_LIMITS.resultBytes);
-      if (!normalizedResult.safeParse(result).success) throw new ExecutionFailure("invalid_result");
+      if (!normalizedResult.safeParse(result).success) throw new ExecutionFailure("invalid_result", "normalized result does not match the result schema");
+      if (result.status === "error") {
+        // A returned (not thrown) failure, e.g. the model's output did not satisfy the render contract: say why, with the callee's own static message.
+        logComponentFailure("normalize", result.code, new Error(result.message), { component: id, depth, ...(lastStep ? { step: lastStep } : {}) });
+      }
       this.host.onEvent?.({ ...event, kind: "call.finish", status: result.status === "ok" ? "ok" : "error" });
       return result;
     } catch (error) {
+      noteOrigin(error, { component: id, depth, ...(lastStep ? { step: lastStep } : {}) });
       this.host.onEvent?.({ ...event, kind: "call.finish", status: this.controller.signal.aborted ? "cancelled" : "error" });
       throw error;
     }

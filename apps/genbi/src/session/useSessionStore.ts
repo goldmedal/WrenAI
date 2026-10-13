@@ -39,6 +39,8 @@ interface SessionStoreState {
   streaming: Record<string, boolean>;
   /** The last stream error for a session id, if the most recent turn failed. */
   streamError: Record<string, string | undefined>;
+  /** The component failure code the server reported for that error, unset for transport loss and other errors. */
+  streamErrorCode: Record<string, string | undefined>;
   /** Local session id → real backend session id, once created live. Fixture mode never populates this. */
   backendSessionId: Record<string, string>;
   /** Real, persisted sessions from the BFF for the sidebar, most-recent first. Fixture mode leaves this empty — the sidebar renders fixtures instead. */
@@ -150,6 +152,7 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
   sessionsById: { ...fixtureAskSessions },
   streaming: {},
   streamError: {},
+  streamErrorCode: {},
   backendSessionId: {},
   sessionList: [],
 
@@ -202,6 +205,7 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
         },
         streaming: { ...s.streaming, [id]: true },
         streamError: { ...s.streamError, [id]: undefined },
+        streamErrorCode: { ...s.streamErrorCode, [id]: undefined },
       };
     });
 
@@ -241,10 +245,11 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
           };
         });
       },
-      onError: (message) => {
+      onError: (message, code) => {
         set((s) => ({
           streaming: { ...s.streaming, [targetId]: false },
           streamError: { ...s.streamError, [targetId]: message },
+          streamErrorCode: { ...s.streamErrorCode, [targetId]: code },
         }));
       },
       onDone: () => {
@@ -284,6 +289,7 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
               backendSessionId: { ...s.backendSessionId, [id]: backendId, [backendId]: backendId },
               streaming: { ...s.streaming, [backendId]: s.streaming[id] },
               streamError: { ...s.streamError, [backendId]: s.streamError[id] },
+              streamErrorCode: { ...s.streamErrorCode, [backendId]: s.streamErrorCode[id] },
             };
           }
         : undefined;
@@ -342,7 +348,8 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
       const { [DRAFT_SESSION_ID]: _droppedBackendId, ...backendSessionId } = s.backendSessionId;
       const { [DRAFT_SESSION_ID]: _droppedStreaming, ...streaming } = s.streaming;
       const { [DRAFT_SESSION_ID]: _droppedStreamError, ...streamError } = s.streamError;
-      return { sessionsById, backendSessionId, streaming, streamError };
+      const { [DRAFT_SESSION_ID]: _droppedStreamErrorCode, ...streamErrorCode } = s.streamErrorCode;
+      return { sessionsById, backendSessionId, streaming, streamError, streamErrorCode };
     });
   },
 

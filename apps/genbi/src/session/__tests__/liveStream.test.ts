@@ -128,6 +128,15 @@ describe('live sessionStream', () => {
     expect(source.closed).toBe(true);
   });
 
+  it('passes the component failure code of a named `error` frame to onError', async () => {
+    postTurn.mockResolvedValueOnce({ turnId: 't1' });
+    const h = handlers();
+    sessionStream('build dashboard', h, 's1');
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    FakeEventSource.instances[0]!.emit('error', { data: JSON.stringify({ message: 'Result could not be assembled (invalid_result).', code: 'invalid_result' }) });
+    expect(h.onError).toHaveBeenCalledWith('Result could not be assembled (invalid_result).', 'invalid_result');
+  });
+
   it('maps a connection-level error (no data) to a generic onError message', async () => {
     postTurn.mockResolvedValueOnce({ turnId: 't1' });
     const h = handlers();

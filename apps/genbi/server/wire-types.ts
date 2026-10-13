@@ -913,7 +913,8 @@ export type SseEventName = "worklog" | "event" | "error" | "done";
 export type SseFrame =
   | { readonly event: "worklog"; readonly data: readonly ToolStep[] }
   | { readonly event: "event"; readonly data: SessionEvent }
-  | { readonly event: "error"; readonly data: { readonly message: string } }
+  /** `code` is present only when a component run failed: a stable category, never raw exception text. */
+  | { readonly event: "error"; readonly data: { readonly message: string; readonly code?: string } }
   | { readonly event: "done"; readonly data: Record<string, never> };
 
 // ---------------------------------------------------------------------------

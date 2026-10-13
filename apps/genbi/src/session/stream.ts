@@ -17,8 +17,8 @@ export interface StreamHandlers {
   onWorkLog?: (steps: ToolStep[]) => void;
   /** A terminal (or, later, incremental) SessionEvent for this turn. */
   onEvent?: (event: SessionEvent) => void;
-  /** The stream broke before a terminal event arrived. */
-  onError?: (message: string) => void;
+  /** The stream broke before a terminal event arrived. `code` is set when the server reported a component failure (a stable category), unset for transport loss. */
+  onError?: (message: string, code?: string) => void;
   onDone?: () => void;
 }
 
@@ -55,7 +55,8 @@ export function sessionStream(question: string, handlers: StreamHandlers, sessio
 interface EventSourceHandlers<E> {
   onWorkLog?: (steps: ToolStep[]) => void;
   onEvent?: (event: E) => void;
-  onError?: (message: string) => void;
+  /** `code` is set when the server reported a component failure (a stable category), unset for transport loss. */
+  onError?: (message: string, code?: string) => void;
   onDone?: () => void;
 }
 
@@ -89,12 +90,16 @@ function attachTurnStreamListeners<E>(source: EventSource, handlers: EventSource
   source.addEventListener('error', (evt) => {
     if ('data' in evt) {
       let message = t('ask.streamErrorGeneric');
+      let code: string | undefined;
       try {
-        message = (JSON.parse((evt as MessageEvent).data) as { message: string }).message;
+        const frame = JSON.parse((evt as MessageEvent).data) as { message: string; code?: unknown };
+        message = frame.message;
+        if (typeof frame.code === 'string') code = frame.code;
       } catch {
         // Malformed error frame — surface a generic message rather than throw in the listener.
       }
-      handlers.onError?.(message);
+      if (code === undefined) handlers.onError?.(message);
+      else handlers.onError?.(message, code);
     } else {
       handlers.onError?.(t('ask.streamConnectionLost'));
     }

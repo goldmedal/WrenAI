@@ -25,6 +25,7 @@ export function AskSession({ sessionId }: Props) {
   const session = useSessionStore((s) => s.sessionsById[sessionId]);
   const streaming = useSessionStore((s) => s.streaming[sessionId] ?? false);
   const error = useSessionStore((s) => s.streamError[sessionId]);
+  const errorCode = useSessionStore((s) => s.streamErrorCode[sessionId]);
   const sendMessage = useSessionStore((s) => s.sendMessage);
   const saveArtifact = useSessionStore((s) => s.saveArtifact);
   const publishArtifact = useSessionStore((s) => s.publishArtifact);
@@ -116,7 +117,7 @@ export function AskSession({ sessionId }: Props) {
             <Alert
               type="error"
               showIcon
-              message={t('ask.streamErrorTitle')}
+              message={t(errorCode ? 'ask.componentErrorTitle' : 'ask.streamErrorTitle')}
               description={error}
               action={
                 lastUserText ? (

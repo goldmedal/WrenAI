@@ -112,7 +112,7 @@ beforeEach(() => {
   localStorage.clear();
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
   useNativeSessions.setState({ sessions: [], loading: false, error: undefined, readiness: undefined, readinessLoading: false, readinessError: undefined }, false);
-  useSessionStore.setState({ sessionsById: {}, streaming: {}, streamError: {}, backendSessionId: {}, sessionList: [] }, false);
+  useSessionStore.setState({ sessionsById: {}, streaming: {}, streamError: {}, streamErrorCode: {}, backendSessionId: {}, sessionList: [] }, false);
   useUiStore.setState({ sidebarCollapsed: false, themeMode: 'light' }, false);
   vi.stubGlobal('WebSocket', MockWebSocket);
   vi.stubGlobal('ResizeObserver', class {

@@ -19,7 +19,7 @@ beforeEach(() => {
     {
       sessionsById: JSON.parse(JSON.stringify(fixtureAskSessions)),
       streaming: {},
-      streamError: {},
+      streamError: {}, streamErrorCode: {},
     },
     false,
   );
@@ -173,5 +173,18 @@ describe('AskSession', () => {
     );
     expect(screen.queryByRole('button', { name: /published/i })).not.toBeInTheDocument();
     expect(screen.queryByText(/share\.genbi\.example/)).not.toBeInTheDocument();
+  });
+
+  it('titles a server-reported component failure as such, and keeps the connection-lost title for transport loss', () => {
+    useSessionStore.setState({ streamError: { s2: 'The component produced a result that could not be assembled or validated (invalid_result).' }, streamErrorCode: { s2: 'invalid_result' } });
+    const { unmount } = renderWithProviders(<AskSession sessionId="s2" />);
+    expect(screen.getByText('The agent could not complete this request')).toBeInTheDocument();
+    expect(screen.getByText(/invalid_result/)).toBeInTheDocument();
+    expect(screen.queryByText('The connection to the agent was lost')).not.toBeInTheDocument();
+    unmount();
+
+    useSessionStore.setState({ streamError: { s2: 'Lost connection to the harness stream.' }, streamErrorCode: {} });
+    renderWithProviders(<AskSession sessionId="s2" />);
+    expect(screen.getByText('The connection to the agent was lost')).toBeInTheDocument();
   });
 });

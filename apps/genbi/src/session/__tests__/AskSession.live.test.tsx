@@ -59,7 +59,7 @@ beforeEach(() => {
   listSessions.mockReset();
   postTurn.mockReset();
   useSessionStore.setState(
-    { sessionsById: {}, streaming: {}, streamError: {}, backendSessionId: {}, sessionList: [] },
+    { sessionsById: {}, streaming: {}, streamError: {}, streamErrorCode: {}, backendSessionId: {}, sessionList: [] },
     false,
   );
 });
