@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import os from "node:os";
 import path from "node:path";
+import { ModelConfig } from "@warble/claude-agent-sdk";
 import { enforceCompliance } from "../compliance/index.js";
 import { hashDirectory } from "../compile/fingerprint.js";
 import { compileProfile } from "../compile/pipeline.js";
@@ -252,7 +253,7 @@ export async function runDispatchedDefault(options: DispatchedOptions): Promise<
     // This turn's host query service, when the caller asked for one: the only place the host MCP's
     // run_sql executes and the only evidence the answer can be grounded on. Closed (and its
     // observations discarded) when the turn ends, whatever the outcome.
-    const host = await openAskHostQueries(options);
+    const host = await openAskHostQueries(options, irPath);
     try {
       const command = buildAgentSdkChatArgs(cli, {
         irPath,
@@ -304,10 +305,14 @@ export async function runDispatchedDefault(options: DispatchedOptions): Promise<
 
 /**
  * Opens an Ask turn's host query service and writes its host MCP config, or returns `undefined`
- * when the turn runs without one (not requested, a models config, or no `wren` on PATH).
+ * when the turn runs without one (not requested, a hybrid models config, or no `wren` on PATH).
  */
-async function openAskHostQueries(options: DispatchedOptions): Promise<{ service: HostQueryService; configFile: string } | undefined> {
-  if (options.hostQueries === undefined || options.modelsConfig !== undefined) return undefined;
+async function openAskHostQueries(
+  options: DispatchedOptions,
+  irPath: string,
+): Promise<{ service: HostQueryService; configFile: string } | undefined> {
+  if (options.hostQueries === undefined) return undefined;
+  if (options.modelsConfig !== undefined && await bindsNonAnthropicTier(irPath, options.modelsConfig)) return undefined;
   let wren: string;
   try {
     wren = options.hostQueries.wren ?? resolveExecutableOnPath("wren");
@@ -335,6 +340,19 @@ async function openAskHostQueries(options: DispatchedOptions): Promise<{ service
     await service.close();
     throw error;
   }
+}
+
+/**
+ * True when the models config binds a tier this IR's steps use to a non-Anthropic provider. Warble
+ * runs such a plan hybrid-staged and refuses `--host-mcp-config` for it; an all-Anthropic config (the
+ * only kind Setup writes for Claude subscription) keeps the host MCP. Every IR tier is checked, not
+ * just the dispatched component's, so a hybrid tier anywhere in the profile also skips it.
+ */
+async function bindsNonAnthropicTier(irPath: string, modelsConfig: string): Promise<boolean> {
+  const ir = JSON.parse(await readFile(irPath, "utf8")) as { components: { llm_calls: { tier: string }[] }[] };
+  const models = ModelConfig.fromYaml(await readFile(modelsConfig, "utf8"));
+  const tiers = new Set(ir.components.flatMap((component) => component.llm_calls.map((step) => step.tier)));
+  return [...tiers].some((tier) => models.binding(tier).provider !== "anthropic");
 }
 
 /**
