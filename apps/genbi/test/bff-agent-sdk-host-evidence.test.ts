@@ -86,6 +86,17 @@ function claudeBff(override: (options: DispatchedOptions) => DispatchedOptions =
   };
 }
 
+/** An IR whose steps use `cheap` and `strong`, and a models config binding them as `tiers` says. */
+function withModelsConfig(tiers: string): (options: DispatchedOptions) => DispatchedOptions {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "genbi-as-models-"));
+  scratch.push(directory);
+  const irPath = path.join(directory, "ir.json");
+  writeFileSync(irPath, JSON.stringify({ components: [{ llm_calls: [{ tier: "cheap" }, { tier: "strong" }] }] }));
+  const modelsConfig = path.join(directory, "models.yaml");
+  writeFileSync(modelsConfig, `tiers:\n${tiers}  orchestrator: sonnet\n`);
+  return (options) => ({ ...options, irPath, modelsConfig });
+}
+
 const run = (sql: string) => ({ name: "run_sql", arguments: { sql } });
 /** answer_query's flat terminal shape; `order_count` is whatever the model typed. */
 const queryResult = (sql: string, orderCount: number, extra: Record<string, unknown> = {}) => ({
@@ -194,14 +205,24 @@ describe("agent-sdk answers are grounded against this turn's host query observat
     expect(capture.results).toEqual([{ denied: "mcp__wren_host__dry_run" }]);
   });
 
-  it("dispatches without a host MCP config when the caller asks for no host queries or binds a models config", async () => {
+  it("dispatches without a host MCP config when the caller asks for no host queries or binds a non-Anthropic tier", async () => {
     const plain = claudeBff((options) => { const { hostQueries: _omit, ...rest } = options; return rest; });
     const none = await plain.ask({ calls: [run(ORDERS_SQL)], answer: queryResult(ORDERS_SQL, 42) });
     expect(none.capture.args).not.toContain("--host-mcp-config");
     expect(envelopeOf(none.answer).verified).toBe(false);
-    const hybrid = claudeBff((options) => ({ ...options, modelsConfig: "/fixture/models.yaml" }));
+    const hybrid = claudeBff(withModelsConfig(
+      "  strong: sonnet\n  cheap:\n    provider: openai_compat\n    endpoint: http://127.0.0.1:11434/v1\n    model: qwen2.5\n"));
     const staged = await hybrid.ask({ calls: [run(ORDERS_SQL)], answer: queryResult(ORDERS_SQL, 42) });
+    expect(staged.capture.args).toContain("--models-config");
     expect(staged.capture.args).not.toContain("--host-mcp-config");
     expect(envelopeOf(staged.answer).verified).toBe(false);
+  });
+
+  it("keeps the host MCP config under an all-Anthropic models config, the kind Setup saves", async () => {
+    const bff = claudeBff(withModelsConfig("  strong: sonnet\n  cheap: haiku\n"));
+    const { answer, capture } = await bff.ask({ calls: [run(ORDERS_SQL)], answer: queryResult(ORDERS_SQL, 42) });
+    expect(capture.args).toContain("--models-config");
+    expect(capture.args).toContain("--host-mcp-config");
+    expect(envelopeOf(answer).verified).toBe(true);
   });
 });
