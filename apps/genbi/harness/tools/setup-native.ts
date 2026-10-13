@@ -100,6 +100,13 @@ export interface SetupExecutionToolOptions {
    * never broaden either its cwd or its write scope beyond it.
    */
   readonly workspaceRoot: string;
+  /**
+   * The bound project directory of a project-bound setup step. When set and the
+   * directory exists, an `exec` without an explicit `cwd` runs there instead of
+   * at `workspaceRoot`; an explicit `cwd` still wins. Must lie within
+   * `workspaceRoot` (same containment check as an explicit `cwd`).
+   */
+  readonly defaultExecCwd?: string;
 }
 
 /**
@@ -133,7 +140,7 @@ export const setupExecutionInputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Optional for both actions: use this directory instead of the workspace root as the command cwd or the base for a relative write path (e.g. the project directory). Absolute or relative to the workspace root, and must resolve within it. Defaults to the workspace root when omitted. For exec, use this instead of "cd <dir> && ..." chaining.',
+      'Optional for both actions: use this directory instead of the workspace root as the command cwd or the base for a relative write path (e.g. the project directory). Absolute or relative to the workspace root, and must resolve within it. Defaults to the workspace root when omitted (for exec, the bound project directory once the step has one). For exec, use this instead of "cd <dir> && ..." chaining.',
     ),
   path: z
     .string()
@@ -340,8 +347,11 @@ function resolveWritePath(workspaceRoot: string, requestedPath: string, requeste
  * exec cwd to any directory within `workspaceRoot` (e.g. the project
  * directory), but never broaden it beyond that root.
  */
-function resolveExecCwd(workspaceRoot: string, requestedCwd: string | undefined): string {
+function resolveExecCwd(workspaceRoot: string, requestedCwd: string | undefined, defaultCwd?: string): string {
   if (requestedCwd === undefined) {
+    if (defaultCwd !== undefined && existsSync(defaultCwd)) {
+      return assertWithinScope(workspaceRoot, defaultCwd, (requested, scope) => new SetupExecCwdScopeError(requested, scope));
+    }
     return workspaceRoot;
   }
   return assertWithinScope(workspaceRoot, requestedCwd, (requestedCwd, scope) => new SetupExecCwdScopeError(requestedCwd, scope));
@@ -373,7 +383,7 @@ export async function executeSetupExecution(
       throw new SetupExecutionInputError("exec", "command");
     }
     assertCommandAllowed(input.command);
-    const cwd = resolveExecCwd(workspaceRoot, input.cwd);
+    const cwd = resolveExecCwd(workspaceRoot, input.cwd, options.defaultExecCwd);
     const result = await env.exec(
       { mode: "write", command: "/bin/sh", args: ["-c", input.command], cwd, timeoutMs: SETUP_EXEC_TIMEOUT_MS },
       policy,
@@ -402,7 +412,7 @@ export function createSetupExecutionTool(options: SetupExecutionToolOptions): To
     description:
       "Run a shell command or write a file within the setup workspace, subject to a destructive/redirection " +
       'command denylist and a workspace-root scope. Two call shapes: {action: "exec", command, cwd?} runs a ' +
-      "shell command (command is required; cwd is optional, defaults to the workspace root, and must resolve " +
+      "shell command (command is required; cwd is optional, defaults to the bound project directory for a project step once it exists (otherwise the workspace root), and must resolve " +
       'within it — path/content are unused); {action: "write", path, content, cwd?} writes a file (path and content ' +
       "are both required; a relative path uses cwd when supplied, otherwise the workspace root; command is unused). A call missing the field(s) its action requires, or " +
       "supplying a cwd/path that escapes the workspace root, is rejected before anything runs or is written.",

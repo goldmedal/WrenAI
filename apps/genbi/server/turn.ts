@@ -898,7 +898,10 @@ async function executeSetupTurn(deps: TurnDeps, session: SessionRow, turn: TurnR
       ? undefined
       : deps.store.getSetupContextLifecycleEvidence(session.id, identityFingerprint)?.completed;
     if (identityFingerprint !== undefined) {
-      const recorded = recordedContextLifecyclePrefix(worklog, prior ?? "none");
+      const recorded = recordedContextLifecyclePrefix(worklog, prior ?? "none", {
+        root: workspaceRoot,
+        projectDir: path.join(workspaceRoot, form.projectName),
+      });
       // A build command is not retained by itself: only a successful terminal
       // parse has independently checked target/mdl.json. Discovery/validate
       // remain useful across an interrupted turn, but build includes artifact
