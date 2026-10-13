@@ -12,7 +12,7 @@ commands run from the repository root.
 
 ## Versioning
 
-`@wrenai/genbi`'s own version (currently `0.0.4`, pre-release) is **independent
+`@wrenai/genbi`'s own version (currently `0.0.5`, pre-release) is **independent
 of Warble's** — it does not track or mirror Warble's version number. Bump
 `@wrenai/genbi`'s version only for genbi's own release events (this doc does
 not define genbi's release cadence; that is a separate, not-yet-settled
