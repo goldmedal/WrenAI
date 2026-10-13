@@ -509,6 +509,14 @@ export function getRuntimeSettingsReadiness(): Promise<RuntimeSettingsReadiness>
   return request<RuntimeSettingsReadiness>('/api/config/runtime/readiness');
 }
 
+export interface StructuredAskReadiness {
+  readonly active: { readonly backend: string; readonly state: string; readonly ask: boolean; readonly reason: string;
+    readonly modelExecution?: 'openshell'; readonly queryExecution?: 'host'; readonly supportedAgents?: readonly string[] };
+}
+export function getStructuredAskReadiness(): Promise<StructuredAskReadiness> {
+  return request('/api/structured-runtime/readiness');
+}
+
 /** Exact step tiers declared by the compiled bundle, not a frontend constant. */
 export function getRuntimeTierNames(): Promise<string[]> {
   return request<string[]>('/api/config/runtime/tiers');

@@ -14,6 +14,9 @@
  * and converted back on read (`intToBool`/`boolToInt`).
  */
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { openShellIntentSchema, OpenShellError, type OpenShellIntent } from "./runtime-host/openshell-types.js";
+import { snapshotPublicationSchema, snapshotReferenceSchema, type SnapshotPublication, type SnapshotReference } from "./runtime-host/openshell-snapshot-types.js";
+import { isDeepStrictEqual } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 import type {
   ArtifactKind,
@@ -720,11 +723,87 @@ export class Store {
     this.now = options.now ?? (() => new Date());
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(SCHEMA_SQL);
+    this.db.exec("CREATE TABLE IF NOT EXISTS openshell_intents (id TEXT PRIMARY KEY, payload TEXT NOT NULL)");
+    this.db.exec("CREATE TABLE IF NOT EXISTS openshell_snapshot_publications (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS openshell_snapshot_references (id TEXT PRIMARY KEY, payload TEXT NOT NULL)");
     this.migrateSchema();
     this.seedIfEmpty();
     this.reconcileOrphanedSetupTurns();
     this.reconcileOrphanedEnrichmentRuns();
     this.reconcileOrphanedNativeSessions();
+  }
+
+  /** Durable host ownership journal; retained terminal rows prevent name reuse. */
+  listOpenShellIntents(): readonly OpenShellIntent[] {
+    try {
+      return this.db.prepare("SELECT id, payload FROM openshell_intents ORDER BY id").all().map((row) => {
+        const value = openShellIntentSchema.parse(JSON.parse(String(row.payload)));
+        if (value.id !== row.id) throw new Error();
+        return value;
+      });
+    } catch { throw new OpenShellError("openshell_journal_failed"); }
+  }
+  saveOpenShellIntent(intent: OpenShellIntent): void {
+    openShellIntentSchema.parse(intent);
+    const previous = this.listOpenShellIntents().find((row) => row.id === intent.id);
+    if (previous && (previous.owner !== intent.owner || previous.name !== intent.name || !isDeepStrictEqual(previous.identity, intent.identity)
+      || (previous.remoteId !== undefined && previous.remoteId !== intent.remoteId)
+      || (previous.phase === "cleaned" && intent.phase !== "cleaned"))) throw new OpenShellError("openshell_journal_failed");
+    if (intent.identity.purpose === "data" && !previous) {
+      const identity = intent.identity;
+      const reference = this.listSnapshotReferences().find((row) => row.id === identity.reference);
+      const publication = this.listSnapshotPublications().find((row) => row.id === identity.publication);
+      if (!reference || reference.phase !== "pending" || reference.workerId || !isDeepStrictEqual(reference.identity, identity)
+        || !publication || publication.phase !== "ready" || publication.manifest?.digest !== identity.snapshot) throw new OpenShellError("openshell_scope_invalid");
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.saveSnapshotReference({ ...reference, workerId: intent.id });
+        this.db.prepare("INSERT INTO openshell_intents (id, payload) VALUES (?, ?)").run(intent.id, JSON.stringify(intent));
+        this.db.exec("COMMIT");
+      } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    } else this.db.prepare("INSERT INTO openshell_intents (id, payload) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload").run(intent.id, JSON.stringify(intent));
+  }
+  listSnapshotPublications(): readonly SnapshotPublication[] {
+    try { return this.db.prepare("SELECT id,payload FROM openshell_snapshot_publications ORDER BY id").all().map((row) => {
+      const value = snapshotPublicationSchema.parse(JSON.parse(String(row.payload))); if (value.id !== row.id) throw new Error(); return value;
+    }); } catch { throw new OpenShellError("openshell_journal_failed"); }
+  }
+  saveSnapshotPublication(row: SnapshotPublication): void {
+    snapshotPublicationSchema.parse(row);
+    const previous = this.listSnapshotPublications().find((value) => value.id === row.id);
+    if (previous && (previous.owner !== row.owner || previous.volume !== row.volume || previous.configuration !== row.configuration
+      || !isDeepStrictEqual(previous.identity, row.identity) || (previous.manifest && !isDeepStrictEqual(previous.manifest, row.manifest))
+      || (previous.phase === "cleaned" && row.phase !== "cleaned"))) throw new OpenShellError("openshell_journal_failed");
+    const transitions = { intent: ["intent", "publishing", "cleanup_pending", "cleaned"], publishing: ["publishing", "ready", "cleanup_pending"], ready: ["ready", "cleanup_pending"], cleanup_pending: ["cleanup_pending", "cleaned"], cleaned: ["cleaned"] };
+    if (previous && !transitions[previous.phase].includes(row.phase)) throw new OpenShellError("openshell_journal_failed");
+    if (row.phase === "cleanup_pending" && this.listSnapshotReferences().some((ref) => ref.publication === row.id && ref.phase !== "released")) throw new OpenShellError("openshell_cleanup_pending");
+    this.db.prepare("INSERT INTO openshell_snapshot_publications (id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(row.id, JSON.stringify(row));
+  }
+  listSnapshotReferences(): readonly SnapshotReference[] {
+    try { return this.db.prepare("SELECT id,payload FROM openshell_snapshot_references ORDER BY id").all().map((row) => {
+      const value = snapshotReferenceSchema.parse(JSON.parse(String(row.payload))); if (value.id !== row.id) throw new Error(); return value;
+    }); } catch { throw new OpenShellError("openshell_journal_failed"); }
+  }
+  saveSnapshotReference(row: SnapshotReference): void {
+    snapshotReferenceSchema.parse(row);
+    const previous = this.listSnapshotReferences().find((value) => value.id === row.id);
+    if (previous && (previous.publication !== row.publication || !isDeepStrictEqual(previous.identity, row.identity)
+      || (previous.workerId && previous.workerId !== row.workerId) || (previous.phase === "released" && row.phase !== "released"))) throw new OpenShellError("openshell_journal_failed");
+    const transitions = { pending: ["pending", "active", "releasing", "released"], active: ["active", "releasing", "released"], releasing: ["releasing", "released"], released: ["released"] };
+    if (previous && !transitions[previous.phase].includes(row.phase)) throw new OpenShellError("openshell_journal_failed");
+    if (!previous) {
+      const publication = this.listSnapshotPublications().find((value) => value.id === row.publication);
+      if (!publication || publication.phase !== "ready" || row.identity.purpose !== "data" || row.identity.publication !== row.publication
+        || row.identity.reference !== row.id || row.identity.snapshot !== publication.manifest?.digest) throw new OpenShellError("openshell_scope_invalid");
+    }
+    this.db.prepare("INSERT INTO openshell_snapshot_references (id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(row.id, JSON.stringify(row));
+  }
+  interruptOpenShellWork(intent: OpenShellIntent): void {
+    this.db.prepare("UPDATE turns SET result_kind = 'error', backend = NULL, answer_summary = NULL, error_message = ? WHERE id = ? AND session_id = ? AND result_kind IS NULL")
+      .run("OpenShell work interrupted by host restart.", intent.identity.turn, intent.identity.session);
+    const now = this.now().toISOString();
+    this.db.prepare("UPDATE sessions SET status = 'active', pending_question = NULL, updated_at = ? WHERE id = ? AND status = 'streaming'").run(now, intent.identity.session);
+    this.db.prepare("UPDATE native_sessions SET status = 'interrupted', failure = ?, ended_at = ?, updated_at = ? WHERE id = ? AND status IN ('creating','running','detached')")
+      .run("OpenShell work interrupted by host restart.", now, now, intent.identity.session);
   }
 
   /**

@@ -16,13 +16,14 @@ import type {
 export type RuntimeDeployment = "development" | "production";
 
 export interface VendorRuntimeProbes {
+  readonly openshell?: () => Promise<RuntimeBackendProbeResult<"openshell">>;
   readonly "codex-app-server"?: () => Promise<RuntimeBackendProbeResult<"codex-app-server">>;
   readonly "claude-sandbox-runtime"?: () => Promise<RuntimeBackendProbeResult<"claude-sandbox-runtime">>;
 }
 
 export interface RuntimeHostOptions {
   /** Server-owned selection. Browser input is deliberately absent from this type. */
-  readonly selected: RuntimeBackendId;
+  readonly selected: RuntimeBackendId | ((vendor?: "codex" | "claude") => RuntimeBackendId);
   readonly deployment: RuntimeDeployment;
   readonly localAvailable: () => boolean | Promise<boolean>;
   /** Internal test/adaptor seam. Future vendor adapters must supply this server-side. */
@@ -96,23 +97,27 @@ export class RuntimeHost {
     }
   }
 
-  async probe(): Promise<RuntimeReadiness> {
-    const [local, codex, claude] = await Promise.all([
+  async probe(vendor?: "codex" | "claude"): Promise<RuntimeReadiness> {
+    const [local, codex, claude, openshell] = await Promise.all([
       this.probeLocal(),
       this.probeCodex(),
       this.probeClaude(),
+      this.options.vendorProbes?.openshell?.().catch(() => ({ readiness: runtimeNotReady("openshell", "unavailable", "runtime_probe_failed"), diagnostic: { phase: "probe" as const } })) ?? Promise.resolve({ readiness: runtimeNotReady("openshell", "unprovisioned", "openshell_configuration_invalid"), diagnostic: { phase: "provisioning" as const } }),
     ]);
     const backends: Readonly<Record<RuntimeBackendId, RuntimeBackendReadiness>> = {
+      openshell: sanitizeRuntimeReadiness("openshell", openshell.readiness),
       local: sanitizeRuntimeReadiness("local", local.readiness),
       "codex-app-server": sanitizeRuntimeReadiness("codex-app-server", codex.readiness),
       "claude-sandbox-runtime": sanitizeRuntimeReadiness("claude-sandbox-runtime", claude.readiness),
     };
     this.diagnostics = {
+      openshell: sanitizeRuntimeDiagnostic(openshell.diagnostic),
       local: sanitizeRuntimeDiagnostic(local.diagnostic),
       "codex-app-server": sanitizeRuntimeDiagnostic(codex.diagnostic),
       "claude-sandbox-runtime": sanitizeRuntimeDiagnostic(claude.diagnostic),
     };
-    return { selected: this.options.selected, selectedReadiness: backends[this.options.selected], backends };
+    const selected = typeof this.options.selected === "function" ? this.options.selected(vendor) : this.options.selected;
+    return { selected, selectedReadiness: backends[selected], backends };
   }
 
   /** Host-only support evidence; never include this object in an API response. */

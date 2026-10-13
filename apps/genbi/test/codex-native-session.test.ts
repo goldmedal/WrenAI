@@ -14,6 +14,10 @@ import type { DirectCodexProvisioner } from "../server/codex-native-session.js";
 import { RuntimeHost, runtimeReady } from "../server/runtime-host/index.js";
 import type { CodexEvent } from "../server/runtime-host/codex-events.js";
 import { conversationSocket } from "../server/conversation-socket.js";
+import { selectNativeRuntimeBackend } from "../server/openshell-runtime-composition.js";
+import { readCodexBootConfiguration } from "../server/codex-runtime-composition.js";
+import { readOpenShellConfiguration } from "../server/runtime-host/openshell-driver.js";
+import { runtimeNotReady } from "../server/runtime-host/policy.js";
 import { createApp } from "../server/app.js";
 
 const owned: { service: NativeSessionService; store: Store }[] = [];
@@ -52,6 +56,24 @@ function fixture(database = ":memory:") {
 }
 const launch = (f: ReturnType<typeof fixture>) => f.service.startSeparate({ purpose: "analysis", idempotencyKey: randomUUID() });
 describe("durable direct Codex Sessions", () => {
+  it.each(["missing", "unready"])("Claude OpenShell %s does not override active Codex native readiness or launch", async (state) => {
+    const f = fixture(); const env = { GENBI_CODEX_RUNTIME: "app-server", GENBI_CLAUDE_RUNTIME: "openshell" };
+    const codex = readCodexBootConfiguration(env), claude = readOpenShellConfiguration(env);
+    const host = new RuntimeHost({ selected: (vendor) => selectNativeRuntimeBackend({ vendor: vendor ?? f.store.getNativeRuntimeBinding().provider,
+      codexBackend: codex.selected, claudeOpenShell: claude.selected }), deployment: "production", localAvailable: () => false,
+      vendorProbes: { "codex-app-server": async () => ({ readiness: runtimeReady("0.156.1", []), diagnostic: { phase: "probe" } }),
+        openshell: async () => ({ readiness: runtimeNotReady("openshell", "unavailable", state === "missing" ? "openshell_configuration_invalid" : "openshell_gateway_unavailable"), diagnostic: { phase: "probe" } }) } });
+    const service = new NativeSessionService({ ...f.options, runtimeHost: host });
+    const tracked = owned.at(-1)!; tracked.service = service;
+    const readiness = await service.readiness(); expect(readiness.runtimeHost?.selected).toBe("codex-app-server"); expect(readiness.analysis.available).toBe(true);
+    const result = await service.create({ purpose: "analysis" }); expect(result.row.vendor).toBe("codex"); expect(f.prepare).toHaveBeenCalledOnce();
+    await service.stopAndWait(result.row.id, result.capability!);
+    f.store.setRuntimeSettings({ ...f.store.getRuntimeSettings(), subscriptionProvider: "claude", subscriptionDriverModel: "sonnet", tierModels: [{ tier: "cheap", model: "haiku" }, { tier: "strong", model: "opus" }] });
+    expect((await service.readiness()).runtimeHost?.selected).toBe("openshell");
+    const before = f.store.listNativeSessions(); await expect(service.create({ purpose: "analysis" })).rejects.toThrow("OpenShell native model sessions are not supported.");
+    expect(f.store.listNativeSessions()).toEqual(before); expect(f.prepare).toHaveBeenCalledOnce();
+    await f.service.shutdown();
+  });
   it("denies an uncertified terminal before allocating a permit or row", async () => {
     const f = fixture(); Object.assign(f.options.directCodex, { terminal: true, terminalCertified: () => false });
     await expect(launch(f)).rejects.toThrow("not certified");

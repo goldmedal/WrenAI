@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { isBffEnabled } from '@/bff/env';
-import { createSession, getSession, listSessions, postArtifactPublish, postArtifactSave } from '@/bff/client';
-import type { SessionSummary } from '@/bff/client';
+import { createSession, getSession, getStructuredAskReadiness, listSessions, postArtifactPublish, postArtifactSave } from '@/bff/client';
+import type { SessionSummary, StructuredAskReadiness } from '@/bff/client';
 import { fixtureAskSessions } from './fixtures';
 import { nextId, sessionStream } from './stream';
 import type { StreamHandlers } from './stream';
@@ -45,6 +45,9 @@ interface SessionStoreState {
   backendSessionId: Record<string, string>;
   /** Real, persisted sessions from the BFF for the sidebar, most-recent first. Fixture mode leaves this empty — the sidebar renders fixtures instead. */
   sessionList: SessionSummary[];
+  structuredReadiness?: StructuredAskReadiness['active'];
+  structuredReadinessError?: string;
+  loadStructuredReadiness: () => Promise<void>;
   /** Returns the session, seeding an empty one first if it doesn't exist yet. */
   getOrCreate: (id: string) => AskSessionData;
   /** Append a user turn and drive the (fixture or live) stream seam to its answer. */
@@ -148,6 +151,7 @@ function resolveBackendSessionId(
  * for the draft and replaces the route onto the real id once it's known, so
  * a reload resumes the persisted session instead of a fresh draft.
  */
+let structuredReadinessRequest = 0;
 export const useSessionStore = create<SessionStoreState>()((set, get) => ({
   sessionsById: { ...fixtureAskSessions },
   streaming: {},
@@ -155,6 +159,17 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
   streamErrorCode: {},
   backendSessionId: {},
   sessionList: [],
+  async loadStructuredReadiness() {
+    if (!isBffEnabled()) return;
+    const request = ++structuredReadinessRequest;
+    set({ structuredReadiness: undefined, structuredReadinessError: undefined });
+    try {
+      const value = await getStructuredAskReadiness();
+      if (request !== structuredReadinessRequest) return;
+      if (!value.active || typeof value.active.ask !== 'boolean' || typeof value.active.backend !== 'string') throw new Error();
+      set({ structuredReadiness: value.active, structuredReadinessError: undefined });
+    } catch { if (request === structuredReadinessRequest) set({ structuredReadiness: undefined, structuredReadinessError: 'Structured Ask availability could not be confirmed.' }); }
+  },
 
   getOrCreate: (id) => {
     const existing = get().sessionsById[id];
@@ -193,6 +208,10 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
   sendMessage: (id, text) => {
     const trimmed = text.trim();
     if (!trimmed) return;
+    if (isBffEnabled() && get().structuredReadiness?.ask === false) {
+      set((s) => ({ streamError: { ...s.streamError, [id]: 'Structured Ask is unavailable.' } }));
+      return;
+    }
     get().getOrCreate(id);
 
     const userEvent: UserEvent = { id: nextId('e'), kind: 'user', text: trimmed };

@@ -23,3 +23,6 @@ const dest = path.join(packageRoot, "dist-server", "providers");
 
 mkdirSync(dest, { recursive: true });
 cpSync(src, dest, { recursive: true });
+cpSync(path.join(packageRoot, "server", "runtime-host", "openshell-snapshot-helper.py"), path.join(packageRoot, "dist-server", "server", "runtime-host", "openshell-snapshot-helper.py"));
+
+cpSync(path.join(packageRoot, "runtime-assets"), path.join(packageRoot, "dist-server", "runtime-assets"), { recursive: true });

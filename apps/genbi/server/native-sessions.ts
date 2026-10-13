@@ -1226,8 +1226,9 @@ export class NativeSessionService {
     return result;
   }
 
-  private async assertSelectedRuntimeReady(): Promise<RuntimeReadiness> {
-    const readiness = await this.runtimeHost.probe();
+  private async assertSelectedRuntimeReady(vendor?: NativeVendor): Promise<RuntimeReadiness> {
+    const readiness = await this.runtimeHost.probe(vendor);
+    if (readiness.selected === "openshell") throw new InteractiveLaunchError("OpenShell native model sessions are not supported.");
     if (readiness.selectedReadiness.state !== "ready") throw new InteractiveLaunchError(readiness.selectedReadiness.message);
     return readiness;
   }
@@ -1660,6 +1661,15 @@ export class NativeSessionService {
       ? this.options.executableAvailable(vendor) && this.vendorExecutables[vendor] !== undefined
       : this.vendorExecutables[vendor] !== undefined;
     const runtimeHostReadiness = await this.runtimeHost.probe();
+    if (runtimeHostReadiness.selected === "openshell") {
+      const reason = "OpenShell native model sessions are not supported.";
+      const purposes = Object.fromEntries(NATIVE_PURPOSES.map((purpose) => [purpose, {
+        scopeKind: NATIVE_DISPATCH_REGISTRY[purpose].scopeKind, profile: NATIVE_DISPATCH_REGISTRY[purpose].profile,
+        available: false, reason, vendors: { codex: { available: false, reason }, claude: { available: false, reason } },
+      }])) as Record<NativePurpose, NativePurposeReadiness>;
+      return { runtime: this.options.store.getNativeRuntimeBinding(), runtimeHost: runtimeHostReadiness, purposes, ...purposes,
+        mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason } };
+    }
     if (runtimeHostReadiness.selected === "codex-app-server") {
       const runtime = this.options.store.getNativeRuntimeBinding();
       const binding = this.options.getBinding();
@@ -1815,7 +1825,7 @@ export class NativeSessionService {
 
   private async createCaptured(input: NativeLaunchInput, binding = input.purpose === "setup" ? undefined : this.options.getBinding(), capturedRuntime = this.options.store.getNativeRuntimeBinding(), resumed?: { readonly row: NativeSessionRow; readonly handle: string }): Promise<NativeSessionLaunch> {
     this.assertRuntimeDispatchable();
-    const runtimeReadiness = await this.assertSelectedRuntimeReady();
+    const runtimeReadiness = await this.assertSelectedRuntimeReady(capturedRuntime.configured ? capturedRuntime.provider : input.vendor);
     const purpose = input.purpose;
     const legacyRuntime = !capturedRuntime.configured && input.vendor
       ? { configured: true as const, generation: 0, provider: input.vendor, target: targetForProvider(input.vendor), targetLabel: nativeTargetLabel(input.vendor) }

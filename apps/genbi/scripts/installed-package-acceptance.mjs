@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { installedClaudeTransportFixture } from "./claude-transport-fixture.mjs";
 
 /**
  * Exercise the package at its distribution boundary, not through this checkout.
@@ -19,6 +20,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { closeServerBounded, runBounded, spawnProcessGroup, stopProcessTree } from "./process-cleanup.mjs";
 import { installedDirectToolsFixture } from "./direct-tools-fixture.mjs";
+import { installedSnapshotHelperFixture } from "./snapshot-helper-fixture.mjs";
 import { readSseFrames } from "./sse-frames.mjs";
 
 const packageRoot = path.resolve(process.cwd());
@@ -76,6 +78,16 @@ try {
   markPhase("direct-codex-tools");
   await run("npx", ["--no-install", "--", "node", "--input-type=module", "--eval",
     `await (${installedDirectToolsFixture.toString()})(${JSON.stringify(installedPackageRoot)});`],
+    { cwd: installRoot, env: controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint }) });
+
+  markPhase("claude-transport");
+  await run("npx", ["--no-install", "--", "node", "--input-type=module", "--eval",
+    `await (${installedClaudeTransportFixture.toString()})(${JSON.stringify(installedPackageRoot)});`],
+    { cwd: installRoot, env: controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint }) });
+
+  markPhase("snapshot-helper");
+  await run("npx", ["--no-install", "--", "node", "--input-type=module", "--eval",
+    `await (${installedSnapshotHelperFixture.toString()})(${JSON.stringify(installedPackageRoot)},${JSON.stringify(process.env.GENBI_SNAPSHOT_CAPTURE_PYTHON)});`],
     { cwd: installRoot, env: controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint }) });
 
   markPhase("start");
@@ -589,7 +601,7 @@ function assertPublishedFiles(files) {
   const forbidden = /(^|\/)(scripts|test|tests|fixtures|examples|\.git)(\/|$)|(^|\/)node_modules(\/|$)/;
   const unexpected = files.filter((file) => forbidden.test(file));
   if (unexpected.length > 0) throw new Error(`package tarball contains repository-only files: ${JSON.stringify(unexpected)}`);
-  for (const required of ["package/bin/genbi.mjs", "package/dist/index.html", "package/dist-server/server/bin.js", "package/managed-wren/manifest.json", "package/managed-wren/runtime-tree.cjs", "package/dist-server/server/runtime-host/codex-app-server.js", "package/dist-server/server/runtime-host/codex-session.js", "package/dist-server/server/runtime-host/codex-conversation.js"]) {
+  for (const required of ["package/dist-server/runtime-assets/openshell-sdk/provenance.json", "package/dist-server/runtime-assets/claude-worker/claude-worker.mjs", "package/dist-server/runtime-assets/claude-worker/Dockerfile", "package/bin/genbi.mjs", "package/dist/index.html", "package/dist-server/server/bin.js", "package/managed-wren/manifest.json", "package/managed-wren/runtime-tree.cjs", "package/dist-server/server/runtime-host/codex-app-server.js", "package/dist-server/server/runtime-host/codex-session.js", "package/dist-server/server/runtime-host/codex-conversation.js"]) {
     if (!files.includes(required)) throw new Error(`package tarball is missing ${required}`);
   }
 }

@@ -1,0 +1,17 @@
+version: 1
+filesystem_policy:
+  include_workdir: false
+  read_only: [/usr, /opt/genbi, /lib, /bin, /proc, /dev/urandom, /etc/passwd, /etc/group, /etc/nsswitch.conf, /etc/hosts, /etc/resolv.conf, /etc/ssl, /etc/localtime, /etc/ld.so.cache]
+  read_write: [/sandbox, /tmp, /dev/null]
+landlock:
+  compatibility: hard_requirement
+process:
+  run_as_user: "1500"
+  run_as_group: "1500"
+network_policies:
+  anthropic:
+    name: Anthropic model API
+    endpoints:
+      - { host: api.anthropic.com, port: 443 }
+    binaries:
+      - { path: /opt/genbi/claude }

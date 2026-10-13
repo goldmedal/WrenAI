@@ -50,6 +50,7 @@ vi.mock('@/bff/client', async (importOriginal) => ({
   createSession: client.createStructured,
   listSessions: client.listStructured,
   getRuntimeSettingsReadiness: () => Promise.resolve({ valid: true as const }),
+  getStructuredAskReadiness: () => Promise.resolve({ active: { backend: 'local', state: 'ready', ask: true, reason: 'Synthetic local runtime.' } }),
 }));
 vi.mock('@xterm/xterm', () => ({ Terminal: class {
   cols = 100;

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { prepareNativeComponentHost, type NativeComponentBindings } from "../server/native-component-preparation.js";
+import { prepareNativeComponentHost, prepareStructuredAskComponentHost, type NativeComponentBindings } from "../server/native-component-preparation.js";
 
 const document = readFileSync(new URL("../profiles/genbi-default/ir.golden.json", import.meta.url), "utf8");
 function setup(vendor: "claude" | "codex" = "codex") {
@@ -15,6 +15,18 @@ function setup(vendor: "claude" | "codex" = "codex") {
   return { ir, bindings, scope };
 }
 describe("host-derived native component preparation", () => {
+  it("pins Structured Ask to only the Claude answer root without changing composed/native preparation", () => {
+    const { bindings, scope } = setup("claude"); scope.entry = { kind: "agent", verb: "answer_query", prompt: "synthetic" };
+    const prepared = prepareStructuredAskComponentHost(document, scope, bindings);
+    expect(Object.keys(prepared.hostRoots)).toEqual(["answer_query"]);
+    expect(Object.keys(prepared.contexts)).toEqual(["answer_query"]);
+    expect(prepareNativeComponentHost(document, scope, bindings)).toBeUndefined();
+    expect(bindings.prepare).not.toHaveBeenCalled();
+    for (const entry of [{ kind: "agent", verb: "generate_dashboard", prompt: "synthetic" }, { kind: "scope", prompt: "synthetic" }]) {
+      expect(() => prepareStructuredAskComponentHost(document, { ...scope, entry }, bindings)).toThrow();
+    }
+    expect(() => prepareStructuredAskComponentHost(document, scope, { ...bindings, identity: { ...bindings.identity, vendor: "codex" } })).toThrow();
+  });
   it.each(["claude", "codex"] as const)("derives the exact %s composed closure without opening access", (vendor) => {
     const { bindings, scope } = setup(vendor); const result = prepareNativeComponentHost(document, scope, bindings)!;
     expect(Object.keys(result.hostRoots)).toEqual(["generate_dashboard"]);

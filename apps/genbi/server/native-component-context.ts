@@ -1,3 +1,4 @@
+import { observeStructured, observeStructuredAsync, type StructuredDiagnosticObserver } from "./structured-diagnostics.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,13 +8,14 @@ import { generatePreparedContext } from "../harness/compile/context-loader.js";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
 import { captureWrenAccessIdentity } from "../harness/components/wren-access.js";
 import { prepareCodexDirectTools, type CodexSessionTools } from "./runtime-host/codex-direct-tools.js";
-import { prepareNativeComponentHost, type NativeComponentBindings } from "./native-component-preparation.js";
+import { prepareNativeComponentHost, prepareStructuredAskComponentHost, type NativeComponentBindings } from "./native-component-preparation.js";
 import { createNativeComponentRuntimeBindings, type NativeComponentRuntimeOptions } from "./native-component-runtime.js";
 import type { NativeComponentPreparation } from "./native-components.js";
 
 export interface NativeComponentContextOptions extends Omit<NativeComponentRuntimeOptions, "contexts" | "wren"> {
   /** All executables and the provider are resolved by the certified server provisioner. */
   readonly contextLoaderBinary: string;
+  readonly diagnostics?: StructuredDiagnosticObserver;
   /** Explicit host-only credential environment supplied by the provisioner. */
   readonly wrenEnvironment?: Readonly<NodeJS.ProcessEnv>;
   readonly wrenBinary: string;
@@ -28,6 +30,16 @@ export async function prepareCapturedNativeComponentHost(
   const capturedScope = structuredClone(scope);
   const bindings = await captureBindings(irDocument, options);
   return prepareNativeComponentHost(irDocument, capturedScope, bindings);
+}
+
+/** Same captured project/credential authority, with the single answer-query root pinned. */
+export async function prepareCapturedStructuredAskHost(
+  irDocument: string, scope: Readonly<Record<string, unknown>>, options: NativeComponentContextOptions,
+): Promise<NativeComponentPreparation> {
+  if (options.vendor.vendor !== "claude" || options.identity.vendor !== "claude") throw new Error("Structured OpenShell Ask requires Claude");
+  const capturedScope = structuredClone(scope);
+  const bindings = await captureBindings(irDocument, options);
+  return observeStructured(options.diagnostics, "host_admission", () => prepareStructuredAskComponentHost(irDocument, capturedScope, bindings));
 }
 
 /** Direct-session variant shares the same captured project/credential provenance. */
@@ -54,19 +66,19 @@ async function captureBindings(irDocument: string, options: NativeComponentConte
     if (!isDeepStrictEqual(currentIdentity(), identity)) throw new Error("Native component context binding expired");
   };
   check();
-  const ir = z.object({ warble_ir_version: z.literal("0.9"), components: z.array(z.object({
+  const ir = observeStructured(options.diagnostics, "context_ir", () => z.object({ warble_ir_version: z.literal("0.9"), components: z.array(z.object({
     id: z.string(), context_binding: z.record(z.string(), z.unknown()).optional(),
-  }).passthrough()) }).passthrough().parse(JSON.parse(irDocument));
+  }).passthrough()) }).passthrough().parse(JSON.parse(irDocument)));
   if (new Set(ir.components.map((component) => component.id)).size !== ir.components.length) throw new Error("Duplicate component identity");
-  const fingerprint = await hashDirectory(project);
-  const accessIdentity = await captureWrenAccessIdentity(project, options.wrenEnvironment);
+  const fingerprint = await observeStructuredAsync(options.diagnostics, "context_identity", () => hashDirectory(project));
+  const accessIdentity = await observeStructuredAsync(options.diagnostics, "context_identity", () => captureWrenAccessIdentity(project, options.wrenEnvironment));
   check();
   const scratch = await mkdtemp(path.join(os.tmpdir(), "genbi-native-context-"));
   try {
     const snapshotPath = path.join(scratch, "context.json");
-    await generatePreparedContext(options.contextLoaderBinary, project, snapshotPath, signal);
-    const snapshot = z.object({ context_version: z.literal(2), parseable: z.literal(true) }).passthrough()
-      .parse(JSON.parse(await readFile(snapshotPath, "utf8")));
+    await observeStructuredAsync(options.diagnostics, "context_producer", () => { options.assertExecutableCurrent?.(); return generatePreparedContext(options.contextLoaderBinary, project, snapshotPath, signal); });
+    const snapshot = await observeStructuredAsync(options.diagnostics, "context_snapshot", async () => z.object({ context_version: z.literal(2), parseable: z.literal(true) }).passthrough()
+      .parse(JSON.parse(await readFile(snapshotPath, "utf8"))));
     await accessIdentity.assertCurrent();
     if (fingerprint !== await hashDirectory(project)) throw new Error("Native component project changed during context capture");
     check();
@@ -77,8 +89,8 @@ async function captureBindings(irDocument: string, options: NativeComponentConte
       if (!binding || typeof binding.project !== "string" || path.resolve(binding.project) !== project) return [];
       return [[component.id, { binding, snapshot }]];
     }));
-    const bindings = createNativeComponentRuntimeBindings({ ...options, identity, contexts, currentIdentity, assertCurrent: check,
-      wren: { executable: options.wrenBinary, project, fingerprint, identity: accessIdentity } });
+    const bindings = observeStructured(options.diagnostics, "runtime_bindings", () => createNativeComponentRuntimeBindings({ ...options, identity, contexts, currentIdentity, assertCurrent: check,
+      wren: { executable: options.wrenBinary, project, fingerprint, identity: accessIdentity } }));
     return bindings;
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }

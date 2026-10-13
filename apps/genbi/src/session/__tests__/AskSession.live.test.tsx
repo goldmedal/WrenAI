@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Route, Routes, useLocation } from 'react-router-dom';
 import { renderWithProviders } from '@/test/utils';
@@ -14,6 +14,7 @@ vi.mock('@/bff/env', () => ({
 const createSession = vi.fn();
 const getSession = vi.fn();
 const listSessions = vi.fn();
+const getStructuredAskReadiness = vi.fn();
 const postTurn = vi.fn();
 const turnStreamUrl = vi.fn(
   (sessionId: string, turnId: string) => `http://bff.test/api/sessions/${sessionId}/stream?turn=${turnId}`,
@@ -26,6 +27,7 @@ vi.mock('@/bff/client', () => ({
   postTurn: (...args: unknown[]) => postTurn(...args),
   turnStreamUrl: (...args: [string, string]) => turnStreamUrl(...args),
   getRuntimeSettingsReadiness: () => Promise.resolve({ valid: true as const }),
+  getStructuredAskReadiness: () => getStructuredAskReadiness(),
 }));
 
 vi.mock('echarts', () => ({
@@ -56,15 +58,35 @@ function SessionsAskWithLocationProbe() {
 beforeEach(() => {
   createSession.mockReset();
   getSession.mockReset();
-  listSessions.mockReset();
+  listSessions.mockReset().mockResolvedValue([]);
   postTurn.mockReset();
+  getStructuredAskReadiness.mockReset().mockResolvedValue({ active: { backend: 'local', state: 'ready', ask: true, reason: 'Synthetic local runtime.' } });
   useSessionStore.setState(
-    { sessionsById: {}, streaming: {}, streamError: {}, streamErrorCode: {}, backendSessionId: {}, sessionList: [] },
+    { sessionsById: {}, streaming: {}, streamError: {}, streamErrorCode: {}, backendSessionId: {}, sessionList: [], structuredReadiness: undefined, structuredReadinessError: undefined },
     false,
   );
 });
 
 describe('AskSession (live mode) — draft to real-id transition', () => {
+  it('keeps unknown or unavailable Ask closed without creating a session', async () => {
+    getStructuredAskReadiness.mockImplementation(() => new Promise(() => {}));
+    renderWithProviders(<SessionsAskWithLocationProbe />, { route: '/sessions/ask' });
+    expect(screen.getByLabelText('Ask a question')).toBeDisabled();
+    useSessionStore.setState({ structuredReadiness: { backend: 'openshell', state: 'unavailable', ask: false, reason: 'Unavailable.' } });
+    expect(await screen.findByText('Structured Ask is unavailable.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Ask a question')).toBeDisabled(); expect(createSession).not.toHaveBeenCalled(); expect(postTurn).not.toHaveBeenCalled();
+  });
+  it('describes OpenShell model and host queries without exposing identity, and ignores an older ready response', async () => {
+    let old!: (value: unknown) => void;
+    getStructuredAskReadiness.mockImplementationOnce(() => new Promise(resolve => { old = resolve; })).mockResolvedValueOnce({ active: { backend: 'openshell', state: 'ready', ask: true, reason: 'Ready.', modelExecution: 'openshell', queryExecution: 'host', supportedAgents: ['answer_query'] } });
+    renderWithProviders(<SessionsAskWithLocationProbe />, { route: '/sessions/ask' });
+    await useSessionStore.getState().loadStructuredReadiness();
+    expect(await screen.findByText('The model runs in OpenShell. Read-only Wren queries execute on the host.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText('Ask a question')).toBeEnabled());
+    old({ active: { backend: 'local', state: 'ready', ask: true } }); await Promise.resolve();
+    expect(useSessionStore.getState().structuredReadiness?.backend).toBe('openshell');
+    expect(screen.queryByText(/synthetic@example|accountUuid|refreshToken/)).not.toBeInTheDocument();
+  });
   it('asking a question from the Sessions-owned draft lazily creates the backend session, keeps the thread visible throughout, and replaces the route onto the real id', async () => {
     createSession.mockResolvedValueOnce({ id: 'real-9', title: 'x', createdAt: 'now', updatedAt: 'now' });
     postTurn.mockResolvedValueOnce({ turnId: 't1', clarify: { prompt: 'Which range?', chips: ['This month'] } });
@@ -76,6 +98,7 @@ describe('AskSession (live mode) — draft to real-id transition', () => {
 
     expect(screen.getByTestId('location-probe').textContent).toBe('/sessions/ask');
 
+    await waitFor(() => expect(screen.getByLabelText('Ask a question')).toBeEnabled());
     await user.type(screen.getByLabelText('Ask a question'), 'How much revenue this quarter');
     await user.click(screen.getByRole('button', { name: /send/i }));
 
@@ -110,6 +133,7 @@ describe('AskSession (live mode) — draft to real-id transition', () => {
     listSessions.mockResolvedValue([{ id: 'real-9', title: 'x', updatedAt: 'now' }]);
     const user = userEvent.setup();
     renderWithProviders(<SessionsAskWithLocationProbe />, { route: '/sessions/ask' });
+    await waitFor(() => expect(screen.getByLabelText('Ask a question')).toBeEnabled());
     await user.type(screen.getByLabelText('Ask a question'), 'How much revenue this quarter');
     await user.click(screen.getByRole('button', { name: /send/i }));
     await vi.waitFor(() => { expect(screen.getByTestId('location-probe').textContent).toBe('/sessions/ask/real-9'); });

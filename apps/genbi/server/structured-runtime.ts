@@ -1,8 +1,9 @@
+import { observeStructuredAsync, type StructuredDiagnosticObserver } from "./structured-diagnostics.js";
 import { enforceCompliance, type AuthChoice, type RouteOptions, type RouteResult, type SetupStepRunner, type SetupStepRunOptions, type SetupStepRunResult } from "../harness/index.js";
 import type { RuntimeBackendReadiness } from "./runtime-host/types.js";
 
 export type StructuredVendor = "codex" | "claude";
-export type StructuredBackend = "local" | "codex-app-server" | "claude-sandbox-runtime";
+export type StructuredBackend = "local" | "codex-app-server" | "claude-sandbox-runtime" | "openshell";
 export interface StructuredScope {
   readonly sessionId: string;
   readonly turnId: string;
@@ -23,9 +24,11 @@ export interface StructuredAdapter {
   setup?(options: SetupStepRunOptions, scope: StructuredScope): Promise<SetupStepRunResult>;
 }
 interface Options {
-  readonly selected: { readonly codex: "local" | "codex-app-server"; readonly claude: "local" | "claude-sandbox-runtime" };
+  readonly diagnostics?: StructuredDiagnosticObserver;
+  readonly selected: { readonly codex: "local" | "codex-app-server"; readonly claude: "local" | "claude-sandbox-runtime" | "openshell" };
   /** Explicit compatibility opt-in, never proof of vendor sandboxing. */
   readonly allowLocal: boolean;
+  readonly onRevoke?: () => void;
   readonly deployment?: RouteOptions["deployment"];
   readonly localRoute: (options: RouteOptions) => Promise<RouteResult>;
   readonly localSetupFor: (auth: AuthChoice) => SetupStepRunner | undefined;
@@ -46,7 +49,13 @@ export class StructuredRuntime {
     const candidate = this.options.adapters?.[vendor];
     return candidate?.vendor === vendor && candidate.backend === this.options.selected[vendor] ? candidate : undefined;
   }
-  async readiness() {
+  /** Pure gate used before operation-owned durable writes. */
+  assertOperationSupported(auth: AuthChoice, operation: "ask" | "setup" | "native"): void {
+    this.assertActive();
+    if (auth.mode === "subscription" && this.options.selected[auth.provider] === "openshell"
+      && (operation !== "ask" || !this.adapter(auth.provider)?.ask)) throw new StructuredRuntimeError("unsupported");
+  }
+  async readiness(auth?: AuthChoice) {
     const entries = await Promise.all((["codex", "claude"] as const).map(async (vendor) => {
       const backend = this.options.selected[vendor];
       const localReady = this.options.allowLocal && !this.lifetime.signal.aborted;
@@ -57,9 +66,12 @@ export class StructuredRuntime {
       const ready = !this.lifetime.signal.aborted && probe?.state === "ready";
       return [vendor, { backend, state: ready ? "ready" : "unavailable", ask: ready && !!adapter?.ask, setup: ready && !!adapter?.setup,
         reason: !adapter ? "Selected vendor backend is not configured." : !ready ? "Selected vendor backend is not ready." : "Only explicitly supported operations are available.",
+        ...(backend === "openshell" ? { modelExecution: "openshell", queryExecution: "host", supportedAgents: ["answer_query"] } : {}),
         ...(probe && probe.state !== "ready" ? { code: probe.code } : {}) }] as const;
     }));
-    return Object.fromEntries(entries);
+    const vendors = Object.fromEntries(entries);
+    return { ...vendors, ...(auth ? { active: auth.mode === "subscription" ? vendors[auth.provider]
+      : { backend: "in-process", state: this.lifetime.signal.aborted ? "unavailable" : "ready", ask: !this.lifetime.signal.aborted, reason: "Configured in-process execution." } } : {}) };
   }
   async route(options: RouteOptions, scope: StructuredScope): Promise<RouteResult> {
     return this.run(options.authChoice, scope, async (adapter, guarded) => {
@@ -90,31 +102,32 @@ export class StructuredRuntime {
       if (signal.aborted) throw new StructuredRuntimeError("cancelled");
       try { scope.assertCurrent(); } catch { throw new StructuredRuntimeError("stale"); }
     };
-    const pending = (async () => {
+    const diagnostics = auth.mode === "subscription" && this.options.selected[auth.provider] === "openshell" ? this.options.diagnostics : undefined;
+    const pending = observeStructuredAsync(diagnostics, "runtime_admission", async () => {
       assertCurrent(); enforceCompliance(auth, { deployment: this.options.deployment ?? deployment });
       let adapter: StructuredAdapter | undefined;
       if (auth.mode === "subscription" && this.options.selected[auth.provider] !== "local") {
         adapter = this.adapter(auth.provider);
         if (!adapter) throw new StructuredRuntimeError("unavailable");
         let ready: RuntimeBackendReadiness;
-        try { ready = await adapter.probe(); } catch { throw new StructuredRuntimeError("unavailable"); }
+        try { ready = await observeStructuredAsync(diagnostics, "runtime_readiness", () => adapter!.probe()); } catch { throw new StructuredRuntimeError("unavailable"); }
         assertCurrent();
         if (ready.state !== "ready") throw new StructuredRuntimeError("unavailable");
       } else if (auth.mode === "subscription" && !this.options.allowLocal) throw new StructuredRuntimeError("unavailable");
       let result: T;
-      try { result = await operation(adapter, { sessionId: scope.sessionId, turnId: scope.turnId, signal, assertCurrent }); }
+      try { result = await observeStructuredAsync(diagnostics, "adapter_dispatch", () => operation(adapter, { sessionId: scope.sessionId, turnId: scope.turnId, signal, assertCurrent })); }
       catch (error) {
         if (adapter && !(error instanceof StructuredRuntimeError)) throw new StructuredRuntimeError(signal.aborted ? "cancelled" : "failed");
         throw error;
       }
       assertCurrent(); return result;
-    })();
+    });
     this.active.add(pending);
     void pending.catch((error) => { if (error instanceof StructuredRuntimeError && error.code === "cleanup") this.cleanupFailed = true; }).finally(() => { this.active.delete(pending); this.controllers.delete(controller); });
     return pending;
   }
   assertActive(): void { if (this.lifetime.signal.aborted) throw new StructuredRuntimeError("cancelled"); }
-  revoke(): void { for (const controller of this.controllers) controller.abort(); }
+  revoke(): void { try { this.options.onRevoke?.(); } finally { for (const controller of this.controllers) controller.abort(); } }
   async shutdown(): Promise<void> {
     this.lifetime.abort();
     await Promise.allSettled([...this.active]);

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync, type BigIntStats } from "node:fs";
 import path from "node:path";
 import { userInfo } from "node:os";
 import type { EnrichmentBinding } from "./enrichment.js";
@@ -100,8 +100,40 @@ function canonicalExecutable(executable: string): string {
   }
 }
 
+function sameExecutableMetadata(before: BigIntStats, after: BigIntStats): boolean {
+  return (["dev", "ino", "mode", "size", "mtimeNs", "ctimeNs"] as const).every(key => before[key] === after[key]);
+}
+
 function digestExecutable(executable: string): NativeSha256 {
-  return `sha256:${createHash("sha256").update(readFileSync(executable)).digest("hex")}`;
+  const pathBefore = lstatSync(executable, { bigint: true });
+  if (!pathBefore.isFile() || (pathBefore.mode & 0o111n) === 0n) return unavailable();
+  const fd = openSync(executable, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let failed = false;
+  try {
+    const before = fstatSync(fd, { bigint: true });
+    if (!before.isFile() || !sameExecutableMetadata(pathBefore, before)) return unavailable();
+    // Keep readFileSync's existing oversized-file error contract. Ordinary
+    // executable checks use a fresh bounded buffer, never a retained digest.
+    const hash = createHash("sha256");
+    if (before.size > 2_147_483_647n) hash.update(readFileSync(fd));
+    else {
+      const size = Number(before.size);
+      const buffer = Buffer.allocUnsafe(Math.min(size, 1_048_576) || 1);
+      let position = 0;
+      while (position < size) {
+        const count = readSync(fd, buffer, 0, Math.min(buffer.length, size - position), position);
+        if (count === 0) return unavailable();
+        hash.update(buffer.subarray(0, count)); position += count;
+      }
+      if (readSync(fd, buffer, 0, 1, position) !== 0) return unavailable();
+    }
+    const after = fstatSync(fd, { bigint: true });
+    const pathAfter = lstatSync(executable, { bigint: true });
+    if (!sameExecutableMetadata(before, after) || !pathAfter.isFile()
+      || !sameExecutableMetadata(after, pathAfter) || realpathSync(executable) !== executable) return unavailable();
+    return `sha256:${hash.digest("hex")}`;
+  } catch (error) { failed = true; throw error; }
+  finally { try { closeSync(fd); } catch (error) { if (!failed) throw error; } }
 }
 
 export function attestNativeExecutable(name: NativeExecutableName, executable: string): NativeExecutableIdentity {
