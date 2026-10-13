@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -96,5 +96,126 @@ describe("context gate judges success from execution evidence", () => {
     expect(parseSetupTerminal("SETUP_STATUS: ok", { ...context, worklog })).toMatchObject({ status: "error" });
     const good = [exec(DISCOVERY), exec("cd jaffle && wren context validate", { cwd: "." }), exec("cd . && wren context build", { cwd: "jaffle" })];
     expect(parseSetupTerminal("SETUP_STATUS: ok", { ...context, worklog: good })).toMatchObject({ status: "ok" });
+  });
+});
+
+const BARE_DISCOVERY = `WREN_PYTHON="$(sed -n '1s/^#!//p' "$(command -v wren)")"; "$WREN_PYTHON" -c "from wren.profile import resolve_profile_for_project; from wren.connector import x; print('select table_name from information_schema.columns')"`;
+
+function lifecycle(prefix: string, extra: Record<string, unknown> = {}): SetupWorklogEntry[] {
+  return [exec(BARE_DISCOVERY, extra), exec(`${prefix}wren context validate`, extra), exec(`${prefix}wren context build`, extra)];
+}
+
+describe("cd target variants", () => {
+  it.each(["./jaffle", "jaffle/", '"jaffle"', "'jaffle'"])("accepts cd %s", (dir) => {
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...project(), worklog: lifecycle(`cd ${dir} && `) })).toMatchObject({ status: "ok" });
+  });
+
+  it.each(["jaffle/../other", "other", "$(echo jaffle)", "`echo jaffle`", '"$(echo jaffle)"', "~"])("rejects cd %s", (dir) => {
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...project(), worklog: lifecycle(`cd ${dir} && `) })).toMatchObject({ status: "error" });
+  });
+
+  it("accepts a symlink to the project and rejects a symlink to another directory", () => {
+    const context = project();
+    mkdirSync(path.join(context.root, "other"));
+    symlinkSync(path.join(context.root, "jaffle"), path.join(context.root, "to-project"));
+    symlinkSync(path.join(context.root, "other"), path.join(context.root, "to-other"));
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...context, worklog: lifecycle("cd to-project && ") })).toMatchObject({ status: "ok" });
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...context, worklog: lifecycle("cd to-other && ") })).toMatchObject({ status: "error" });
+  });
+
+  it("does not count a write action carrying a lifecycle command string", () => {
+    const write: SetupWorklogEntry = {
+      label: "setup_execution",
+      input: { action: "write", command: "wren context build", path: "x", content: "y" },
+      detail: '{"written":true,"path":"x","bytes":1}',
+    };
+    const worklog = [exec(BARE_DISCOVERY), exec("wren context validate"), write];
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...project(), worklog })).toMatchObject({ diagnostic: { code: "context_build_missing" } });
+  });
+
+  it("does not count a command that merely echoes the lifecycle text", () => {
+    const worklog = [exec(BARE_DISCOVERY), exec("cd jaffle && echo wren context validate"), exec("wren context build")];
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...project(), worklog })).toMatchObject({ status: "error" });
+  });
+});
+
+describe("explicit cwd binds the evidence to the project", () => {
+  it("rejects bare commands recorded with a cwd outside the project and quotes them", () => {
+    const worklog = [exec(BARE_DISCOVERY), exec("wren context validate", { cwd: "other" })];
+    const result = parseSetupTerminal("SETUP_STATUS: ok", { ...project(), worklog });
+    expect(result).toMatchObject({ status: "error", diagnostic: { code: "context_validate_missing" } });
+    expect(result.message).toContain("`wren context validate`");
+    expect(result.message).toContain("`cwd` field");
+  });
+
+  it("rejects discovery recorded with a cwd outside the project", () => {
+    const worklog = [exec(BARE_DISCOVERY, { cwd: "other" }), exec("wren context validate"), exec("wren context build")];
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...project(), worklog })).toMatchObject({ status: "error" });
+  });
+
+  it("accepts a cwd naming the project, relative or absolute, and keeps unrecorded cwd as before", () => {
+    const context = project();
+    const abs = path.join(context.root, "jaffle");
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...context, worklog: lifecycle("", { cwd: "jaffle" }) })).toMatchObject({ status: "ok" });
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...context, worklog: lifecycle("", { cwd: abs }) })).toMatchObject({ status: "ok" });
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...context, worklog: lifecycle("") })).toMatchObject({ status: "ok" });
+  });
+
+  it("rejects a cwd of the workspace root for a bare command", () => {
+    const context = project();
+    expect(parseSetupTerminal("SETUP_STATUS: ok", { ...context, worklog: lifecycle("", { cwd: "." }) })).toMatchObject({ status: "error" });
+  });
+});
+
+describe("secret redaction in gate messages", () => {
+  it("masks env values in a quoted unrecognised command", () => {
+    const worklog = [exec(BARE_DISCOVERY), exec("PGPASSWORD=s3cret wren context validate && echo done")];
+    const result = parseSetupTerminal("SETUP_STATUS: ok", { ...project(), worklog });
+    expect(result.message).toContain("`PGPASSWORD=*** wren context validate && echo done`");
+    expect(JSON.stringify(result)).not.toContain("s3cret");
+  });
+
+  it.each([
+    ["env TOKEN=abc wren context validate; echo", "env TOKEN=*** wren context validate; echo"],
+    ["cd other && A=\"x y\" B='z w' wren context validate", "cd other && A=*** B=*** wren context validate"],
+    ["echo hi && DB_URL=postgres://u:p@h/db wren context validate ; x", "echo hi && DB_URL=*** wren context validate ; x"],
+  ])("redacts %s", (command, expected) => {
+    const worklog = [exec(BARE_DISCOVERY), exec(command)];
+    const result = parseSetupTerminal("SETUP_STATUS: ok", { ...project(), worklog });
+    expect(result.message).toContain(expected);
+    expect(JSON.stringify(result)).not.toMatch(/abc|x y|z w|u:p/);
+  });
+
+  it("redacts and caps the failed-discovery message", () => {
+    const secret = `PGPASSWORD=hunter2 ${BARE_DISCOVERY} # ${"x".repeat(400)}`;
+    const worklog = [exec(secret, {}, 1)];
+    const result = parseSetupTerminal("SETUP_STATUS: ok", {
+      ...project(),
+      worklog,
+      priorContextLifecycle: "discovery",
+    });
+    expect(result.diagnostic?.code).toBe("context_schema_discovery_failed");
+    expect(result.message).not.toContain("hunter2");
+    expect(result.message).toContain("PGPASSWORD=***");
+    expect(result.message).toContain("...");
+    expect(result.message.length).toBeLessThan(600);
+  });
+
+  it("redacts the failed-exec reframing for an agent-reported error", () => {
+    const worklog = [exec("SECRET=top wren generate-mdl", {}, 2)];
+    const result = parseSetupTerminal("SETUP_STATUS: error - no tables", { ...project(), worklog });
+    expect(result.message).toContain("SECRET=***");
+    expect(result.message).not.toContain("top ");
+  });
+});
+
+describe("SETUP_STATUS stays mandatory for other steps", () => {
+  it.each(["connect", "connect_resume"])("does not relax a missing status for %s", (stepKey) => {
+    const context = project();
+    writeFileSync(path.join(context.root, "jaffle", ".wren-validated"), "");
+    expect(parseSetupTerminal("done", { ...context, stepKey, worklog: OBSERVED })).toMatchObject({
+      status: "error",
+      failureKind: "missing_terminal_status",
+    });
   });
 });
