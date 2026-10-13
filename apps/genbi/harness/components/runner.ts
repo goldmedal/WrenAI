@@ -600,6 +600,10 @@ export class ComponentRunner {
         // A returned (not thrown) failure, e.g. the model's output did not satisfy the render contract: say why, with the callee's own static message.
         logComponentFailure("normalize", result.code, new Error(result.message), { component: id, depth, ...(lastStep ? { step: lastStep } : {}) });
       }
+      if (result.status === "refused") {
+        // A refusal's message is host-authored; logging it keeps a refused layout diagnosable.
+        logComponentFailure("normalize_refused", result.code, new Error(result.message), { component: id, depth, ...(lastStep ? { step: lastStep } : {}) });
+      }
       this.host.onEvent?.({ ...event, kind: "call.finish", status: result.status === "ok" ? "ok" : "error" });
       return result;
     } catch (error) {

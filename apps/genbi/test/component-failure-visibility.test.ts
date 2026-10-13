@@ -118,25 +118,55 @@ describe("generate_dashboard failure points (scripted model, no live calls)", ()
     expect(JSON.stringify(run.result)).toContain("2025-01-01 00:00:00");
   });
 
-  const failing: readonly [string, string, string, RegExp][] = [
-    ["plain text instead of JSON", "Here is the dashboard: two charts, customers by plan and by month.", "invalid_result", /non-JSON/],
-    ["JSON wrapped in prose (not fenced)", `Here is your dashboard:\n${asEnvelope(goodBlocks())}\nLet me know!`, "invalid_result", /non-JSON/],
-    ["chart rows as objects instead of positional rows", asEnvelope([chart(PLAN_SQL, { rows: PLAN_ROWS }), definition(PLAN_SQL)]), "invalid_result", /render contract/],
-    ["chart without its x field", asEnvelope([chart(PLAN_SQL, { x: undefined }), definition(PLAN_SQL)]), "invalid_result", /render contract/],
-    ["chart_type outside the contract", asEnvelope([chart(PLAN_SQL, { chart_type: "donut" }), definition(PLAN_SQL)]), "invalid_result", /render contract/],
-    ["a block type outside the contract", asEnvelope([{ type: "heading", text: "Overview" }]), "invalid_result", /render contract/],
-    ["numbers as strings are fine for a cell but a string series is not", asEnvelope([chart(PLAN_SQL, { series: "customers" }), definition(PLAN_SQL)]), "invalid_result", /render contract/],
-  ];
-  it.each(failing)("%s ends in an error result with all sub-steps done", async (_name, text, code, detail) => {
-    const run = await runDashboard(text);
+  it("plain text instead of JSON stays a hard invalid_result error with all sub-steps done", async () => {
+    const run = await runDashboard("Here is the dashboard: two charts, customers by plan and by month.");
     expect(run.error).toBeInstanceOf(ComponentExecutionError);
-    expect((run.error as ComponentExecutionError).code).toBe(code);
+    expect((run.error as ComponentExecutionError).code).toBe("invalid_result");
     const finished = run.events.filter((event) => event.kind === "step.finish").map((event) => (event as { status?: string }).status);
     expect(finished.length).toBeGreaterThanOrEqual(4);
     expect(finished.every((status) => status === "ok")).toBe(true);
     expect(run.failureLines).toHaveLength(1);
-    expect(run.failureLines[0]).toMatchObject({ site: "normalize", code, component: "generate_dashboard", step: "compose_layout", depth: 0 });
-    expect(run.failureLines[0]!.detail).toMatch(detail);
+    expect(run.failureLines[0]).toMatchObject({ site: "normalize", code: "invalid_result", component: "generate_dashboard", step: "compose_layout", depth: 0 });
+    expect(run.failureLines[0]!.detail).toMatch(/non-JSON/);
+  });
+
+  it.each([
+    ["JSON wrapped in prose", `Here is your dashboard:\n${asEnvelope(goodBlocks())}\nLet me know!`],
+    ["JSON after reasoning tags and a fence", `<think>plan the charts</think>\n\`\`\`json\n${asEnvelope(goodBlocks())}\n\`\`\`\nDone.`],
+  ])("%s assembles exactly like bare JSON", async (_name, text) => {
+    const run = await runDashboard(text);
+    expect(run.error).toBeUndefined();
+    expect(run.result).toMatchObject({ kind: "answer", envelope: { verified: true } });
+    expect(run.failureLines).toEqual([]);
+  });
+
+  it("prose-wrapped JSON is still grounded as strictly: an invented value is refused", async () => {
+    const forged = chart(PLAN_SQL, { rows: [["free", 999], ["pro", 5]] });
+    const run = await runDashboard(`Here you go:\n${asEnvelope([forged, definition(PLAN_SQL)])}`);
+    expect(run.error).toBeUndefined();
+    expect(run.result).toMatchObject({ kind: "refusal" });
+  });
+
+  const violations: readonly [string, string, RegExp][] = [
+    ["chart rows as objects instead of positional rows", asEnvelope([chart(PLAN_SQL, { rows: PLAN_ROWS }), definition(PLAN_SQL)]), /block 1 \(chart\): field `rows` must be row\[\]/],
+    ["chart without its x field", asEnvelope([chart(PLAN_SQL, { x: undefined }), definition(PLAN_SQL)]), /block 1 \(chart\): field `x` must be string/],
+    ["chart_type outside the contract", asEnvelope([chart(PLAN_SQL, { chart_type: "donut" }), definition(PLAN_SQL)]), /block 1 \(chart\): field `chart_type`/],
+    ["a block type outside the contract", asEnvelope([{ type: "heading", text: "Overview" }]), /block 1 has a type that is not allowed \(allowed: kpi_card, table, chart, definition\)/],
+    ["a string series", asEnvelope([chart(PLAN_SQL, { series: "customers" }), definition(PLAN_SQL)]), /block 1 \(chart\): field `series` must be string\[\]/],
+    ["a second block violating after a good one", asEnvelope([chart(PLAN_SQL), definition(PLAN_SQL), chart(MONTH_SQL, { rows: MONTH_ROWS })]), /block 3 \(chart\): field `rows`/],
+    ["no blocks array", JSON.stringify({ summary: "nothing" }), /no `blocks` array/],
+  ];
+  it.each(violations)("%s is a refusal that says why, and is logged", async (_name, text, reason) => {
+    const run = await runDashboard(text);
+    expect(run.error).toBeUndefined();
+    expect(run.result).toMatchObject({ kind: "refusal" });
+    const shown = (run.result as { reason: string }).reason;
+    expect(shown).toMatch(/^The result did not match the render contract: /);
+    expect(shown).toMatch(reason);
+    expect(shown).not.toMatch(/heading|donut/);
+    expect(run.failureLines).toHaveLength(1);
+    expect(run.failureLines[0]).toMatchObject({ site: "normalize_refused", code: "callee_refused", component: "generate_dashboard", step: "compose_layout" });
+    expect(run.failureLines[0]!.detail).toMatch(reason);
   });
 
   const refusing: readonly [string, string][] = [
@@ -148,7 +178,7 @@ describe("generate_dashboard failure points (scripted model, no live calls)", ()
     const run = await runDashboard(text);
     expect(run.error).toBeUndefined();
     expect(run.result).toMatchObject({ kind: "refusal" });
-    expect(run.failureLines).toEqual([]);
+    expect(run.failureLines.every((line) => line.site === "normalize_refused")).toBe(true);
   });
 
   it("a query result over the byte cap fails the tool call with invalid_result and says so in the log", async () => {

@@ -128,7 +128,14 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
     return { status: "ok", output: { kind: "value", value: { ...chosen.table, verified: true, summary: "Query completed.", definition } },
       provenance: { verified: true, definition } };
   }
-  const result = normalizeComponentResult(typeof lastProduct === "string" ? lastProduct : JSON.stringify(lastProduct), render).value;
+  // A prose-wrapped or fenced JSON value is read with the same tolerant parse as every other terminal;
+  // the value is then validated and grounded exactly as strictly as a bare one.
+  const rendered = typeof lastProduct === "string" ? parseTerminalJson(lastProduct) : { ok: true as const, value: lastProduct };
+  const result = normalizeComponentResult(rendered.ok ? JSON.stringify(rendered.value) : String(lastProduct), render).value;
+  // A parsed value that breaks the render contract is the model's invalid layout, not a host fault: refuse with the first violation.
+  if (result.status === "error" && result.code === "invalid_result" && rendered.ok && /render contract/.test(result.message)) {
+    return { status: "refused", code: "callee_refused", message: `The result did not match the render contract: ${describeRenderViolation(rendered.value, render)}.` };
+  }
   if (result.status !== "ok") return result;
   const composed = component.steps.some((step) => step.calls.length > 0);
   if (composed) {
@@ -146,6 +153,31 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // A render with data-bearing blocks cannot earn provenance from prose alone.
   if (result.output.kind === "render" && result.output.blocks.some((block) => ["table", "chart", "kpi_card"].includes(String(block.type))) && data.length === 0) return refused();
   return { ...result, provenance: { ...result.provenance, verified: data.length > 0 } };
+}
+
+const VIOLATION_TYPE_LIMIT = 40;
+/**
+ * The first render-contract violation in a parsed value, in host-authored words that never echo model text
+ * beyond contract names. Each field is re-checked on its own through the SDK validator, so this explains
+ * the SDK's verdict without re-implementing its field types.
+ */
+export function describeRenderViolation(value: unknown, contract: readonly RenderBlock[]): string {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return "the result is not an object with a `blocks` array";
+  const envelope = value as Record<string, unknown>;
+  if (!Array.isArray(envelope["blocks"])) return "the result has no `blocks` array";
+  const allowed = contract.map((block) => block.type);
+  for (const [index, raw] of envelope["blocks"].entries()) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `block ${index + 1} is not an object`;
+    const block = raw as Record<string, unknown>;
+    const expected = contract.find((candidate) => candidate.type === block["type"]);
+    if (typeof block["type"] !== "string") return `block ${index + 1} has no \`type\``;
+    if (!expected) return `block ${index + 1} has a type that is not allowed (allowed: ${allowed.join(", ").slice(0, VIOLATION_TYPE_LIMIT * 4)})`;
+    for (const [field, type] of Object.entries(expected.fields)) {
+      const probe = normalizeComponentResult(JSON.stringify({ blocks: [block] }), [{ type: expected.type, fields: { [field]: type } }]).value;
+      if (probe.status !== "ok") return `block ${index + 1} (${expected.type}): field \`${field}\` must be ${type}`;
+    }
+  }
+  return "the summary is not a string";
 }
 
 function grounded(render: readonly Record<string, unknown>[], data: readonly z.infer<typeof table>[], definitions: readonly Lineage[]): boolean {
