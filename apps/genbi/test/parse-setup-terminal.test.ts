@@ -489,13 +489,15 @@ describe("parseSetupTerminal", () => {
     // out of scope for this ticket to fix).
 
     it("accepts direct lifecycle invocations with the structured cwd and environment prefixes the execution policy supports", () => {
+      const base = makeContext("acme");
+      const projectCwd = path.join(base.root, "acme");
       const context = {
-        ...makeContext("acme"),
+        ...base,
         stepKey: "context" as const,
         worklog: [
-          { label: "setup_execution", input: { command: 'wren --sql "SELECT table_name FROM information_schema.tables" -o json', cwd: "/workspace/acme" }, detail: '{"exitCode":0}' },
-          { label: "setup_execution", input: { command: "WREN_HOME=/workspace/.wren wren context validate", cwd: "/workspace/acme" }, detail: '{"exitCode":0}' },
-          { label: "setup_execution", input: { command: "env WREN_HOME=/workspace/.wren wren context build", cwd: "/workspace/acme" }, detail: '{"exitCode":0}' },
+          { label: "setup_execution", input: { command: 'wren --sql "SELECT table_name FROM information_schema.tables" -o json', cwd: projectCwd }, detail: '{"exitCode":0}' },
+          { label: "setup_execution", input: { command: "WREN_HOME=/workspace/.wren wren context validate", cwd: projectCwd }, detail: '{"exitCode":0}' },
+          { label: "setup_execution", input: { command: "env WREN_HOME=/workspace/.wren wren context build", cwd: projectCwd }, detail: '{"exitCode":0}' },
         ],
       };
       scaffold(context);

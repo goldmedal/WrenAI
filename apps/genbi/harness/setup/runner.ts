@@ -1487,6 +1487,15 @@ export interface ProjectBinding {
 const CD_PREFIX = /^\s*cd\s+("[^"$`\\]*"|'[^']*'|[^\s;&|<>()$`\\'"~]+)\s*&&\s*([\s\S]*)$/;
 const STARTS_WITH_CD = /^\s*cd(?:\s|$)/;
 
+/**
+ * A recorded relative `cwd` resolves against the tool's own root: the workspace
+ * for the in-process tool, the project for Codex local (whose tool root is the
+ * project directory for project steps).
+ */
+function recordedCwdBase(entry: SetupWorklogEntry, cwd: string, binding: ProjectBinding): string {
+  return path.resolve(entry.label === CODEX_SETUP_EXECUTION_TOOL_NAME ? binding.projectDir : binding.root, cwd);
+}
+
 function samePath(a: string, b: string): boolean {
   const resolvedA = path.resolve(a);
   const resolvedB = path.resolve(b);
@@ -1513,7 +1522,13 @@ function samePath(a: string, b: string): boolean {
  * entry already exited 0, so the `cd` really resolved to that directory.
  */
 function projectLocalCommand(entry: SetupWorklogEntry, command: string, binding: ProjectBinding | undefined): string | undefined {
-  if (!STARTS_WITH_CD.test(command)) return command;
+  const explicitCwd = (entry.input as { cwd?: unknown } | undefined)?.cwd;
+  const recordedCwd = typeof explicitCwd === "string" && explicitCwd.length > 0 ? explicitCwd : undefined;
+  if (!STARTS_WITH_CD.test(command)) {
+    if (binding === undefined || recordedCwd === undefined) return command;
+    // A recorded cwd must itself be the project for a bare command to count.
+    return samePath(recordedCwdBase(entry, recordedCwd, binding), binding.projectDir) ? command : undefined;
+  }
   if (binding === undefined) return undefined;
   const match = CD_PREFIX.exec(command);
   if (!match) return undefined;
@@ -1521,11 +1536,7 @@ function projectLocalCommand(entry: SetupWorklogEntry, command: string, binding:
   const dir = raw.startsWith('"') || raw.startsWith("'") ? raw.slice(1, -1) : raw;
   const inner = match[2]!;
   if (dir.length === 0 || STARTS_WITH_CD.test(inner)) return undefined;
-  const explicitCwd = (entry.input as { cwd?: unknown } | undefined)?.cwd;
-  const bases =
-    typeof explicitCwd === "string" && explicitCwd.length > 0
-      ? [path.resolve(binding.root, explicitCwd)]
-      : [binding.root, binding.projectDir];
+  const bases = recordedCwd !== undefined ? [recordedCwdBase(entry, recordedCwd, binding)] : [binding.root, binding.projectDir];
   return bases.some((base) => samePath(path.resolve(base, dir), binding.projectDir)) ? inner : undefined;
 }
 
@@ -1657,7 +1668,7 @@ function scanRecordedContextLifecycle(
         continue;
       }
       if (contextLifecycleStage(entry, command, binding) !== undefined) {
-        outOfOrderObserved ??= `successful \`${command}\` ran before successful schema discovery`;
+        outOfOrderObserved ??= `successful ${quoteCommand(command)} ran before successful schema discovery`;
       }
       noteUnrecognised(entry, command);
       continue;
@@ -1669,7 +1680,7 @@ function scanRecordedContextLifecycle(
       if (nativeStage === "validate") {
         stage = "build";
       } else if (nativeStage === "build") {
-        outOfOrderObserved ??= `successful \`${command}\` ran before successful \`wren context validate\``;
+        outOfOrderObserved ??= `successful ${quoteCommand(command)} ran before successful \`wren context validate\``;
       }
       continue;
     }
@@ -1719,9 +1730,16 @@ function claimsNoTablesOrModels(message: string): boolean {
   return /\b(?:no|zero)\s+(?:tables?|models?)\b|\b0\s+(?:tables?|models?)\b/i.test(message);
 }
 
-/** Quotes a command for an error message, bounded so a long script cannot flood it. */
+const ENV_ASSIGNMENT_VALUE = /(^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;&|]*)/g;
+
+/** Masks the value of every `NAME=value` assignment (leading, after `env`, or after `&&`/`;`). */
+function redactEnvAssignments(command: string): string {
+  return command.replace(ENV_ASSIGNMENT_VALUE, "$1$2=***");
+}
+
+/** Quotes a command for an error message: env values redacted first, then bounded so a long script cannot flood it. */
 function quoteCommand(command: string): string {
-  const flat = command.replace(/\s+/g, " ").trim();
+  const flat = redactEnvAssignments(command).replace(/\s+/g, " ").trim();
   return `\`${flat.length > 300 ? `${flat.slice(0, 300)}...` : flat}\``;
 }
 
@@ -1758,7 +1776,7 @@ function verifyContextEvidence(context: SetupTerminalContext): SetupTerminalResu
       const exitCodeSuffix = discovery.exitCode !== undefined ? ` with exit code ${discovery.exitCode}` : "";
       return hostContractFailure(
         "context_schema_discovery_failed",
-        `\`${discovery.command}\` failed${exitCodeSuffix} during schema discovery — a model/build result cannot be accepted until that command/tool failure is resolved; this is not evidence that the connection or data source lacks tables.`,
+        `${quoteCommand(discovery.command)} failed${exitCodeSuffix} during schema discovery — a model/build result cannot be accepted until that command/tool failure is resolved; this is not evidence that the connection or data source lacks tables.`,
         discovery.exitCode !== undefined
           ? `the recorded schema-discovery command exited with code ${discovery.exitCode}`
           : "the recorded schema-discovery command failed",
@@ -1966,7 +1984,7 @@ export function parseSetupTerminal(finalText: string, context: SetupTerminalCont
     // `setup_execution` call that exited non-zero, and reframe if one is found.
     const failedExec = firstFailedExec(context.worklog);
     if (failedExec !== undefined) {
-      const command = failedExec.command !== undefined ? `\`${failedExec.command}\`` : "a command";
+      const command = failedExec.command !== undefined ? quoteCommand(failedExec.command) : "a command";
       const exitCodeSuffix = failedExec.exitCode !== undefined ? ` with exit code ${failedExec.exitCode}` : "";
       return {
         status: "error",
