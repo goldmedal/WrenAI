@@ -7,6 +7,7 @@ import { z } from "zod";
 import { hashDirectory } from "../compile/fingerprint.js";
 import type { ComponentAccess } from "./broker.js";
 import { redactForLog } from "./runner.js";
+import { dialectGuidance, readProjectSqlDialect } from "./sql-dialect.js";
 
 /**
  * The closed vocabulary of governed query failures a model may see. The wire carries the
@@ -33,16 +34,16 @@ const LOGGED_SQL_LIMIT = 2000;
 export class GovernedWrenError extends Error {
   /** The wire's own message, for the server log only: it never reaches `message`, a frame or a model. */
   wireMessage?: string;
-  constructor(readonly errorClass: GovernedErrorClass) {
-    super(`Governed Wren query failed [${errorClass}]: ${GOVERNED_ERROR_TEXT[errorClass]}`);
+  constructor(readonly errorClass: GovernedErrorClass, dialect?: string) {
+    super(`Governed Wren query failed [${errorClass}]: ${GOVERNED_ERROR_TEXT[errorClass]}${errorClass === "policy_rejected" && dialect ? ` ${dialectGuidance(dialect)}` : ""}`);
     this.name = "GovernedWrenError";
   }
 }
 /** Only the class crosses; a message from the wire is never forwarded, and an unknown class is `internal`. */
-function governedError(wire: string | { class: string }): GovernedWrenError {
+function governedError(wire: string | { class: string }, dialect?: string): GovernedWrenError {
   const named = typeof wire === "string" ? undefined : wire.class;
   const known = GOVERNED_ERROR_CLASSES.find((candidate) => candidate === named && candidate !== "transport");
-  const error = new GovernedWrenError(known ?? "internal");
+  const error = new GovernedWrenError(known ?? "internal", dialect);
   if (typeof wire !== "string" && "message" in wire && typeof wire.message === "string") error.wireMessage = wire.message;
   return error;
 }
@@ -94,6 +95,7 @@ export async function openWrenComponentAccess(options: {
 }): Promise<ComponentAccess> {
   options.signal.throwIfAborted();
   const identity = options.identity ?? await captureWrenAccessIdentity(options.project, options.environment);
+  const dialect = await readProjectSqlDialect(options.project);
   const assertProject = async () => {
     await identity.assertCurrent();
     if (await hashDirectory(options.project) !== options.fingerprint) throw new Error("Component project changed");
@@ -165,7 +167,7 @@ export async function openWrenComponentAccess(options: {
       if (value.id === 0 ? value.protocol === undefined || Object.keys(value).length !== 2
         : value.protocol !== undefined || (Object.hasOwn(value, "result") === Object.hasOwn(value, "error"))) throw unavailable();
       const waiter = pending; pending = undefined;
-      if (value.error !== undefined) waiter.reject(governedError(value.error)); else waiter.resolve(value.result);
+      if (value.error !== undefined) waiter.reject(governedError(value.error, dialect)); else waiter.resolve(value.result);
     } catch { abort(); }
   });
   if (options.signal.aborted) abort();
@@ -197,6 +199,7 @@ export async function openWrenComponentAccess(options: {
     return operation;
   };
   return {
+    ...(dialect ? { sqlDialect: dialect } : {}),
     query: (input, signal) => execute({ operation: "query", ...input }, signal),
     inspect: (signal) => execute({ operation: "inspect" }, signal), close,
   };

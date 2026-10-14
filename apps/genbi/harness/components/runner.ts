@@ -50,6 +50,8 @@ export interface BoundTool {
   readonly name: string;
   readonly source: string;
   readonly inputSchema?: Readonly<Record<string, unknown>>;
+  /** Model-visible tool description; absent means the tool's name stands in. */
+  readonly description?: string;
   execute(input: unknown, signal: AbortSignal): Promise<unknown>;
 }
 export interface ToolEvidence {
@@ -470,6 +472,7 @@ export class ComponentRunner {
         for (const grant of step.tools) {
           const tool = binding.tools.find((candidate) => candidate.name === grant.name && candidate.source === grant.source)!;
           if (tool.inputSchema) schemas[grant.name] = freeze(copy(tool.inputSchema, COMPONENT_LIMITS.requestBytes));
+          if (tool.description) descriptions[grant.name] = tool.description;
           scoped[grant.name] = (input) => {
             const pending = (async () => {
               assertActive();
