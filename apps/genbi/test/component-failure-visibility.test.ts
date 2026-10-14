@@ -173,21 +173,19 @@ describe("generate_dashboard failure points (scripted model, no live calls)", ()
     expect(run.result).toMatchObject({ kind: "answer", envelope: { verified: true } });
     expect((run.result as { envelope: { blocks: { chart_type?: string }[] } }).envelope.blocks[0]!.chart_type).toBe("bar");
   });
-  const synonyms: readonly [string, string][] = [
-    ...["column", "Columns", "bar_chart", "BarChart", "horizontal-bar", "stacked bar", " grouped_bar ", "histogram", "BAR"].map((v): [string, string] => [v, "bar"]),
-    ...["line_chart", "linechart", "time-series", "Time Series", "timeseries", "trend", "LINE"].map((v): [string, string] => [v, "line"]),
-    ...["donut", "Doughnut", "pie chart", "pie_chart", "Pie"].map((v): [string, string] => [v, "pie"]),
-    ...["area_chart", "Stacked-Area", "area"].map((v): [string, string] => [v, "area"]),
-    ...["scatter_plot", "ScatterPlot", "bubble", "scatter"].map((v): [string, string] => [v, "scatter"]),
-  ];
-  it.each(synonyms)("chart_type %j is read as %s", async (written, canonical) => {
+  it.each(["BAR", " Line ", "Pie", "AREA", "scatter"])("canonical chart_type %j is read in its canonical casing", async (written) => {
     const run = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: written }), definition(PLAN_SQL)]));
     expect(run.error).toBeUndefined();
     expect(run.result).toMatchObject({ kind: "answer" });
-    expect((run.result as { envelope: { blocks: { chart_type?: string }[] } }).envelope.blocks[0]!.chart_type).toBe(canonical);
+    expect((run.result as { envelope: { blocks: { chart_type?: string }[] } }).envelope.blocks[0]!.chart_type).toBe(written.trim().toLowerCase());
+  });
+  it.each(["column", "donut", "histogram", "bubble"])("chart_type %j is not guessed: it is refused and the value is logged", async (written) => {
+    const run = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: written }), definition(PLAN_SQL)]));
+    expect(run.result).toMatchObject({ kind: "refusal" });
+    expect(run.failureLines.find((line) => line["field"] === "chart_type")).toMatchObject({ site: "normalize_refused", value: written });
   });
   it("a normalized chart with an invented value is still refused by grounding", async () => {
-    const run = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: "Column", rows: [["free", 999], ["pro", 5]] }), definition(PLAN_SQL)]));
+    const run = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: "BAR", rows: [["free", 999], ["pro", 5]] }), definition(PLAN_SQL)]));
     expect(run.result).toMatchObject({ kind: "refusal" });
   });
   it("an unrecognised chart_type is refused, and only the log line names the value", async () => {

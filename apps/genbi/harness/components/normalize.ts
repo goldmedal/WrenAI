@@ -240,7 +240,7 @@ export function describeRenderViolation(value: unknown, contract: readonly Rende
   return diagnoseRenderViolation(value, contract).message;
 }
 const ENUM_LOG_LIMIT = 64;
-/** Structural, label-like fields whose string value may be logged; every other field is described by shape only. */
+/** Structural, label-like fields whose string value may be logged (`unit` is a short caption such as "USD", never a data value); every other field is described by shape only. */
 const LOGGABLE_STRING_FIELDS = new Set(["label", "title", "chart_type", "x", "type", "unit"]);
 /** A value as a log-safe description: the capped, redacted string for a structural field, otherwise only its JSON type and, for objects, key names. Never rows, numbers or other data. */
 function describeOffendingValue(field: string, value: unknown): string {
@@ -277,21 +277,15 @@ function diagnoseRenderViolation(value: unknown, contract: readonly RenderBlock[
 }
 
 const CHART_TYPES = ["bar", "line", "pie", "area", "scatter"] as const;
-const CHART_TYPE_SYNONYMS: Readonly<Record<string, (typeof CHART_TYPES)[number]>> = Object.freeze({
-  column: "bar", columns: "bar", bar_chart: "bar", barchart: "bar", horizontal_bar: "bar", stacked_bar: "bar", grouped_bar: "bar", histogram: "bar",
-  line_chart: "line", linechart: "line", time_series: "line", timeseries: "line", trend: "line",
-  donut: "pie", doughnut: "pie", pie_chart: "pie",
-  area_chart: "area", stacked_area: "area",
-  scatter_plot: "scatter", scatterplot: "scatter", bubble: "scatter",
-});
-/** The canonical chart type for a model-written one: canonical values in any casing, the listed synonyms, else undefined. */
+/** The canonical chart type for a model-written one: a canonical value in any casing or with surrounding whitespace, else undefined. Nothing else is guessed. */
 export function canonicalChartType(value: string): (typeof CHART_TYPES)[number] | undefined {
-  const key = value.trim().toLowerCase().replace(/[-\s]+/g, "_");
-  return CHART_TYPES.find((type) => type === key) ?? CHART_TYPE_SYNONYMS[key];
+  const key = value.trim().toLowerCase();
+  return CHART_TYPES.find((type) => type === key);
 }
 /**
- * Sets a missing `chart_type` on a chart block to `bar` and maps unambiguous synonyms to the canonical
- * value. Any other value is left exactly as written, so the render contract still refuses it. Rows,
+ * Sets a missing `chart_type` on a chart block to `bar` and restores the casing of a canonical value. Any
+ * other value (a synonym such as `column`) is left exactly as written, so the render contract refuses it and a
+ * declared repair step can fix it. Rows,
  * `x`, `series` and every other field are untouched, and grounding runs on the normalized block.
  */
 export function normalizeChartTypes(value: unknown): unknown {

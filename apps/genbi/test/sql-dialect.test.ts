@@ -32,7 +32,9 @@ function coreMapping(): Record<string, string> | undefined {
 const core = coreMapping();
 
 describe("SQL dialect of a bound project", () => {
-  it.skipIf(core === undefined)("mirrors core/wren's get_sqlglot_dialect for every data source it lists", () => {
+  // Locally the check skips when core/wren is not importable; in CI an unobtainable mapping fails instead of passing silently.
+  it.skipIf(core === undefined && !process.env.CI)("mirrors core/wren's get_sqlglot_dialect for every data source it lists", () => {
+    if (core === undefined) throw new Error("core/wren's dialect mapping could not be obtained in CI");
     expect([...KNOWN_DATA_SOURCES].sort()).toEqual(Object.keys(core!).sort());
     for (const [source, dialect] of Object.entries(core!)) expect(sqlDialectFor(source), source).toBe(dialect);
   });

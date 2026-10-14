@@ -108,9 +108,15 @@ describe("a repair step fixes a render-contract violation in the terminal step",
     expect(out.result).toMatchObject({ kind: "answer" });
     expect(out.lines).toEqual([]);
   });
-  it("coerces object rows and chart_type synonyms first, so they do not trigger the repair", async () => {
-    const out = await run(envelope([chart({ chart_type: "Column", rows: PLAN_ROWS }), definition()]), good());
+  it("coerces object rows and canonical chart_type casing first, so they do not trigger the repair", async () => {
+    const out = await run(envelope([chart({ chart_type: "BAR", rows: PLAN_ROWS }), definition()]), good());
     expect(out.repairCalls).toHaveLength(0);
+    expect(out.result).toMatchObject({ kind: "answer" });
+  });
+  it("a chart_type synonym is not guessed: it triggers the repair step", async () => {
+    const out = await run(envelope([chart({ chart_type: "column" }), definition()]), good());
+    expect(out.repairCalls).toHaveLength(1);
+    expect((out.repairCalls[0]!.consumes["dashboard"] as { reason: string }).reason).toMatch(/field `chart_type`/);
     expect(out.result).toMatchObject({ kind: "answer" });
   });
   it("runs the repair step for unparseable terminal text", async () => {
