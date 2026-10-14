@@ -137,10 +137,10 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // A parsed value that breaks the render contract is the model's invalid layout, not a host fault: refuse with the first violation.
   if (result.status === "error" && result.code === "invalid_result" && rendered.ok && /render contract/.test(result.message)) {
     const violation = diagnoseRenderViolation(rendered.value, render);
-    // The offending value of an enum field (a closed vocabulary, not data) goes to the server log only; the refusal text names the field.
-    if (violation.enumValue !== undefined) {
+    // The offending field's value, described by shape (see describeOffendingValue), goes to the server log only; the refusal text names the field.
+    if (violation.offending !== undefined) {
       console.error(`[component-failure] ${JSON.stringify({ site: "normalize_refused", code: "callee_refused", component: component.id, step: terminal.name,
-        field: violation.enumValue.field, value: redactForLog(violation.enumValue.value, ENUM_LOG_LIMIT) })}`);
+        field: violation.offending.field, value: violation.offending.value, ...(violation.offending.blockKeys ? { block_keys: violation.offending.blockKeys } : {}) })}`);
     }
     return { status: "refused", code: "callee_refused", message: `The result did not match the render contract: ${violation.message}.` };
   }
@@ -207,13 +207,18 @@ export function describeRenderViolation(value: unknown, contract: readonly Rende
   return diagnoseRenderViolation(value, contract).message;
 }
 const ENUM_LOG_LIMIT = 64;
-const PRIMITIVE_FIELD_TYPES = new Set(["string", "number", "boolean", "row"]);
-/** A field type such as `bar|line`: a closed vocabulary of literals, as the SDK validator reads it. */
-function isEnumType(type: string): boolean {
-  const base = type.endsWith("?") ? type.slice(0, -1) : type;
-  return base.includes("|") && !base.endsWith("[]") && !base.split("|").every((variant) => PRIMITIVE_FIELD_TYPES.has(variant));
+/** Structural, label-like fields whose string value may be logged; every other field is described by shape only. */
+const LOGGABLE_STRING_FIELDS = new Set(["label", "title", "chart_type", "x", "type", "unit"]);
+/** A value as a log-safe description: the capped, redacted string for a structural field, otherwise only its JSON type and, for objects, key names. Never rows, numbers or other data. */
+function describeOffendingValue(field: string, value: unknown): string {
+  if (value === undefined) return "(missing)";
+  if (value === null) return "null";
+  if (typeof value === "string") return LOGGABLE_STRING_FIELDS.has(field) ? redactForLog(value, ENUM_LOG_LIMIT) : "string";
+  if (Array.isArray(value)) return `array[${value.length}]`;
+  if (typeof value === "object") return redactForLog(`object{${Object.keys(value).join(",")}}`, ENUM_LOG_LIMIT * 2);
+  return typeof value;
 }
-interface RenderViolation { readonly message: string; readonly enumValue?: { readonly field: string; readonly value: string } }
+interface RenderViolation { readonly message: string; readonly offending?: { readonly field: string; readonly value: string; readonly blockKeys?: string } }
 function diagnoseRenderViolation(value: unknown, contract: readonly RenderBlock[]): RenderViolation {
   const found = (message: string): RenderViolation => ({ message });
   if (typeof value !== "object" || value === null || Array.isArray(value)) return found("the result is not an object with a `blocks` array");
@@ -225,13 +230,13 @@ function diagnoseRenderViolation(value: unknown, contract: readonly RenderBlock[
     const block = raw as Record<string, unknown>;
     const expected = contract.find((candidate) => candidate.type === block["type"]);
     if (typeof block["type"] !== "string") return found(`block ${index + 1} has no \`type\``);
-    if (!expected) return found(`block ${index + 1} has a type that is not allowed (allowed: ${allowed.join(", ").slice(0, VIOLATION_TYPE_LIMIT * 4)})`);
+    if (!expected) return { message: `block ${index + 1} has a type that is not allowed (allowed: ${allowed.join(", ").slice(0, VIOLATION_TYPE_LIMIT * 4)})`,
+      offending: { field: "type", value: describeOffendingValue("type", block["type"]) } };
     for (const [field, type] of Object.entries(expected.fields)) {
       const probe = normalizeComponentResult(JSON.stringify({ blocks: [block] }), [{ type: expected.type, fields: { [field]: type } }]).value;
       if (probe.status !== "ok") {
-        const offending = block[field];
         return { message: `block ${index + 1} (${expected.type}): field \`${field}\` must be ${type}`,
-          ...(isEnumType(type) ? { enumValue: { field, value: offending === undefined ? "(missing)" : typeof offending === "string" ? offending : JSON.stringify(offending) ?? "(unserializable)" } } : {}) };
+          offending: { field, value: describeOffendingValue(field, block[field]), blockKeys: redactForLog(Object.keys(block).join(","), ENUM_LOG_LIMIT * 2) } };
       }
     }
   }
