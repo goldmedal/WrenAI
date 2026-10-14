@@ -50,7 +50,7 @@ mode would require the BFF to bind `0.0.0.0` inside the container.
   `brev org set <org>` then `brev shell <instance>`, or `ssh -F ~/.brev/ssh_config <instance>`.
 - The Secure Link redirects to NVIDIA SSO before proxying to port 4787 (expected: it is login-protected by default).
 
-## Known limits for a fully unattended run (as of @wrenai/genbi 0.0.6)
+## Known limits for a fully unattended run (as of @wrenai/genbi 0.0.7)
 
 The published `@wrenai/genbi` calls `resolve_profile_for_project(..., strict=True)`, a wren API that no PyPI
 `wrenai` release has (0.13.x–0.15.0); `setup.sh` therefore installs the GenBI Wren fork wheel, which has it. Without
@@ -66,9 +66,13 @@ relationships") no longer makes the project unparseable, and Build context is ju
 results (discovery, `wren context validate`, `wren context build`, then a parseable project) rather than from how
 the agent spelled the commands or whether it printed a `SETUP_STATUS` line.
 
-Still open: the agent-led steps (connect, build) were observed needing retries with Nemotron Super on 0.0.5; that
-has not been re-verified on 0.0.6 with a live model. Treat the Launchable as a demo you drive, not a hands-off
-deploy, until it is.
+Fixed in 0.0.7: dashboards. Component failures now carry a code and a server-side log line instead of "connection
+lost"; the SQL-writing model is told the project's dialect; render blocks are shown to the model as flat templates;
+and a layout that still misses the render contract is repaired once (Warble 0.19.0 `repair_layout`). With Nemotron
+Super on a local BFF, "build dashboard" returns a verified dashboard.
+
+Still open: on a fresh 0.0.6 Launchable the full wizard and a verified Ask completed with Nemotron Super; the 0.0.7
+dashboard path has not yet been re-verified on the Launchable itself. Model-led steps can still need a retry.
 
 ## Keeping it fresh
 

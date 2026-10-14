@@ -38,7 +38,7 @@ you want to try the app; everyone who opens it shares the **same** GenBI workspa
 | --- | --- | --- |
 | `NVIDIA_API_KEY` | _(empty)_ | Key for NVIDIA endpoints. Effectively required. Stored root-owned, mode 0640, readable by the service user only. Never printed. |
 | `GENBI_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | Any chat model id on NVIDIA endpoints with tool calling. |
-| `GENBI_VERSION` | see `setup.sh` (0.0.6) | Published `@wrenai/genbi` version. |
+| `GENBI_VERSION` | see `setup.sh` (0.0.7) | Published `@wrenai/genbi` version. |
 | `GENBI_PROVIDER` | `nvidia` | Gateway provider id label for the endpoint (the base URL is always set, so it is only a name). |
 | `WRENAI_WHEEL_URL` | see `setup.sh` | URL of the `wren` CLI wheel (the GenBI Wren fork build; PyPI `wrenai` lacks APIs GenBI calls). |
 | `WRENAI_WHEEL_SHA256` | see `setup.sh` | sha256 of that wheel. The download is verified before install; a mismatch aborts the setup. Override both together. |
