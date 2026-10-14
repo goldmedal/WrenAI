@@ -192,9 +192,14 @@ function envFlags(): CliFlags {
   };
 }
 
+function isLoopbackHost(host: string): boolean {
+  return host === "localhost" || host === "::1" || /^127\.\d+\.\d+\.\d+$/.test(host);
+}
+
 async function main(): Promise<void> {
   const flags = envFlags();
   const port = Number.parseInt(process.env["PORT"] ?? "4787", 10);
+  const host = process.env["GENBI_HOST"]?.trim() || "127.0.0.1";
   const workspaceRoot = process.env["WREN_HARNESS_WORKSPACE_ROOT"];
 
   // Loud-fail rather than ignore: a caller still exporting the removed bound-mode variable
@@ -777,8 +782,11 @@ async function main(): Promise<void> {
   const websocket = new WebSocketServer({ noServer: true });
   // ws' `noServer` runtime shape is the one documented by @hono/node-server;
   // its package types disagree under exactOptionalPropertyTypes.
-  const server = serve({ fetch: app.fetch, websocket: { server: websocket as never }, hostname: "127.0.0.1", port }, (info) => {
-    process.stdout.write(`wren-harness BFF listening on http://127.0.0.1:${info.port} (db: ${dbPath})\n`);
+  const server = serve({ fetch: app.fetch, websocket: { server: websocket as never }, hostname: host, port }, (info) => {
+    process.stdout.write(`wren-harness BFF listening on http://${host.includes(":") ? `[${host}]` : host}:${info.port} (db: ${dbPath})\n`);
+    if (!isLoopbackHost(host)) {
+      process.stderr.write(`warning: GENBI_HOST=${host} accepts connections from other machines and the BFF has no login of its own; put it behind an authenticating proxy or a firewall\n`);
+    }
   });
   const shutdown = () => {
     const deadline = setTimeout(() => process.exit(1), 12_000);
@@ -802,7 +810,7 @@ async function main(): Promise<void> {
     process.stderr.write(
       error.code === "EADDRINUSE"
         ? `error: port ${port} is already in use — stop whatever is using it, or set PORT to a free one\n`
-        : `error: could not start the server on port ${port}: ${error.message}\n`,
+        : `error: could not start the server on ${host}:${port}: ${error.message}\n`,
     );
     process.exit(1);
   });

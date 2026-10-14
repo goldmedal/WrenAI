@@ -6,7 +6,9 @@
 #   2. `uv` and the `wren` CLI (the GenBI Wren fork wheel, pinned by URL and
 #      sha256) for the service user
 #   3. A small synthetic sample dataset (CSV) the setup wizard can bind to
-#   4. A systemd service that runs the GenBI BFF on 127.0.0.1:${GENBI_PORT}
+#   4. A systemd service that runs the GenBI BFF on ${GENBI_HOST}:${GENBI_PORT}
+#      (all interfaces: Brev's Secure Link proxy reaches the VM over its
+#      overlay network, not over loopback)
 #
 # The model is Nemotron served by NVIDIA endpoints (OpenAI-compatible API).
 # GenBI runs in its `gateway` mode (remote OpenAI-compatible endpoint + key);
@@ -42,6 +44,7 @@ NODE_MAJOR="${NODE_MAJOR:-22}"
 GENBI_MODEL="${GENBI_MODEL:-nvidia/nemotron-3-super-120b-a12b}"
 NVIDIA_API_BASE="${NVIDIA_API_BASE:-https://integrate.api.nvidia.com/v1}"
 GENBI_PORT="${GENBI_PORT:-4787}"
+GENBI_HOST="${GENBI_HOST:-0.0.0.0}"
 # pi-ai provider id for the custom endpoint (only a label: the base URL is set).
 GENBI_PROVIDER="${GENBI_PROVIDER:-nvidia}"
 
@@ -199,6 +202,7 @@ info "writing ${ENV_FILE}"
 run_root install -d -m 0750 -o root -g "$RUN_USER" "$ENV_DIR"
 {
   echo "PORT=${GENBI_PORT}"
+  echo "GENBI_HOST=${GENBI_HOST}"
   echo "WREN_HARNESS_WORKSPACE_ROOT=${WORKSPACE_ROOT}"
   echo "WREN_HARNESS_OUT=${OUT_DIR}"
   # `gateway` = a remote OpenAI-compatible endpoint with a key. (`api-key` mode

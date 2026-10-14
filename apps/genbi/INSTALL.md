@@ -105,6 +105,7 @@ needed ones:
 | --- | --- | --- | --- |
 | `WREN_HARNESS_WORKSPACE_ROOT` | Yes | none — the process exits with an error if unset | Directory the setup wizard scaffolds **new** Wren projects into. An **existing** project is brought in separately via the setup wizard's "adopt" flow, which accepts any path on disk and is not affected by this variable. |
 | `PORT` | No | `4787` | HTTP port the BFF listens on. |
+| `GENBI_HOST` | No | `127.0.0.1` | Address the BFF binds. Set it to `0.0.0.0` only when a reverse proxy on another interface must reach it (for example the Brev Secure Link); the BFF has no login of its own, so keep the port behind that proxy or a firewall. |
 | `WREN_BFF_DB_PATH` | No | `./wren-harness-bff.sqlite` (created in the current working directory) | Path to the BFF's SQLite state file. |
 
 There are additional environment variables for authentication mode,

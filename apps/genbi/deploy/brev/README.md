@@ -13,7 +13,7 @@ GenBI talks to it over the OpenAI-compatible API.
 
 | Piece | Where |
 | --- | --- |
-| GenBI UI + BFF (`@wrenai/genbi`, pinned) | `http://127.0.0.1:4787` on the VM, reached through the **`genbi` Secure Link** |
+| GenBI UI + BFF (`@wrenai/genbi`, pinned) | port `4787` on the VM (bound on all interfaces, `GENBI_HOST=0.0.0.0`), reached through the **`genbi` Secure Link** |
 | `wren` CLI (GenBI Wren fork wheel, pinned by URL + sha256) | `~/.local/bin/wren` for the `ubuntu` user |
 | Synthetic sample data (customers, orders, payments) | `~/genbi/sample-data/jaffle-duckdb/` (DuckDB) and `~/genbi/sample-data/jaffle/*.csv` |
 | Service | `systemd` unit `genbi.service`; logs via `journalctl -u genbi` |
