@@ -18,11 +18,14 @@ _Anyone with the link_): <https://brev.nvidia.com/launchable/deploy/now?launchab
 | Visibility | **Everyone (published)** so it appears in Brev's Community Explore |
 | Description | "Open-source GenBI over your data with Nemotron. Ask questions, get verified tables, charts and KPIs. Runs the web app on this VM; the model runs on NVIDIA endpoints. CPU-only." |
 
-## Why VM mode
+## Why VM mode, and why the BFF binds `0.0.0.0`
 
-The BFF binds `127.0.0.1`; the Secure Link proxy on the instance forwards to that
-local port, so no container port mapping or bind-address change is needed. Container
-mode would require the BFF to bind `0.0.0.0` inside the container.
+VM mode runs the BFF directly as a systemd service, with no container port mapping.
+The Secure Link proxy does not connect over loopback: it reaches the VM through Brev's
+overlay network interface, so a BFF bound to `127.0.0.1` answers the Secure Link with
+`503 … Connection refused`. The setup script therefore sets `GENBI_HOST=0.0.0.0`. Do not
+open port `4787` in the cloud firewall or as a TCP/UDP port: the BFF has no login of its
+own, and the Secure Link's NVIDIA sign-in is what protects it.
 
 ## Verification before publishing
 
