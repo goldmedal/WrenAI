@@ -3,43 +3,42 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSy
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveWarbleBinary } from "../harness/compile/resolve-binary.js";
 import { createComponentBroker } from "../harness/components/broker.js";
 import { normalizeComponentEvidence } from "../harness/components/normalize.js";
 import { VERCEL_HOST_CONTRACT, planDigest, readExecutionPlan } from "../harness/components/plan.js";
 import { ComponentRunner, type ExecutionPlan } from "../harness/components/runner.js";
 
 /**
- * The real genbi-default profile compiled by a warble whose Hub declares `repair_layout`, run through the
- * real plan reader, runner, broker and normalizer. Only model and database responses are synthetic.
- * Set WARBLE_REPAIR_LAYOUT_CLI to a warble binary built from a checkout whose `hub/components` has the
- * step (its Hub is read from `<checkout>/hub/components`). Unset, the suite is skipped.
+ * The real genbi-default profile compiled by the pinned warble (whose Hub declares `repair_layout`), run through
+ * the real plan reader, runner, broker and normalizer. Only model and database responses are synthetic.
  */
-const binary = process.env.WARBLE_REPAIR_LAYOUT_CLI;
+let binary: string;
 const KPI_OK = { type: "kpi_card", label: "n", value: 7 };
 const TABLE = { type: "table", columns: ["n"], rows: [[7]] };
 const envelope = (blocks: unknown[]) => JSON.stringify({ blocks, summary: "One verified panel" });
 const BROKEN = envelope([{ type: "kpi_card", value: 7, title: "model-secret-77" }, TABLE]);
 const REPAIRED = envelope([KPI_OK, TABLE]);
 
-describe.runIf(binary !== undefined)("generate_dashboard repair_layout against the compiled Hub component", () => {
+describe("generate_dashboard repair_layout against the compiled Hub component", () => {
   let temp: string;
   let plan: ExecutionPlan;
   let run: (repairText: string, composeText?: string) => Promise<{ result: Awaited<ReturnType<ComponentRunner["run"]>>; repairConsumes: unknown[]; ran: string[]; persisted: number }>;
   let logged: string[];
-  beforeEach(() => {
+  beforeEach(async () => {
+    binary = await resolveWarbleBinary(process.env.WARBLE_TEST_CLI);
     logged = [];
     vi.spyOn(console, "error").mockImplementation((line: unknown) => { logged.push(String(line)); });
     temp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "genbi-repair-compiled-")));
-    const hub = path.join(path.dirname(binary!), "..", "..", "hub", "components");
     const irPath = path.join(temp, "ir.json");
-    execFileSync(binary!, ["compile", path.resolve("profiles/genbi-default"), "-o", irPath, "--hub-dir", hub], { stdio: "pipe", timeout: 60_000, env: { ...process.env, XDG_CACHE_HOME: path.join(temp, "cache") } });
+    execFileSync(binary, ["compile", path.resolve("profiles/genbi-default"), "-o", irPath], { stdio: "pipe", timeout: 60_000, env: { ...process.env, XDG_CACHE_HOME: path.join(temp, "cache") } });
     const irDocument = readFileSync(irPath, "utf8");
     const ir = JSON.parse(irDocument);
     const snapshot = JSON.parse(readFileSync(path.resolve("profiles/genbi-default/context/context.json"), "utf8"));
     const contexts = Object.fromEntries(ir.components.map((node: { id: string; context_binding: Record<string, unknown> }) => [node.id, { binding: node.context_binding, snapshot }]));
     const out = path.join(temp, "out"); mkdirSync(out);
     const hostPath = path.join(temp, "host.json"); writeFileSync(hostPath, JSON.stringify(VERCEL_HOST_CONTRACT));
-    execFileSync(binary!, ["dispatch", irPath, "--target", "vercel", "--provider", path.resolve("providers/wren.provider.yaml"), "--host-contract", hostPath, "--out", out], { stdio: "pipe", timeout: 30_000 });
+    execFileSync(binary, ["dispatch", irPath, "--target", "vercel", "--provider", path.resolve("providers/wren.provider.yaml"), "--host-contract", hostPath, "--out", out], { stdio: "pipe", timeout: 30_000 });
     const text = readFileSync(path.join(out, "bundle.json"), "utf8");
     plan = readExecutionPlan(text, { digest: JSON.parse(text).bundle_sha256, inputIrDigest: planDigest(ir), contextBinding: ir.context_binding,
       declarations: Object.fromEntries(ir.components.map((node: { id: string }) => [node.id, node])) });
@@ -48,7 +47,7 @@ describe.runIf(binary !== undefined)("generate_dashboard repair_layout against t
       const repairConsumes: unknown[] = [];
       const ran: string[] = [];
       let persisted = 0;
-      const broker = createComponentBroker({ plan, contexts, identity, currentIdentity: () => identity, verifierBinary: binary!,
+      const broker = createComponentBroker({ plan, contexts, identity, currentIdentity: () => identity, verifierBinary: binary,
         async prepare() {
           return { async query(input) { return { columns: ["n"], rows: [{ n: 7 }], definition: { sql: input.sql, source_tables: ["orders"], filters: [] } }; },
             async inspect() { return snapshot; }, async close() {} };
