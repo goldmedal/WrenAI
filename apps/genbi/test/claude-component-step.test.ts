@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Query, SDKMessage, Options } from "@anthropic-ai/claude-agent-sdk";
-import { runClaudeComponentStep, type ClaudeComponentRuntime } from "../server/runtime-host/claude-component-step.js";
+import { isClaudeQueryAbort, runClaudeComponentStep, type ClaudeComponentRuntime } from "../server/runtime-host/claude-component-step.js";
+import { GovernedWrenError } from "../harness/components/wren-access.js";
 import { deriveClaudeNativeRuntime } from "../server/runtime-host/openshell-claude-provider.js";
 import type { StepRun } from "../harness/components/runner.js";
 
@@ -85,6 +86,16 @@ describe("governed Claude component step", () => {
     const test = setup([init, async () => { await handlers.get("query")!({ sql: "SELECT 1" }).catch(() => {}); }, result]);
     vi.mocked(test.run.tools.query!).mockRejectedValue(Error("private"));
     await expect(runClaudeComponentStep(test.runtime, test.run)).rejects.toThrow("Claude component");
+  });
+  it.each(["query", "unknown", "external-cancel", "cleanup"])("brands only the actual internal governed query abort (%s)", async kind => {
+    const controller = new AbortController();
+    const test = setup([init, async () => { await handlers.get("query")!({ sql: "SELECT 1" }).catch(() => {}); }, result]);
+    vi.mocked(test.run.tools.query!).mockImplementation(async () => { if (kind === "external-cancel") controller.abort(); throw kind === "unknown" ? Error("private data") : new GovernedWrenError("execution_failed"); });
+    if (kind === "cleanup") vi.mocked(test.runtime.close).mockRejectedValue(Error("private cleanup"));
+    const error = await runClaudeComponentStep(test.runtime, { ...test.run, signal: controller.signal }).catch(error => error);
+    expect(isClaudeQueryAbort(error)).toBe(kind === "query");
+    expect(isClaudeQueryAbort(structuredClone(error))).toBe(false);
+    expect(test.runtime.close).toHaveBeenCalledTimes(1);
   });
   it("denies sibling session events", async () => {
     const test = setup([init, { ...result, session_id: "other" }]);

@@ -4,6 +4,8 @@ import { z } from "zod";
 import { claudeHostBuiltinAgents, claudeThinkingTokens, claudeRateLimitEvent } from "./claude-protocol.js";
 import { claimClaudeHostRuntime, readClaudeRuntimeTiming } from "./openshell-claude-provider.js";
 import type { StepRun, StepResponse } from "../../harness/components/runner.js";
+import { types } from "node:util";
+import { GovernedWrenError } from "../../harness/components/wren-access.js";
 
 /** Supplied only by the certified same-account process provisioner. No default spawn. */
 export interface ClaudeComponentRuntime {
@@ -30,6 +32,9 @@ export interface ClaudeComponentRuntime {
 class ClaudeComponentError extends Error {
   constructor(readonly reason: "protocol" | "cancelled" | "cleanup") { super(`Claude component ${reason}`); }
 }
+const queryAborts = new WeakSet<object>();
+/** An actual governed tool rejection caused this step's internal abort; never serialized authority. */
+export function isClaudeQueryAbort(error: unknown): boolean { return !!error && typeof error === "object" && queryAborts.has(error); }
 function deny(): never { throw new ClaudeComponentError("protocol"); }
 const record = z.record(z.string(), z.unknown());
 const messageIdentity = z.object({ session_id: z.string().min(1), uuid: z.string().min(1) });
@@ -52,18 +57,19 @@ export async function runClaudeComponentStep(runtime: ClaudeComponentRuntime, ru
   const signal = AbortSignal.any([run.signal, controller.signal, ...(runtime.signal ? [runtime.signal] : [])]);
   let active = true; let initialized = false; let sessionId: string | undefined;
   let pending = 0; let calls = 0; let failed = false;
+  let timedOut = false;
   let toolQueue: Promise<unknown> = Promise.resolve();
   let releaseInput!: () => void;
   const inputReady = new Promise<void>((resolve) => { releaseInput = resolve; });
   const check = () => { if (!active || failed) deny(); if (signal.aborted) throw new ClaudeComponentError("cancelled"); assertCurrent(); };
   let session: Query | undefined;
   recordComponentTimingTimer(timing, "registering", 120_000);
-  const timeout = setTimeout(() => { recordComponentTimingTimer(timing, "callback"); recordComponentTimingAbort(timing, "component_timeout"); controller.abort(); }, 120_000);
+  const timeout = setTimeout(() => { timedOut = true; recordComponentTimingTimer(timing, "callback"); recordComponentTimingAbort(timing, "component_timeout"); controller.abort(); }, 120_000);
   recordComponentTimingTimer(timing, "registered", 120_000);
   const timedAbort = () => { const sources = [run.signal.aborted ? "run" : undefined, runtime.signal?.aborted ? "runtime" : undefined, controller.signal.aborted ? "component_timeout" : undefined].filter(Boolean); recordComponentTimingAbort(timing, sources.length === 1 ? sources[0] as "run" | "runtime" | "component_timeout" : "unknown"); };
   if (signal.aborted) timedAbort(); else signal.addEventListener("abort", timedAbort, { once: true });
   const abort = new Promise<never>((_, reject) => {
-    signal.addEventListener("abort", () => reject(new ClaudeComponentError("cancelled")), { once: true });
+    signal.addEventListener("abort", () => reject(isClaudeQueryAbort(signal.reason) ? signal.reason : new ClaudeComponentError("cancelled")), { once: true });
   });
   void abort.catch(() => {});
   const wait = <T>(value: Promise<T>): Promise<T> => Promise.race([value, abort]);
@@ -88,7 +94,11 @@ export async function runClaudeComponentStep(runtime: ClaudeComponentRuntime, ru
           if (text === undefined || Buffer.byteLength(text) > 1_048_000) deny();
           return { content: [{ type: "text" as const, text }] };
         });
-        toolQueue = result.catch(() => { failed = true; controller.abort(); });
+        toolQueue = result.catch(error => {
+          const cause = new ClaudeComponentError("cancelled");
+          if (!signal.aborted && !!error && typeof error === "object" && !types.isProxy(error) && Object.getPrototypeOf(error) === GovernedWrenError.prototype) queryAborts.add(cause);
+          failed = true; controller.abort(cause);
+        });
         try { return await result; } finally { pending--; }
       });
     });
@@ -160,7 +170,9 @@ export async function runClaudeComponentStep(runtime: ClaudeComponentRuntime, ru
       }
     }
   } catch (error) {
-    throw new ClaudeComponentError(error instanceof ClaudeComponentError ? error.reason : "protocol");
+    const failure = new ClaudeComponentError(error instanceof ClaudeComponentError ? error.reason : "protocol");
+    if (isClaudeQueryAbort(error) && !run.signal.aborted && !timedOut) queryAborts.add(failure);
+    throw failure;
   } finally {
     let currentBeforeCleanup = true;
     try { if (succeeded) host?.check(); } catch { currentBeforeCleanup = false; }

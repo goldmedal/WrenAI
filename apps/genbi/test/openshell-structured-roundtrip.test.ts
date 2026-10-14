@@ -11,6 +11,7 @@ import { openWrenComponentAccess } from "../harness/components/wren-access.js";
 import * as wrenAccess from "../harness/components/wren-access.js";
 import * as contextVerification from "../harness/components/context.js";
 import * as componentRuntime from "../server/native-component-runtime.js";
+import { openOpenShellWrenAccess } from "../server/runtime-host/openshell-wren-access.js";
 import { Store } from "../server/db.js";
 import { ClaudeAccountVault } from "../server/runtime-host/claude-account-vault.js";
 import type { OpenShellDriver, OpenShellDuplex, OpenShellResource } from "../server/runtime-host/openshell-types.js";
@@ -87,7 +88,7 @@ function peer(model: string, receipt: { calls: number; replies: number; streams:
   };
 }
 
-async function fixture(change?: (store: Store) => void) {
+async function fixture(change?: (store: Store) => void, failureMode?: "query" | "provider-failed") {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "openshell-structured-roundtrip-")));
   cleanup.push(async () => { rmSync(root, { recursive: true, force: true }); });
   const project = path.join(root, "project"), home = path.join(root, "wren-home"), database = path.join(root, "data");
@@ -126,6 +127,20 @@ async function fixture(change?: (store: Store) => void) {
   const identity = { image: digest, policy: digest, gateway: "synthetic", workspace: "default", configuration: digest };
   const driver: OpenShellDriver = { version: "synthetic", identity, modelIdentity: identity, probe: async () => {}, create: async intent => { const resource = { id: intent.id, name: intent.name, workspace: "default", labels: { "genbi-lifecycle-owner": intent.owner } }; resources.set(intent.name, resource); return resource; }, list: async intent => [...resources.values()].filter(resource => resource.name === intent.name), inspect: async intent => resources.get(intent.name)!, remove: async intent => { resources.delete(intent.name); }, assertAbsent: async intent => { expect(resources.has(intent.name)).toBe(false); }, exec: async () => { throw Error("no live runtime"); }, duplex: async intent => { if (intent.identity.purpose !== "model") throw Error("not a model step"); const stream = peer(intent.identity.model, receipt, () => expectedTools, change ? () => change(store) : undefined); streams.push(stream); return stream; } };
   const composition = await createOpenShellRuntimeCompositionForTesting({ env: { GENBI_CLAUDE_RUNTIME: "openshell", GENBI_OPENSHELL_CONFIG: config }, store, stateRoot: path.join(root, "lifecycle"), driver, claude: { vault, duplex: driver.duplex! } });
+  Object.defineProperty(composition, "dataWorkerAvailable", { value: true });
+  // Credential-free synthetic data peer exercises the production bounded adapter.
+  // Actual Linux/OpenShell execution is a separate container acceptance gate.
+  vi.spyOn(composition, "bindDataContext").mockImplementation((_context, check) => async (_scope, signal) => {
+    const tuple = { worker: "genbi-wren-worker/1" as const, snapshot: digest, script: digest, wheel: digest, toolchain: digest, architecture: "linux-arm64" as const, protocol: "wren-governed/2" as const };
+    let wake: (() => void) | undefined, closed = false;
+    const chunks = [Buffer.from(JSON.stringify(tuple) + "\n" + JSON.stringify({ id: 0, protocol: tuple.protocol }) + "\n")];
+    const dataStream: OpenShellDuplex = { done: new Promise(() => {}),
+      output: (async function* () { while (!closed) { if (chunks.length) yield { stream: "stdout" as const, data: chunks.shift()! }; else await new Promise<void>(resolve => { wake = resolve; }); } })(),
+      write(bytes) { check(); const request = JSON.parse(bytes.toString()); expect(request.operation).toBe("query"); expect(request.sql).toBe(sql); chunks.push(Buffer.from(JSON.stringify(failureMode ? { id: request.id, error: { class: "execution_failed", message: "synthetic private SQL/token/path must not escape" } } : { id: request.id, result: oracle[1].result }) + "\n")); wake?.(); },
+      close() { closed = true; wake?.(); } };
+    return openOpenShellWrenAccess({ expected: tuple, signal, assertCurrent: check, lease: { id: "synthetic-data", reference: "synthetic-ref", assertActive: check,
+      async verify() { check(); return { digest } as never; }, async read() { return Buffer.from(JSON.stringify({ models: ["orders"] })); }, async openGoverned() { return dataStream; }, async close() { dataStream.close(); } } });
+  });
   cleanup.push(async () => { for (const stream of streams) stream.close(); await composition.shutdown(); store.close(); });
   const producer = await resolveWarbleBinary();
   const profileSource = path.join(application, "profiles/genbi-default");
@@ -133,7 +148,7 @@ async function fixture(change?: (store: Store) => void) {
   const provisioner = createOpenShellStructuredProvisioner({ composition, store, diagnostics, producerBinary: producer, wrenBinary: wren, profileSource, hostHome: root, sourceWrenHome: () => home, getBinding: () => store.getEnrichmentBinding(), modelsFor: settings => resolveStructuredClaudeModels(settings, () => "synthetic-model"), assertConfigurationCurrent() {} });
   const phases: string[] = [];
   const realBindings = componentRuntime.createNativeComponentRuntimeBindings;
-  vi.spyOn(componentRuntime, "createNativeComponentRuntimeBindings").mockImplementation(options => { const bindings = realBindings(options); const step = bindings.step; return { ...bindings, async step(...args) { expectedTools = Object.keys(args[0].tools).length; phases.push("step-start"); try { const value = await step(...args); phases.push("step-pass"); return value; } catch (error) { phases.push("step-error:" + String(error)); throw error; } } }; });
+  vi.spyOn(componentRuntime, "createNativeComponentRuntimeBindings").mockImplementation(options => { const bindings = realBindings(options); const step = bindings.step; return { ...bindings, async step(...args) { expectedTools = Object.keys(args[0].tools).length; phases.push("step-start"); try { const value = await step(...args); phases.push("step-pass"); return failureMode === "provider-failed" && expectedTools > 0 ? { ...value, failed: true } : value; } catch (error) { phases.push("step-error:" + String(error)); if (failureMode === "provider-failed") throw Error("synthetic later provider transport failure"); throw error; } } }; });
   const realAccess = wrenAccess.openWrenComponentAccess, realContext = contextVerification.verifyComponentContext;
   vi.spyOn(wrenAccess, "openWrenComponentAccess").mockImplementation(async options => { phases.push("wren-start"); try { const value = await realAccess(options); phases.push("wren-ready"); return value; } catch (error) { phases.push("wren-error:" + String(error)); throw error; } });
   vi.spyOn(contextVerification, "verifyComponentContext").mockImplementation(async (...args) => { phases.push("context-start"); try { await realContext(...args); phases.push("context-pass"); } catch (error) { phases.push("context-error:" + String(error)); throw error; } });
@@ -149,15 +164,15 @@ async function fixture(change?: (store: Store) => void) {
   return { root, store, timing, composition, runtime, local, deps, session, turn, receipt, resources, before, retained, phases };
 }
 
-it("HTTP-selected Ask runs pinned plan → branded SDK peer → real host Wren/DuckDB → one verified durable answer", async () => {
+it("HTTP-selected Ask runs pinned plan → branded SDK peer → synthetic Wren data peer → one verified durable answer", async () => {
   const f = await fixture(); const app = createApp(f.deps);
-  expect(await (await app.request("/api/structured-runtime/readiness")).json()).toMatchObject({ active: { backend: "openshell", ask: true, queryExecution: "host" } });
+  expect(await (await app.request("/api/structured-runtime/readiness")).json()).toMatchObject({ active: { backend: "openshell", ask: true, queryExecution: "openshell" } });
   const frames: unknown[] = []; await streamTurn(f.deps, f.session.id, f.turn.id, async frame => { frames.push(frame); });
   const stored = f.store.getTurn(f.turn.id);
   expect(stored, JSON.stringify({ frames, phases: f.phases, receipt: f.receipt })).toMatchObject({ backend: "openshell", resultKind: "answer" });
   expect(JSON.parse(stored!.answerSummary!)).toEqual([{ type: "table", columns: ["n"], rows: [{ n: 7 }] }, { type: "definition", sql, source_tables: ["orders"], filters: [] }]);
   expect(JSON.stringify(stored)).not.toContain("999999"); expect(f.receipt.calls).toBeGreaterThan(0); expect(f.receipt.replies).toBe(f.receipt.calls); expect(f.receipt.streams).toBeGreaterThan(1);
-  expect(f.local).not.toHaveBeenCalled(); expect(f.resources.size).toBe(0); expect(f.store.listOpenShellIntents().every(intent => intent.phase === "cleaned")).toBe(true);
+  expect(f.local).not.toHaveBeenCalled(); expect(wrenAccess.openWrenComponentAccess).not.toHaveBeenCalled(); expect(f.resources.size).toBe(0); expect(f.store.listOpenShellIntents().every(intent => intent.phase === "cleaned")).toBe(true);
   const timing=readStructuredTimingReceipt(f.timing.snapshot());
   expect(timing.metrics.currentness.count).toBeGreaterThan(0);
   // Progress events retain logical currentness checks.  Exact-byte identity is
@@ -179,4 +194,25 @@ it("runtime change before raw MCP admission blocks effects/save and cleans owned
   await streamTurn(f.deps, f.session.id, f.turn.id, async () => {});
   expect(f.store.getTurn(f.turn.id)).not.toMatchObject({ resultKind: "answer" }); expect(f.receipt.calls, JSON.stringify(f.phases)).toBeGreaterThan(0); expect(f.receipt.replies).toBe(0); expect(f.resources.size).toBe(0);
   f.composition.revokeRuntime(); expect(f.retained()).toBe(f.before); expect(f.local).not.toHaveBeenCalled();
+}, 120_000);
+
+it.each(["query", "provider-failed"] as const)("production provisioner persists and replays only the terminal %s cause", async mode => {
+  const f = await fixture(undefined, mode); const frames: unknown[] = [];
+  await streamTurn(f.deps, f.session.id, f.turn.id, async frame => { frames.push(frame); });
+  const expectedCode = mode === "query" ? "query.execution_failed" : "runtime.failed";
+  expect(f.store.getTurn(f.turn.id), JSON.stringify(f.phases)).toMatchObject({ resultKind: mode === "query" ? "refusal" : "error", errorCode: expectedCode });
+  if (mode === "query") {
+    expect(frames).toContainEqual(expect.objectContaining({ event: "event", data: expect.objectContaining({ kind: "refusal", reason: expect.stringContaining("current dataset") }) }));
+    expect(frames.some((frame: any) => frame.event === "error")).toBe(false);
+    expect(f.store.listEventsForTurn(f.turn.id).filter(event => event.kind === "refusal")).toHaveLength(1);
+  } else expect(frames).toContainEqual(expect.objectContaining({ event: "error", data: expect.objectContaining({ code: expectedCode, kind: "runtime" }) }));
+  expect(JSON.stringify(frames)).not.toContain("synthetic private");
+  const before = { ...f.receipt }; const replay: unknown[] = [];
+  await streamTurn(f.deps, f.session.id, f.turn.id, async frame => { replay.push(frame); });
+  expect(replay.filter((frame: any) => frame.event !== "worklog")).toEqual(frames.filter((frame: any) => frame.event !== "worklog")); expect(f.receipt).toEqual(before);
+  const app = createApp(f.deps); const hydrated = await (await app.request(`/api/sessions/${f.session.id}`)).json() as { events: { kind: string }[] };
+  if (mode === "query") { expect(hydrated).not.toHaveProperty("error"); expect(hydrated.events.filter((event: any) => event.kind === "refusal")).toHaveLength(1); }
+  else expect(hydrated).toMatchObject({ error: { code: expectedCode } });
+  expect(f.store.listEventsForTurn(f.turn.id).some(event => event.kind === "answer")).toBe(false);
+  expect(f.resources.size).toBe(0); expect(f.local).not.toHaveBeenCalled();
 }, 120_000);

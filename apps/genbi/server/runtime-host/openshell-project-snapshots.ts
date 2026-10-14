@@ -12,13 +12,13 @@ import type { SnapshotJournal, SnapshotManifest, SnapshotMount, SnapshotPublicat
 export interface PublicationPermit { readonly expiresAt: number; release(): void }
 export interface PublishedSnapshot { readonly id: string; readonly digest: string }
 export interface DeliveryPermit { readonly expiresAt: number; release(): void }
-export interface DataSnapshotLease { readonly id: string; readonly reference: string; verify(): Promise<SnapshotManifest>; read(relative: string): Promise<Buffer>; close(): Promise<void> }
+export interface DataSnapshotLease { readonly id: string; readonly reference: string; assertActive(): void; openGoverned(): Promise<import("./openshell-types.js").OpenShellDuplex>; verify(): Promise<SnapshotManifest>; read(relative: string): Promise<Buffer>; close(): Promise<void> }
 type LifecycleScope = Extract<OpenShellIdentity, { purpose: "lifecycle" }>;
 interface PublicationGrant { permit: OpenShellPermit; request: SnapshotCaptureRequest; scope: LifecycleScope; consumed: boolean }
 interface DeliveryGrant { permit: OpenShellPermit; publication: SnapshotPublication; request: SnapshotCaptureRequest; identity: OpenShellIdentity; consumed: boolean }
 
 /** Accepted Store binding is authoritative; the exact file list and context are host callbacks. */
-export function snapshotSourceAuthority(options: { store: Store; currentProject: () => string | undefined; approvedFiles: readonly string[]; currentContext: () => string | undefined }): () => SnapshotCaptureRequest | undefined {
+export function snapshotSourceAuthority(options: { store: Store; currentProject: () => string | undefined; approvedFiles: readonly string[]; currentContext: () => string | undefined; preserveProjectConfig?: boolean }): () => SnapshotCaptureRequest | undefined {
   const paths = Object.freeze([...options.approvedFiles].sort());
   if (paths.length < 2 || paths.length > 4094 || paths.some((file) => !safeSnapshotPath(file)) || !paths.includes("wren_project.yml") || !paths.includes("target/mdl.json")
     || new Set(paths.map((file) => file.toLowerCase())).size !== paths.length) throw new OpenShellError("openshell_configuration_invalid");
@@ -29,7 +29,8 @@ export function snapshotSourceAuthority(options: { store: Store; currentProject:
       const binding = resolveEnrichmentBinding(project);
       if (binding.path !== project || stored.path !== project || stored.identity !== binding.identity) return undefined;
       return { root: project, identity: binding.identity, paths, project: snapshotHash(binding.identity), bindingGeneration: String(stored.generation), bindingRevision: binding.revision, context,
-        projection: { "project/wren_project.yml": 'version: 1\ndata_source: duckdb\nprofile: snapshot\n',
+        projection: { ...(options.preserveProjectConfig ? {} : { "project/wren_project.yml": 'version: 1\ndata_source: duckdb\nprofile: snapshot\n' }),
+          ...(options.preserveProjectConfig ? { "wren-home/config.json": '{"strict_mode":true}\n' } : {}),
           "wren-home/profiles.yml": 'active: snapshot\nprofiles:\n  snapshot:\n    datasource: duckdb\n    url: /opt/genbi-project/project/data\n    format: duckdb\n' } };
     } catch { return undefined; }
   };
@@ -176,7 +177,8 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
         if (snapshotCanonical(manifest) !== snapshotCanonical(grant.publication.manifest)) throw new OpenShellError("openshell_identity_mismatch"); return manifest;
       };
       await verify(); worker.assertActive();
-      return Object.freeze({ id: worker.id, reference: reference.id, verify,
+      return Object.freeze({ id: worker.id, reference: reference.id, verify, assertActive: () => worker!.assertActive(),
+        openGoverned: () => worker!.duplex(["/usr/local/bin/python", "-I", "/opt/genbi/worker.py"]),
         read: async (relative: string) => {
           const entry = grant.publication.manifest!.files.find((file) => file.path === relative);
           if (!entry || entry.size > 262_144 || !safeSnapshotPath(relative)) throw new OpenShellError("openshell_scope_invalid");

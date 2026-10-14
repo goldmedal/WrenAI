@@ -310,6 +310,7 @@ export interface AskSessionData {
   readonly updatedAt: string;
   readonly events: readonly SessionEvent[];
   readonly workLog: readonly ToolStep[];
+  readonly error?: { readonly message: string; readonly code: string; readonly kind: "query" | "connection" | "runtime" };
 }
 
 export interface SessionSummary {

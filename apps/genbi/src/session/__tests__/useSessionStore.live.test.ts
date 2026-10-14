@@ -33,7 +33,7 @@ function resetStore() {
     {
       sessionsById: {},
       streaming: {},
-      streamError: {}, streamErrorCode: {},
+      streamError: {}, streamErrorKind: {}, streamErrorCode: {},
       backendSessionId: {},
       sessionList: [],
     },
@@ -57,6 +57,15 @@ afterEach(() => {
 });
 
 describe('useSessionStore (live mode) — draft lazy-create', () => {
+  it('hydrates a persisted safe error while retaining earlier verified answers', async () => {
+    const events = [{ id: 'answer', kind: 'answer', answer: { form: 'text', verified: true, dataAnswer: true, text: '7' } }];
+    getSession.mockResolvedValueOnce({ id: 'stored', title: 'Orders', events, workLog: [], error: { code: 'query.execution_failed', kind: 'query', message: 'Check the required columns and types.' } });
+    useSessionStore.getState().getOrCreate('stored');
+    await vi.waitFor(() => expect(useSessionStore.getState().streamError.stored).toBe('Check the required columns and types.'));
+    expect(useSessionStore.getState().streamErrorKind.stored).toBe('query');
+    expect(useSessionStore.getState().sessionsById.stored?.events).toEqual(events);
+    expect(postTurn).not.toHaveBeenCalled();
+  });
   it('creates a persisted structured session before the Sessions workbench opens it', async () => {
     createSession.mockResolvedValueOnce({ id: 'structured-1', title: 'New Structured Ask', createdAt: 'now', updatedAt: 'now' });
 

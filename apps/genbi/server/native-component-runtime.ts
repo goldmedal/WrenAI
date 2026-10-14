@@ -33,6 +33,8 @@ export interface NativeComponentRuntimeOptions extends Pick<NativeComponentBindi
   assertLive?(): void;
   /** Private full executable checkpoint supplied by the OpenShell provisioner. */
   assertExecutableCurrent?(): void;
+  /** Server-only override; OpenShell must supply its admitted data access. */
+  readonly openDataAccess?: (signal: AbortSignal) => Promise<ComponentAccess>;
   readonly wren: { readonly executable: string; readonly project: string; readonly fingerprint: string; readonly identity: WrenAccessIdentity };
 }
 
@@ -75,7 +77,7 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
       if (component.steps.every((step) => step.tools.length === 0)) return {
         async query() { throw new Error("No component query grant"); }, async inspect() { throw new Error("No component context grant"); }, async close() {},
       };
-      return openWrenComponentAccess({ ...wren, signal });
+      return options.openDataAccess ? options.openDataAccess(signal) : openWrenComponentAccess({ ...wren, signal });
     },
     async step(run, component) {
       await checkAccess(run.signal);

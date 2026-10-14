@@ -17,8 +17,8 @@ export interface StreamHandlers {
   onWorkLog?: (steps: ToolStep[]) => void;
   /** A terminal (or, later, incremental) SessionEvent for this turn. */
   onEvent?: (event: SessionEvent) => void;
-  /** The stream broke before a terminal event arrived. `code` is set when the server reported a component failure (a stable category), unset for transport loss. */
-  onError?: (message: string, code?: string) => void;
+  /** A stable server code or structured failure kind; explicit kind is retained when both are present. */
+  onError?: (message: string, codeOrKind?: string, kind?: 'query' | 'connection' | 'runtime') => void;
   onDone?: () => void;
 }
 
@@ -55,8 +55,8 @@ export function sessionStream(question: string, handlers: StreamHandlers, sessio
 interface EventSourceHandlers<E> {
   onWorkLog?: (steps: ToolStep[]) => void;
   onEvent?: (event: E) => void;
-  /** `code` is set when the server reported a component failure (a stable category), unset for transport loss. */
-  onError?: (message: string, code?: string) => void;
+  /** A stable server code or structured failure kind; explicit kind is retained when both are present. */
+  onError?: (message: string, codeOrKind?: string, kind?: 'query' | 'connection' | 'runtime') => void;
   onDone?: () => void;
 }
 
@@ -91,17 +91,20 @@ function attachTurnStreamListeners<E>(source: EventSource, handlers: EventSource
     if ('data' in evt) {
       let message = t('ask.streamErrorGeneric');
       let code: string | undefined;
+      let kind: 'query' | 'connection' | 'runtime' | undefined;
       try {
-        const frame = JSON.parse((evt as MessageEvent).data) as { message: string; code?: unknown };
-        message = frame.message;
-        if (typeof frame.code === 'string') code = frame.code;
+        const failure = JSON.parse((evt as MessageEvent).data) as { message: string; code?: unknown; kind?: unknown };
+        message = failure.message;
+        if (typeof failure.code === 'string') code = failure.code;
+        if (failure.kind === 'query' || failure.kind === 'connection' || failure.kind === 'runtime') kind = failure.kind;
       } catch {
-        // Malformed error frame — surface a generic message rather than throw in the listener.
+        // Malformed frames surface a generic message without throwing in the listener.
       }
-      if (code === undefined) handlers.onError?.(message);
-      else handlers.onError?.(message, code);
+      if (code !== undefined && kind !== undefined) handlers.onError?.(message, code, kind);
+      else if (code !== undefined || kind !== undefined) handlers.onError?.(message, code ?? kind);
+      else handlers.onError?.(message);
     } else {
-      handlers.onError?.(t('ask.streamConnectionLost'));
+      handlers.onError?.(t('ask.streamConnectionLost'), 'connection');
     }
     source.close();
   });
@@ -192,7 +195,7 @@ function fixtureSessionStream(question: string, handlers: StreamHandlers): Unsub
     const parsing = step('Understanding question', 'running');
     after(80, () => handlers.onWorkLog?.([parsing]));
     after(260, () => handlers.onWorkLog?.([{ ...parsing, state: 'error' }]));
-    after(300, () => handlers.onError?.(t('ask.streamConnectionLost')));
+    after(300, () => handlers.onError?.(t('ask.streamConnectionLost'), 'connection'));
     return unsubscribe;
   }
 

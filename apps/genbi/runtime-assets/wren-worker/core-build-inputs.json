@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "platform": "linux-arm64",
+  "coreVersion": "0.7.1",
+  "sdist": {
+    "url": "https://files.pythonhosted.org/packages/01/a3/5975964d1b949c38fd2f2ed528cc3078e5d3322a5d5a6e06c219b378d28c/wren_core_py-0.7.1.tar.gz",
+    "sha256": "321e9c727cc58f4824d77c9a91d2c63886fdc4b094bd7a2f9b70aba9a144bd4b"
+  },
+  "cargoLockSha256": "463c08b70f5ba1f435e0860258e4bc0daf4a0831cbe728936229e4150eb0de7e",
+  "builderBase": "rust@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922",
+  "rustVersion": "1.98.0",
+  "jobs": 2,
+  "maturin": {
+    "url": "https://files.pythonhosted.org/packages/b4/2e/26fa7574f01c19b7a74680fd70e5bae2e8c40fed9683d1752e765062cc2b/maturin-1.9.4-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl",
+    "file": "maturin-1.9.4-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.musllinux_1_1_aarch64.whl",
+    "sha256": "68b7b833b25741c0f553b78e8b9e095b31ae7c6611533b3c7b71f84c2cb8fc44"
+  },
+  "workerBase": "python@sha256:1847ca1d1bc792b4b58fff39c82c67942112e3e1ebc0ee1d06b9014873152ce7"
+}

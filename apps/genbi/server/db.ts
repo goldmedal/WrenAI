@@ -262,6 +262,7 @@ export interface TurnRow {
   readonly answerSummary: string | null;
   readonly traceJson: string | null;
   readonly errorMessage: string | null;
+  readonly errorCode?: string | null;
   readonly createdAt: string;
   /** The intent router's chosen agent id for this turn (see `classifyIntent`). NULL for rows created before intent routing existed. */
   readonly agentId: string | null;
@@ -375,6 +376,7 @@ CREATE TABLE IF NOT EXISTS turns (
   -- resumed SSE stream for an already-errored turn can replay the exact
   -- 'error' frame without re-invoking route().
   error_message TEXT,
+  error_code TEXT,
   -- additive: the intent router's chosen agent id
   -- (classifyIntent, computed once at postTurn time), persisted so
   -- executeTurn passes it to route() and a later SSE replay of an already-
@@ -889,6 +891,7 @@ export class Store {
    * brand-new, already-current) file is a no-op rather than an error.
    */
   private migrateSchema(): void {
+    this.addColumnIfMissing("turns", "error_code", "TEXT");
     this.addColumnIfMissing("turns", "agent_id", "TEXT");
     this.addColumnIfMissing("turns", "setup_step_key", "TEXT");
     this.addColumnIfMissing("turns", "resume_session_id", "TEXT");
@@ -1444,6 +1447,7 @@ export class Store {
       answerSummary: null,
       traceJson: params.traceJson ?? null,
       errorMessage: null,
+      errorCode: null,
       createdAt: new Date().toISOString(),
       agentId: params.agentId ?? null,
       setupStepKey: params.setupStepKey ?? null,
@@ -1532,11 +1536,12 @@ export class Store {
       answerSummary: string | null;
       traceJson: string | null;
       errorMessage: string | null;
+      errorCode?: string | null;
     },
   ): void {
     this.db
-      .prepare(`UPDATE turns SET backend = ?, result_kind = ?, answer_summary = ?, trace_json = ?, error_message = ? WHERE id = ?`)
-      .run(patch.backend, patch.resultKind, patch.answerSummary, patch.traceJson, patch.errorMessage, id);
+      .prepare(`UPDATE turns SET backend = ?, result_kind = ?, answer_summary = ?, trace_json = ?, error_message = ?, error_code = ? WHERE id = ?`)
+      .run(patch.backend, patch.resultKind, patch.answerSummary, patch.traceJson, patch.errorMessage, patch.errorCode ?? null, id);
   }
 
   /**
@@ -2616,6 +2621,7 @@ function rowToTurn(row: Record<string, unknown>): TurnRow {
     answerSummary: strOrNull(row, "answer_summary"),
     traceJson: strOrNull(row, "trace_json"),
     errorMessage: strOrNull(row, "error_message"),
+    errorCode: strOrNull(row, "error_code"),
     createdAt: str(row, "created_at"),
     agentId: strOrNull(row, "agent_id"),
     setupStepKey: strOrNull(row, "setup_step_key"),

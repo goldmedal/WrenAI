@@ -174,7 +174,7 @@ export class OpenShellLifecycle {
         effect: async <T>(effect: (signal: AbortSignal, assertActive: () => void) => Promise<T>) => { check(); const result = await effect(signal, check); check(); return result; },
         exec: async (argv: readonly string[]) => { check(); const result = await this.options.driver.exec(owned.intent, argv, signal); check(); return result; },
         duplex: async (argv: readonly string[]) => {
-          check(); if (grant.identity.purpose !== "model" || !this.options.driver.duplex) throw new OpenShellError("openshell_scope_invalid");
+          check(); if (!["model", "data"].includes(grant.identity.purpose) || !this.options.driver.duplex) throw new OpenShellError("openshell_scope_invalid");
           const stream = await this.options.driver.duplex(owned.intent, argv, signal); check();
           return { ...stream, write: (data: Buffer) => { check(); stream.write(data); }, close: () => stream.close() };
         },

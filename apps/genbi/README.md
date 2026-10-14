@@ -226,8 +226,7 @@ explicit caller timeout is preserved, and outer timeout failures are reported di
 ### OpenShell lifecycle backend
 
 OpenShell is opt-in. Structured Ask supports only `answer_query`: the model runs in a fresh
-OpenShell worker, while read-only Wren queries execute on the host through the governed component
-broker. Only a verified host root produces a successful answer; model prose or artifact files
+OpenShell model worker, while read-only Wren query/inspect operations use a separate admitted data worker with its own immutable image and read-only snapshot. The host component broker owns SQL, row and statement-time limits, scope revocation and final persistence. Only a verified host root produces a successful answer; model prose or artifact files
 cannot declare verification. Query rows and SQL are grounded; interpretation is not certified.
 Setup, dashboards, enrichment, native conversations/terminals and hybrid/disclosure modes remain
 unsupported. Container readiness alone does not certify account or query readiness.

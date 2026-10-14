@@ -124,7 +124,7 @@ describe('live sessionStream', () => {
 
     source.emit('error', { data: JSON.stringify({ message: 'harness crashed' }) });
 
-    expect(h.onError).toHaveBeenCalledWith('harness crashed');
+    expect(h.onError).toHaveBeenCalledWith('harness crashed', 'runtime');
     expect(source.closed).toBe(true);
   });
 
@@ -147,8 +147,17 @@ describe('live sessionStream', () => {
 
     source.emit('error', {});
 
-    expect(h.onError).toHaveBeenCalledWith('Lost connection to the harness stream.');
+    expect(h.onError).toHaveBeenCalledWith('Lost connection to the harness stream.', 'connection');
     expect(source.closed).toBe(true);
+  });
+  it('distinguishes safe query feedback from transport and unknown classifications', async () => {
+    for (const kind of ['query', 'invented']) {
+      postTurn.mockResolvedValueOnce({ turnId: 't1' }); const h = handlers();
+      sessionStream('question', h, 's1');
+      await vi.waitFor(() => expect(FakeEventSource.instances.at(-1)?.closed).toBe(false));
+      FakeEventSource.instances.at(-1)!.emit('error', { data: JSON.stringify({ message: 'Safe reason.', kind }) });
+      expect(h.onError).toHaveBeenCalledWith('Safe reason.', kind === 'query' ? 'query' : 'runtime');
+    }
   });
 
   it('reports a rejected postTurn via onError', async () => {

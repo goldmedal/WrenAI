@@ -7,6 +7,7 @@ import type { ComponentEvent, RunnerHost } from "../harness/components/runner.js
 import type { RuntimeBackendReadiness } from "./runtime-host/types.js";
 import { structuredQueryEnvelope } from "./structured-query-evidence.js";
 import { StructuredRuntimeError, type StructuredAdapter, type StructuredScope } from "./structured-runtime.js";
+import { isStructuredQueryFailure } from "./structured-error-feedback.js";
 
 type RootResult = Extract<ComponentInvocationResult, { status: "ok" }>;
 type OpenShellResult = Extract<RouteResult, { backend: "openshell" }>;
@@ -102,6 +103,11 @@ export function createOpenShellStructuredAdapter(provisioner: OpenShellStructure
         return result;
       } catch (error) {
         try { await close(); } catch { throw new StructuredRuntimeError("cleanup"); }
+        if (isStructuredQueryFailure(error)) {
+          if (timeout.signal.aborted) throw new StructuredRuntimeError("timeout");
+          if (scope.signal?.aborted) throw new StructuredRuntimeError("cancelled");
+          try { scope.assertCurrent(); } catch { throw new StructuredRuntimeError("stale"); }
+        }
         throw error instanceof StructuredRuntimeError ? error : new StructuredRuntimeError(timeout.signal.aborted ? "timeout" : scope.signal?.aborted ? "cancelled" : "failed");
       } finally { clearTimeout(timer); recordStructuredTimingTimer(timing, "cleared"); signal.removeEventListener("abort", abort); signal.removeEventListener("abort", timedAbort); }
     },

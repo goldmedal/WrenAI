@@ -511,7 +511,7 @@ export function getRuntimeSettingsReadiness(): Promise<RuntimeSettingsReadiness>
 
 export interface StructuredAskReadiness {
   readonly active: { readonly backend: string; readonly state: string; readonly ask: boolean; readonly reason: string;
-    readonly modelExecution?: 'openshell'; readonly queryExecution?: 'host'; readonly supportedAgents?: readonly string[] };
+    readonly modelExecution?: 'openshell'; readonly queryExecution?: 'openshell'; readonly supportedAgents?: readonly string[] };
 }
 export function getStructuredAskReadiness(): Promise<StructuredAskReadiness> {
   return request('/api/structured-runtime/readiness');

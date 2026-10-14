@@ -85,6 +85,8 @@ export const strings = {
     shareLinkPending: 'Sharing is not available yet — this link is a placeholder and does not open.',
     streamErrorTitle: 'The connection to the agent was lost',
     componentErrorTitle: 'The agent could not complete this request',
+    queryErrorTitle: 'The query could not be completed',
+    requestErrorTitle: 'The request could not be completed',
     streamErrorGeneric: 'The harness stream reported an error.',
     streamConnectionLost: 'Lost connection to the harness stream.',
     harnessUnreachable: 'Failed to reach the harness.',

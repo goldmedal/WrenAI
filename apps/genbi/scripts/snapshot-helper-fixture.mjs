@@ -22,10 +22,15 @@ export async function installedSnapshotHelperFixture(installedRoot, configuredPy
     const driver = new DockerSnapshotDriver(configuration);
     const manifest = await driver.capture(request, path.join(root, "archive.tar"), new AbortController().signal);
     if (!manifest.files.some((entry) => entry.path === "project/data/input.txt") || !sync.existsSync(path.join(root, "archive.tar"))) throw new Error("Installed capture did not produce complete evidence");
+    const strictConfig = '{"strict_mode":true}\n';
+    const governedRequest = { ...request, projection: { "wren-home/profiles.yml": request.projection["wren-home/profiles.yml"], "wren-home/config.json": strictConfig } };
+    const governed = await driver.capture(governedRequest, path.join(root, "governed.tar"), new AbortController().signal);
+    if (governed.files.find(entry => entry.path === "project/wren_project.yml")?.sha256 !== snapshotHash(await fs.readFile(path.join(project, "wren_project.yml"))).slice(7)
+      || governed.files.find(entry => entry.path === "wren-home/config.json")?.sha256 !== snapshotHash(strictConfig).slice(7)) throw new Error("Installed governed capture changed approved metadata or strict config");
     await fs.appendFile(SNAPSHOT_HELPER_PATH, "\n# modified fixture\n");
     let denied = false;
     try { await driver.capture(request, path.join(root, "forbidden.tar"), new AbortController().signal); } catch { denied = true; }
     if (!denied || sync.existsSync(path.join(root, "forbidden.tar"))) throw new Error("Installed helper tamper did not fail before effects");
-    process.stdout.write(JSON.stringify({ installedSnapshotHelper: true, protocol: "genbi-snapshot/1", digest: manifest.digest, tamperDenied: true }) + "\n");
+    process.stdout.write(JSON.stringify({ installedSnapshotHelper: true, protocol: "genbi-snapshot/1", digest: manifest.digest, tamperDenied: true, governedProjection: true }) + "\n");
   } finally { await fs.writeFile(SNAPSHOT_HELPER_PATH, helper); store.close(); await fs.rm(root, { recursive: true, force: true }); }
 }
