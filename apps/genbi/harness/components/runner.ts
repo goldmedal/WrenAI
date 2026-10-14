@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { normalizeComponentRequest, type ComponentInvocationResult } from "@warble/claude-agent-sdk";
 import { readSlots, wholeChildDisclosure, type EgressDecision, type EgressProvenance } from "./egress.js";
+import { checkStepRender, declaredRenderBlocks } from "./normalize.js";
 import { parseTerminalJson } from "./terminal-json.js";
 import { reportedUsage, type StepUsage } from "./usage.js";
 
@@ -429,6 +430,7 @@ export class ComponentRunner {
     // The last terminal step's text did not parse and no repair step remains to run for it.
     let unparseable = false;
     let lastStep: string | undefined;
+    const renderBlocks = declaredRenderBlocks(component);
     const lastPrimary = component.steps.indexOf(component.steps.filter((candidate) => !candidate.repairOf).at(-1)!);
     try {
       for (const step of component.steps) {
@@ -574,15 +576,22 @@ export class ComponentRunner {
           // When it does not and a repair step is declared for this step, the step fails so the
           // repair runs once; the repair receives the raw text alongside the parse error.
           const parsed = !toolFailed && perSlot && terminal && typeof response.value === "string" ? parseTerminalJson(response.value) : undefined;
-          const unparsed = parsed && !parsed.ok ? `terminal_unparseable: ${parsed.error}` : undefined;
           const repairable = component.steps.some((candidate) => candidate.repairOf === step.name);
-          const stepFailed = toolFailed || (unparsed !== undefined && repairable);
+          // A repairable terminal primary step of a rendering component is checked against the render
+          // contract now, so a violation fails the step and the declared repair step receives it.
+          const renderCheck = !toolFailed && repairable && !step.repairOf && component.steps.indexOf(step) === lastPrimary
+            && response.value !== undefined && renderBlocks.length > 0
+            ? checkStepRender(component, step.name, response.value, renderBlocks) : undefined;
+          const unparsed = parsed && !parsed.ok ? `terminal_unparseable: ${parsed.error}`
+            : renderCheck?.status === "unparseable" ? `terminal_unparseable: ${renderCheck.error}` : undefined;
+          const violation = renderCheck?.status === "violation" ? `render_contract_violation: ${renderCheck.message}` : undefined;
+          const stepFailed = toolFailed || violation !== undefined || (unparsed !== undefined && repairable);
           unparseable = false;
           if (toolFailed) {
             products[step.produces] = { status: "error", code: "step_failed" };
             failed = step.name;
           } else if (stepFailed) {
-            products[step.produces] = freeze(copy({ status: "error", code: "step_failed", reason: unparsed, text: response.value }, COMPONENT_LIMITS.resultBytes));
+            products[step.produces] = freeze(copy({ status: "error", code: "step_failed", reason: violation ?? unparsed, text: response.value }, COMPONENT_LIMITS.resultBytes));
             failed = step.name;
           } else {
             products[step.produces] = freeze(copy(response.value, COMPONENT_LIMITS.resultBytes));

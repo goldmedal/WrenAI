@@ -92,7 +92,7 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   const definitions: Lineage[] = queries.map((query) => query.definition);
   const data = queries.map((query) => query.table);
   const declared = capabilities.parse(component.declaration.required_capabilities);
-  const render = blocks.parse((component.declaration.effect as { render_blocks?: unknown }).render_blocks ?? []) as RenderBlock[];
+  const render = declaredRenderBlocks(component);
   const steps = component.steps.filter((step) => Object.hasOwn(evidence.steps, step.produces));
   const terminal = steps.at(-1);
   if (!terminal) return refused();
@@ -128,20 +128,11 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
     return { status: "ok", output: { kind: "value", value: { ...chosen.table, verified: true, summary: "Query completed.", definition } },
       provenance: { verified: true, definition } };
   }
-  // A prose-wrapped or fenced JSON value is read with the same tolerant parse as every other terminal;
-  // the value is then validated and grounded exactly as strictly as a bare one.
-  const parsedProduct = typeof lastProduct === "string" ? parseTerminalJson(lastProduct) : { ok: true as const, value: lastProduct };
-  // Object-shaped rows (which the answering component's own contract allows) are put in the declared column order first.
-  const rendered = parsedProduct.ok ? { ok: true as const, value: normalizeChartTypes(coerceObjectRows(parsedProduct.value)) } : parsedProduct;
-  const result = normalizeComponentResult(rendered.ok ? JSON.stringify(rendered.value) : String(lastProduct), render).value;
+  const { rendered, result } = renderTerminal(lastProduct, render);
   // A parsed value that breaks the render contract is the model's invalid layout, not a host fault: refuse with the first violation.
-  if (result.status === "error" && result.code === "invalid_result" && rendered.ok && /render contract/.test(result.message)) {
-    const violation = diagnoseRenderViolation(rendered.value, render);
-    // The offending field's value, described by shape (see describeOffendingValue), goes to the server log only; the refusal text names the field.
-    if (violation.offending !== undefined) {
-      console.error(`[component-failure] ${JSON.stringify({ site: "normalize_refused", code: "callee_refused", component: component.id, step: terminal.name,
-        field: violation.offending.field, value: violation.offending.value, ...(violation.offending.blockKeys ? { block_keys: violation.offending.blockKeys } : {}) })}`);
-    }
+  if (isRenderContractViolation(result, rendered.ok)) {
+    const violation = diagnoseRenderViolation(rendered.ok ? rendered.value : undefined, render);
+    logRenderViolation("normalize_refused", component.id, terminal.name, violation, "callee_refused");
     return { status: "refused", code: "callee_refused", message: `The result did not match the render contract: ${violation.message}.` };
   }
   if (result.status !== "ok") return result;
@@ -161,6 +152,48 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // A render with data-bearing blocks cannot earn provenance from prose alone.
   if (result.output.kind === "render" && result.output.blocks.some((block) => ["table", "chart", "kpi_card"].includes(String(block.type))) && data.length === 0) return refused();
   return { ...result, provenance: { ...result.provenance, verified: data.length > 0 } };
+}
+
+/** The render blocks a component declares, empty when it declares none. */
+export function declaredRenderBlocks(component: ComponentPlan): RenderBlock[] {
+  return blocks.parse((component.declaration.effect as { render_blocks?: unknown } | undefined)?.render_blocks ?? []) as RenderBlock[];
+}
+type TerminalParse = ReturnType<typeof parseTerminalJson>;
+/**
+ * The one pipeline a terminal value goes through against the render contract: tolerant parse, object rows
+ * put in column order, chart types canonicalised, then the SDK validator. The post-run normalization and
+ * the per-step render check both use it, so they can never disagree about what is a violation.
+ */
+function renderTerminal(output: unknown, render: readonly RenderBlock[]): { rendered: TerminalParse; result: ComponentInvocationResult } {
+  const parsedProduct: TerminalParse = typeof output === "string" ? parseTerminalJson(output) : { ok: true as const, value: output };
+  const rendered: TerminalParse = parsedProduct.ok ? { ok: true as const, value: normalizeChartTypes(coerceObjectRows(parsedProduct.value)) } : parsedProduct;
+  const result = normalizeComponentResult(rendered.ok ? JSON.stringify(rendered.value) : String(output), render as RenderBlock[]).value;
+  return { rendered, result };
+}
+function isRenderContractViolation(result: ComponentInvocationResult, parsed: boolean): boolean {
+  return result.status === "error" && result.code === "invalid_result" && parsed && /render contract/.test(result.message);
+}
+/** Logs the shape of a violation (field, value description, block keys) to the server log only. */
+function logRenderViolation(site: string, component: string, step: string, violation: RenderViolation, code?: string): void {
+  if (violation.offending === undefined) return;
+  console.error(`[component-failure] ${JSON.stringify({ site, ...(code ? { code } : {}), component, step,
+    field: violation.offending.field, value: violation.offending.value, ...(violation.offending.blockKeys ? { block_keys: violation.offending.blockKeys } : {}) })}`);
+}
+export type StepRenderCheck =
+  | { readonly status: "ok" }
+  | { readonly status: "unparseable"; readonly error: string }
+  | { readonly status: "violation"; readonly message: string };
+/**
+ * Checks a step's raw output against the component's render contract the moment the step finishes, so a
+ * declared repair step can fix it. A violation message is host-authored and never echoes model text.
+ */
+export function checkStepRender(component: ComponentPlan, step: string, output: unknown, render: readonly RenderBlock[]): StepRenderCheck {
+  const { rendered, result } = renderTerminal(output, render);
+  if (!rendered.ok) return { status: "unparseable", error: rendered.error };
+  if (!isRenderContractViolation(result, true)) return { status: "ok" };
+  const violation = diagnoseRenderViolation(rendered.value, render);
+  logRenderViolation("step_render_check", component.id, step, violation);
+  return { status: "violation", message: violation.message };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
