@@ -130,7 +130,9 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   }
   // A prose-wrapped or fenced JSON value is read with the same tolerant parse as every other terminal;
   // the value is then validated and grounded exactly as strictly as a bare one.
-  const rendered = typeof lastProduct === "string" ? parseTerminalJson(lastProduct) : { ok: true as const, value: lastProduct };
+  const parsedProduct = typeof lastProduct === "string" ? parseTerminalJson(lastProduct) : { ok: true as const, value: lastProduct };
+  // Object-shaped rows (which the answering component's own contract allows) are put in the declared column order first.
+  const rendered = parsedProduct.ok ? { ok: true as const, value: coerceObjectRows(parsedProduct.value) } : parsedProduct;
   const result = normalizeComponentResult(rendered.ok ? JSON.stringify(rendered.value) : String(lastProduct), render).value;
   // A parsed value that breaks the render contract is the model's invalid layout, not a host fault: refuse with the first violation.
   if (result.status === "error" && result.code === "invalid_result" && rendered.ok && /render contract/.test(result.message)) {
@@ -153,6 +155,40 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // A render with data-bearing blocks cannot earn provenance from prose alone.
   if (result.output.kind === "render" && result.output.blocks.some((block) => ["table", "chart", "kpi_card"].includes(String(block.type))) && data.length === 0) return refused();
   return { ...result, provenance: { ...result.provenance, verified: data.length > 0 } };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+/** Row `rows` as positional rows in `columns` order, only when every row is an object with exactly those keys; else undefined. Values are copied as they are. */
+function positionalFromObjects(columns: readonly string[], rows: readonly unknown[]): unknown[][] | undefined {
+  if (rows.length === 0 || columns.length === 0 || new Set(columns).size !== columns.length) return undefined;
+  const out: unknown[][] = [];
+  for (const row of rows) {
+    if (!isPlainObject(row)) return undefined;
+    const keys = Object.keys(row);
+    if (keys.length !== columns.length || !columns.every((column) => Object.hasOwn(row, column))) return undefined;
+    out.push(columns.map((column) => row[column]));
+  }
+  return out;
+}
+/**
+ * Converts object-shaped rows to positional `row[]` in a `table` block (columns = `columns`) and a `chart` block
+ * (columns = `x` then `series`). All-or-nothing per block: a missing or extra key, a non-object row or a block
+ * without declared string columns leaves the block exactly as the model wrote it, so validation and grounding
+ * see the same strictness as before.
+ */
+export function coerceObjectRows(value: unknown): unknown {
+  if (!isPlainObject(value) || !Array.isArray(value["blocks"])) return value;
+  const blocks = value["blocks"].map((block: unknown) => {
+    if (!isPlainObject(block) || !Array.isArray(block["rows"])) return block;
+    const columns = block["type"] === "table" ? block["columns"]
+      : block["type"] === "chart" && typeof block["x"] === "string" && Array.isArray(block["series"]) ? [block["x"], ...block["series"]] : undefined;
+    if (!Array.isArray(columns) || !columns.every((column) => typeof column === "string")) return block;
+    const rows = positionalFromObjects(columns as string[], block["rows"]);
+    return rows ? { ...block, rows } : block;
+  });
+  return { ...value, blocks };
 }
 
 const VIOLATION_TYPE_LIMIT = 40;
