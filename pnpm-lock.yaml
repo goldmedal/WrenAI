@@ -40,14 +40,14 @@ importers:
         specifier: ^2.0.10
         version: 2.1.1(hono@4.13.5)
       '@warble/claude-agent-sdk':
-        specifier: 0.18.0
-        version: 0.18.0(@anthropic-ai/sdk@0.129.0(zod@4.5.4))(@modelcontextprotocol/sdk@1.30.0(zod@4.5.4))(@warble/ir-spec@0.9.0)
+        specifier: 0.19.0
+        version: 0.19.0(@anthropic-ai/sdk@0.129.0(zod@4.5.4))(@modelcontextprotocol/sdk@1.30.0(zod@4.5.4))(@warble/ir-spec@0.9.0)
       '@warble/cli':
-        specifier: 0.18.0
-        version: 0.18.0(@warble/ir-spec@0.9.0)
+        specifier: 0.19.0
+        version: 0.19.0(@warble/ir-spec@0.9.0)
       '@warble/codex-local':
-        specifier: 0.18.0
-        version: 0.18.0(@warble/ir-spec@0.9.0)
+        specifier: 0.19.0
+        version: 0.19.0(@warble/ir-spec@0.9.0)
       '@warble/ir-spec':
         specifier: 0.9.0
         version: 0.9.0
@@ -1210,22 +1210,22 @@ packages:
   '@vitest/utils@4.1.11':
     resolution: {integrity: sha512-zTCVGpyFsGWBhllOyKlTw/vnr6D9qxsfSDyfbyZmTyjHw5N/VuvzHpHoQjm2ZJzn4RJgx5w4r7V0er69CmLgPQ==}
 
-  '@warble/claude-agent-sdk@0.18.0':
-    resolution: {integrity: sha512-0xSgZZQHqnH29xm+NVM5fh3qgL2ta8+SXF6Y3K3zATiOp9+H6qASAEAoDtKkAyHao/RNZ+rb0S/NdXB7brmyow==}
+  '@warble/claude-agent-sdk@0.19.0':
+    resolution: {integrity: sha512-jqd/7IGdozW6wvqdtNW2rIsVDBHIThglfWus4B6N1rpRr2uesc4W2d6zYGyqIqL/wZcaWR7xe2IkjH4Hdby3NA==}
     engines: {node: '>=18'}
     hasBin: true
     peerDependencies:
       '@warble/ir-spec': 0.9.x
 
-  '@warble/cli@0.18.0':
-    resolution: {integrity: sha512-DCKmdv5aeZX/pCDtHPrkjR+Wwz5om5bVMyLSiJDYWFGrvWFTAjsFNDXH6fuNe366WoW2KfcpjIEzQ2axHX5VkQ==}
+  '@warble/cli@0.19.0':
+    resolution: {integrity: sha512-i/bTf0q5drfA1+uuglXf2PTC7cOxT33YnUTkkBmXg7okETsneU5feOZUpH1kxM9KxdqWLTM66ouTneSJp+HsMQ==}
     engines: {node: '>=14.14', npm: '>=6'}
     hasBin: true
     peerDependencies:
       '@warble/ir-spec': 0.9.x
 
-  '@warble/codex-local@0.18.0':
-    resolution: {integrity: sha512-iTpAj7wmUrtRA5y6DNqHik5yPyfZ946yCy7RGpRP4Ib4lRILXGhAE0ZJU6EjHtxlijXSnuYttPO1aUBr8Hgzlg==}
+  '@warble/codex-local@0.19.0':
+    resolution: {integrity: sha512-0EPOrAMAbulCOpm8di2rd8e0LIy7N67uVY3NW1Qxy19GXJ8eJ9w9yIT/3PeevjJfzUk/mEnVtDYf2wsEjoIE6A==}
     engines: {node: '>=18'}
     hasBin: true
     peerDependencies:
@@ -3504,7 +3504,7 @@ snapshots:
       convert-source-map: 2.0.0
       tinyrainbow: 3.1.1
 
-  '@warble/claude-agent-sdk@0.18.0(@anthropic-ai/sdk@0.129.0(zod@4.5.4))(@modelcontextprotocol/sdk@1.30.0(zod@4.5.4))(@warble/ir-spec@0.9.0)':
+  '@warble/claude-agent-sdk@0.19.0(@anthropic-ai/sdk@0.129.0(zod@4.5.4))(@modelcontextprotocol/sdk@1.30.0(zod@4.5.4))(@warble/ir-spec@0.9.0)':
     dependencies:
       '@anthropic-ai/claude-agent-sdk': 0.3.296(@anthropic-ai/sdk@0.129.0(zod@4.5.4))(@modelcontextprotocol/sdk@1.30.0(zod@4.5.4))(zod@4.5.4)
       '@warble/ir-spec': 0.9.0
@@ -3514,12 +3514,12 @@ snapshots:
       - '@anthropic-ai/sdk'
       - '@modelcontextprotocol/sdk'
 
-  '@warble/cli@0.18.0(@warble/ir-spec@0.9.0)':
+  '@warble/cli@0.19.0(@warble/ir-spec@0.9.0)':
     dependencies:
       '@warble/ir-spec': 0.9.0
       detect-libc: 2.1.2
 
-  '@warble/codex-local@0.18.0(@warble/ir-spec@0.9.0)':
+  '@warble/codex-local@0.19.0(@warble/ir-spec@0.9.0)':
     dependencies:
       '@warble/ir-spec': 0.9.0
 
