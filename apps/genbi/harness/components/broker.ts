@@ -5,6 +5,7 @@ import type { ComponentBinding, ComponentEvidence, ComponentPlan, ExecutionPlan,
 import type { ComponentInvocationResult } from "@warble/claude-agent-sdk";
 import { planDigest } from "./plan.js";
 import { verifyComponentContext } from "./context.js";
+import { describeRenderContract } from "./render-contract-text.js";
 
 /** Captured by the host from its project, session and approved runtime records. */
 export interface ComponentIdentity {
@@ -135,7 +136,7 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
       const render = z.object({ render_blocks: z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict()).optional() }).passthrough().parse(component.declaration.effect ?? {}).render_blocks;
       const surface = options.contextSurface ? options.contextSurface(component, run)
         : context ? { kind: "snapshot" as const, text: `Host semantic context:\n${JSON.stringify(context.snapshot)}` } : undefined;
-      const renderText = run.terminal && render?.length ? `Render output: Return only one JSON object with a blocks array. Each block has a type and its declared fields. Use only these block contracts (a trailing ? means optional): ${JSON.stringify(render)}. Copy data and definitions only from successful host tool or child results. A KPI label must identify its returned column; do not invent units or deltas. If evidence is insufficient, return {"status":"refused","message":"Insufficient verified data"}.` : "";
+      const renderText = run.terminal && render?.length ? `Render output: Return only one JSON object with a blocks array.\n${describeRenderContract(render)}\nCopy data and definitions only from successful host tool or child results. A KPI label must identify its returned column; do not invent units or deltas. If evidence is insufficient, return {"status":"refused","message":"Insufficient verified data"}.` : "";
       const surfaces: Record<string, string> = { prompt: run.prompt };
       if (surface) surfaces["context"] = surface.text;
       if (renderText) surfaces["render"] = renderText;
