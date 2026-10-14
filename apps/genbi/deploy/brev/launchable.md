@@ -53,7 +53,7 @@ own, and the Secure Link's NVIDIA sign-in is what protects it.
   `brev org set <org>` then `brev shell <instance>`, or `ssh -F ~/.brev/ssh_config <instance>`.
 - The Secure Link redirects to NVIDIA SSO before proxying to port 4787 (expected: it is login-protected by default).
 
-## Known limits for a fully unattended run (as of @wrenai/genbi 0.0.7)
+## Known limits for a fully unattended run (as of @wrenai/genbi 0.0.8)
 
 The published `@wrenai/genbi` calls `resolve_profile_for_project(..., strict=True)`, a wren API that no PyPI
 `wrenai` release has (0.13.x–0.15.0); `setup.sh` therefore installs the GenBI Wren fork wheel, which has it. Without
@@ -74,8 +74,14 @@ lost"; the SQL-writing model is told the project's dialect; render blocks are sh
 and a layout that still misses the render contract is repaired once (Warble 0.19.0 `repair_layout`). With Nemotron
 Super on a local BFF, "build dashboard" returns a verified dashboard.
 
-Still open: on a fresh 0.0.6 Launchable the full wizard and a verified Ask completed with Nemotron Super; the 0.0.7
-dashboard path has not yet been re-verified on the Launchable itself. Model-led steps can still need a retry.
+Fixed in 0.0.8: the Secure Link. On a 0.0.7 Launchable the wizard and a verified Ask completed, but only through a
+manual forward: the Secure Link proxy connects over the VM's overlay network and the BFF listened on loopback only,
+so the link answered `503 Connection refused`. The BFF now binds `GENBI_HOST`, which `setup.sh` sets to `0.0.0.0`.
+
+Still open: "build dashboard" on the Launchable can be cancelled by the 120 s budget a component run has in total.
+A dashboard runs its per-panel queries one after another, and each one makes several calls to the hosted model, so
+on hosted Nemotron Super the whole run can take longer than the budget. A configurable budget is planned. Model-led
+steps can still need a retry.
 
 ## Keeping it fresh
 

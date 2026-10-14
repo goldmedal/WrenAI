@@ -25,7 +25,7 @@ the rest:
 
 ## Developer preview
 
-`@wrenai/genbi` is published at `0.0.7`. Nothing here is under a compatibility
+`@wrenai/genbi` is published at `0.0.8`. Nothing here is under a compatibility
 commitment yet — commands, environment variables and interfaces move without
 notice. Runtime support is limited to the exact versions and execution scopes in the
 packaged certification records; a supported protocol alone does not enable a runtime. See
