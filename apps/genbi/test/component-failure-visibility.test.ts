@@ -167,12 +167,54 @@ describe("generate_dashboard failure points (scripted model, no live calls)", ()
     expect(run.result).toMatchObject({ kind: "refusal" });
   });
 
+  it("a missing chart_type becomes bar and assembles", async () => {
+    const run = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: undefined }), definition(PLAN_SQL)]));
+    expect(run.error).toBeUndefined();
+    expect(run.result).toMatchObject({ kind: "answer", envelope: { verified: true } });
+    expect((run.result as { envelope: { blocks: { chart_type?: string }[] } }).envelope.blocks[0]!.chart_type).toBe("bar");
+  });
+  const synonyms: readonly [string, string][] = [
+    ...["column", "Columns", "bar_chart", "BarChart", "horizontal-bar", "stacked bar", " grouped_bar ", "histogram", "BAR"].map((v): [string, string] => [v, "bar"]),
+    ...["line_chart", "linechart", "time-series", "Time Series", "timeseries", "trend", "LINE"].map((v): [string, string] => [v, "line"]),
+    ...["donut", "Doughnut", "pie chart", "pie_chart", "Pie"].map((v): [string, string] => [v, "pie"]),
+    ...["area_chart", "Stacked-Area", "area"].map((v): [string, string] => [v, "area"]),
+    ...["scatter_plot", "ScatterPlot", "bubble", "scatter"].map((v): [string, string] => [v, "scatter"]),
+  ];
+  it.each(synonyms)("chart_type %j is read as %s", async (written, canonical) => {
+    const run = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: written }), definition(PLAN_SQL)]));
+    expect(run.error).toBeUndefined();
+    expect(run.result).toMatchObject({ kind: "answer" });
+    expect((run.result as { envelope: { blocks: { chart_type?: string }[] } }).envelope.blocks[0]!.chart_type).toBe(canonical);
+  });
+  it("a normalized chart with an invented value is still refused by grounding", async () => {
+    const run = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: "Column", rows: [["free", 999], ["pro", 5]] }), definition(PLAN_SQL)]));
+    expect(run.result).toMatchObject({ kind: "refusal" });
+  });
+  it("an unrecognised chart_type is refused, and only the log line names the value", async () => {
+    const run = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: "  Radar\n chart " }), definition(PLAN_SQL)]));
+    expect(run.result).toMatchObject({ kind: "refusal" });
+    const shown = (run.result as { reason: string }).reason;
+    expect(shown).toContain("field `chart_type` must be bar|line|pie|area|scatter");
+    expect(shown).not.toMatch(/radar/i);
+    const line = logged.map((entry) => entry.slice("[component-failure] ".length)).filter((entry) => entry.startsWith("{")).map((entry) => JSON.parse(entry) as Record<string, string>).find((entry) => entry["field"]);
+    expect(line).toMatchObject({ site: "normalize_refused", field: "chart_type", value: "Radar chart", component: "generate_dashboard", step: "compose_layout" });
+    expect(JSON.stringify(logged)).not.toMatch(/free|pro|customers"?:\s*[0-9]/);
+  });
+  it("a long enum value is capped in the log and a data-field violation logs no value", async () => {
+    const long = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: "z".repeat(200) }), definition(PLAN_SQL)]));
+    const value = long.failureLines.find((line) => line["field"])?.["value"] as string;
+    expect(value.length).toBeLessThanOrEqual(67);
+    logged.length = 0;
+    const data = await runDashboard(asEnvelope([chart(PLAN_SQL, { x: 42 }), definition(PLAN_SQL)]));
+    expect(data.failureLines.some((line) => line["field"])).toBe(false);
+  });
+
   const violations: readonly [string, string, RegExp][] = [
     ["object rows with an extra key", asEnvelope([chart(PLAN_SQL, { rows: PLAN_ROWS.map((row) => ({ ...row, note: "x" })) }), definition(PLAN_SQL)]), /block 1 \(chart\): field `rows` must be row\[\]/],
     ["object rows missing a declared column", asEnvelope([chart(PLAN_SQL, { rows: PLAN_ROWS.map((row) => ({ plan: row.plan })) }), definition(PLAN_SQL)]), /block 1 \(chart\): field `rows` must be row\[\]/],
     ["one object row among positional rows", asEnvelope([chart(PLAN_SQL, { rows: [["free", 3], { plan: "pro", customers: 5 }] }), definition(PLAN_SQL)]), /block 1 \(chart\): field `rows` must be row\[\]/],
     ["chart without its x field", asEnvelope([chart(PLAN_SQL, { x: undefined }), definition(PLAN_SQL)]), /block 1 \(chart\): field `x` must be string/],
-    ["chart_type outside the contract", asEnvelope([chart(PLAN_SQL, { chart_type: "donut" }), definition(PLAN_SQL)]), /block 1 \(chart\): field `chart_type`/],
+    ["chart_type outside the contract", asEnvelope([chart(PLAN_SQL, { chart_type: "radar" }), definition(PLAN_SQL)]), /block 1 \(chart\): field `chart_type`/],
     ["a block type outside the contract", asEnvelope([{ type: "heading", text: "Overview" }]), /block 1 has a type that is not allowed \(allowed: kpi_card, table, chart, definition\)/],
     ["a string series", asEnvelope([chart(PLAN_SQL, { series: "customers" }), definition(PLAN_SQL)]), /block 1 \(chart\): field `series` must be string\[\]/],
     ["a second block violating after a good one", asEnvelope([chart(PLAN_SQL), definition(PLAN_SQL), chart(MONTH_SQL, { rows: MONTH_ROWS.map((row) => ({ ...row, extra: 1 })) })]), /block 3 \(chart\): field `rows`/],
@@ -185,10 +227,11 @@ describe("generate_dashboard failure points (scripted model, no live calls)", ()
     const shown = (run.result as { reason: string }).reason;
     expect(shown).toMatch(/^The result did not match the render contract: /);
     expect(shown).toMatch(reason);
-    expect(shown).not.toMatch(/heading|donut/);
-    expect(run.failureLines).toHaveLength(1);
-    expect(run.failureLines[0]).toMatchObject({ site: "normalize_refused", code: "callee_refused", component: "generate_dashboard", step: "compose_layout" });
-    expect(run.failureLines[0]!.detail).toMatch(reason);
+    expect(shown).not.toMatch(/heading|radar/);
+    const reasonLines = run.failureLines.filter((line) => line["field"] === undefined);
+    expect(reasonLines).toHaveLength(1);
+    expect(reasonLines[0]).toMatchObject({ site: "normalize_refused", code: "callee_refused", component: "generate_dashboard", step: "compose_layout" });
+    expect(reasonLines[0]!.detail).toMatch(reason);
   });
 
   const refusing: readonly [string, string][] = [
