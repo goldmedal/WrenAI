@@ -41,6 +41,8 @@ describe("in-process composed route", () => {
         if (step.tools.answer) {
           expect(Object.keys(step.tools)).toEqual(["answer"]);
           expect(step.prompt).toContain("Render output:");
+          expect(step.prompt).toContain("never under a `fields` key");
+          expect(step.prompt).not.toContain('"fields":');
           for (const request of ["first", "second"]) {
             expect(await step.tools.answer({ request })).toMatchObject({ status: "ok", output: { value: { verified: true, rows: [{ n: 7 }] } } });
           }
