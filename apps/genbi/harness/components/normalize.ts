@@ -2,7 +2,7 @@ import { normalizeComponentResult, type ComponentInvocationResult, type RenderBl
 import { z } from "zod";
 import { checkSemanticGuards, querySemantics, type QuerySemantics } from "./semantic-guards.js";
 import { namedAnswerQueryId, namedAnswerSql, selectAnsweringCandidate, sqlKey } from "../render/answering-query.js";
-import { isQueryGrant, type ComponentEvidence, type ComponentPlan } from "./runner.js";
+import { isQueryGrant, redactForLog, type ComponentEvidence, type ComponentPlan } from "./runner.js";
 import { batchEntry, parseTerminalJson } from "./terminal-json.js";
 
 const definitionSchema = z.object({ sql: z.string(), source_tables: z.array(z.string()), filters: z.array(z.string()) }).strict();
@@ -132,11 +132,17 @@ export function normalizeComponentEvidence(component: ComponentPlan, evidence: C
   // the value is then validated and grounded exactly as strictly as a bare one.
   const parsedProduct = typeof lastProduct === "string" ? parseTerminalJson(lastProduct) : { ok: true as const, value: lastProduct };
   // Object-shaped rows (which the answering component's own contract allows) are put in the declared column order first.
-  const rendered = parsedProduct.ok ? { ok: true as const, value: coerceObjectRows(parsedProduct.value) } : parsedProduct;
+  const rendered = parsedProduct.ok ? { ok: true as const, value: normalizeChartTypes(coerceObjectRows(parsedProduct.value)) } : parsedProduct;
   const result = normalizeComponentResult(rendered.ok ? JSON.stringify(rendered.value) : String(lastProduct), render).value;
   // A parsed value that breaks the render contract is the model's invalid layout, not a host fault: refuse with the first violation.
   if (result.status === "error" && result.code === "invalid_result" && rendered.ok && /render contract/.test(result.message)) {
-    return { status: "refused", code: "callee_refused", message: `The result did not match the render contract: ${describeRenderViolation(rendered.value, render)}.` };
+    const violation = diagnoseRenderViolation(rendered.value, render);
+    // The offending value of an enum field (a closed vocabulary, not data) goes to the server log only; the refusal text names the field.
+    if (violation.enumValue !== undefined) {
+      console.error(`[component-failure] ${JSON.stringify({ site: "normalize_refused", code: "callee_refused", component: component.id, step: terminal.name,
+        field: violation.enumValue.field, value: redactForLog(violation.enumValue.value, ENUM_LOG_LIMIT) })}`);
+    }
+    return { status: "refused", code: "callee_refused", message: `The result did not match the render contract: ${violation.message}.` };
   }
   if (result.status !== "ok") return result;
   const composed = component.steps.some((step) => step.calls.length > 0);
@@ -198,22 +204,69 @@ const VIOLATION_TYPE_LIMIT = 40;
  * the SDK's verdict without re-implementing its field types.
  */
 export function describeRenderViolation(value: unknown, contract: readonly RenderBlock[]): string {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return "the result is not an object with a `blocks` array";
+  return diagnoseRenderViolation(value, contract).message;
+}
+const ENUM_LOG_LIMIT = 64;
+const PRIMITIVE_FIELD_TYPES = new Set(["string", "number", "boolean", "row"]);
+/** A field type such as `bar|line`: a closed vocabulary of literals, as the SDK validator reads it. */
+function isEnumType(type: string): boolean {
+  const base = type.endsWith("?") ? type.slice(0, -1) : type;
+  return base.includes("|") && !base.endsWith("[]") && !base.split("|").every((variant) => PRIMITIVE_FIELD_TYPES.has(variant));
+}
+interface RenderViolation { readonly message: string; readonly enumValue?: { readonly field: string; readonly value: string } }
+function diagnoseRenderViolation(value: unknown, contract: readonly RenderBlock[]): RenderViolation {
+  const found = (message: string): RenderViolation => ({ message });
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return found("the result is not an object with a `blocks` array");
   const envelope = value as Record<string, unknown>;
-  if (!Array.isArray(envelope["blocks"])) return "the result has no `blocks` array";
+  if (!Array.isArray(envelope["blocks"])) return found("the result has no `blocks` array");
   const allowed = contract.map((block) => block.type);
   for (const [index, raw] of envelope["blocks"].entries()) {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `block ${index + 1} is not an object`;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return found(`block ${index + 1} is not an object`);
     const block = raw as Record<string, unknown>;
     const expected = contract.find((candidate) => candidate.type === block["type"]);
-    if (typeof block["type"] !== "string") return `block ${index + 1} has no \`type\``;
-    if (!expected) return `block ${index + 1} has a type that is not allowed (allowed: ${allowed.join(", ").slice(0, VIOLATION_TYPE_LIMIT * 4)})`;
+    if (typeof block["type"] !== "string") return found(`block ${index + 1} has no \`type\``);
+    if (!expected) return found(`block ${index + 1} has a type that is not allowed (allowed: ${allowed.join(", ").slice(0, VIOLATION_TYPE_LIMIT * 4)})`);
     for (const [field, type] of Object.entries(expected.fields)) {
       const probe = normalizeComponentResult(JSON.stringify({ blocks: [block] }), [{ type: expected.type, fields: { [field]: type } }]).value;
-      if (probe.status !== "ok") return `block ${index + 1} (${expected.type}): field \`${field}\` must be ${type}`;
+      if (probe.status !== "ok") {
+        const offending = block[field];
+        return { message: `block ${index + 1} (${expected.type}): field \`${field}\` must be ${type}`,
+          ...(isEnumType(type) ? { enumValue: { field, value: offending === undefined ? "(missing)" : typeof offending === "string" ? offending : JSON.stringify(offending) ?? "(unserializable)" } } : {}) };
+      }
     }
   }
-  return "the summary is not a string";
+  return found("the summary is not a string");
+}
+
+const CHART_TYPES = ["bar", "line", "pie", "area", "scatter"] as const;
+const CHART_TYPE_SYNONYMS: Readonly<Record<string, (typeof CHART_TYPES)[number]>> = Object.freeze({
+  column: "bar", columns: "bar", bar_chart: "bar", barchart: "bar", horizontal_bar: "bar", stacked_bar: "bar", grouped_bar: "bar", histogram: "bar",
+  line_chart: "line", linechart: "line", time_series: "line", timeseries: "line", trend: "line",
+  donut: "pie", doughnut: "pie", pie_chart: "pie",
+  area_chart: "area", stacked_area: "area",
+  scatter_plot: "scatter", scatterplot: "scatter", bubble: "scatter",
+});
+/** The canonical chart type for a model-written one: canonical values in any casing, the listed synonyms, else undefined. */
+export function canonicalChartType(value: string): (typeof CHART_TYPES)[number] | undefined {
+  const key = value.trim().toLowerCase().replace(/[-\s]+/g, "_");
+  return CHART_TYPES.find((type) => type === key) ?? CHART_TYPE_SYNONYMS[key];
+}
+/**
+ * Sets a missing `chart_type` on a chart block to `bar` and maps unambiguous synonyms to the canonical
+ * value. Any other value is left exactly as written, so the render contract still refuses it. Rows,
+ * `x`, `series` and every other field are untouched, and grounding runs on the normalized block.
+ */
+export function normalizeChartTypes(value: unknown): unknown {
+  if (!isPlainObject(value) || !Array.isArray(value["blocks"])) return value;
+  const blocks = value["blocks"].map((block: unknown) => {
+    if (!isPlainObject(block) || block["type"] !== "chart") return block;
+    const current = block["chart_type"];
+    if (current === undefined || current === null) return { ...block, chart_type: "bar" };
+    if (typeof current !== "string") return block;
+    const canonical = canonicalChartType(current);
+    return canonical !== undefined && canonical !== current ? { ...block, chart_type: canonical } : block;
+  });
+  return { ...value, blocks };
 }
 
 function grounded(render: readonly Record<string, unknown>[], data: readonly z.infer<typeof table>[], definitions: readonly Lineage[]): boolean {
