@@ -200,13 +200,42 @@ describe("generate_dashboard failure points (scripted model, no live calls)", ()
     expect(line).toMatchObject({ site: "normalize_refused", field: "chart_type", value: "Radar chart", component: "generate_dashboard", step: "compose_layout" });
     expect(JSON.stringify(logged)).not.toMatch(/free|pro|customers"?:\s*[0-9]/);
   });
-  it("a long enum value is capped in the log and a data-field violation logs no value", async () => {
-    const long = await runDashboard(asEnvelope([chart(PLAN_SQL, { chart_type: "z".repeat(200) }), definition(PLAN_SQL)]));
-    const value = long.failureLines.find((line) => line["field"])?.["value"] as string;
-    expect(value.length).toBeLessThanOrEqual(67);
+  const kpi = (fields: Record<string, unknown>) => ({ type: "kpi_card", value: 5, ...fields });
+  const valueLine = async (blocks: unknown[]) => {
     logged.length = 0;
-    const data = await runDashboard(asEnvelope([chart(PLAN_SQL, { x: 42 }), definition(PLAN_SQL)]));
-    expect(data.failureLines.some((line) => line["field"])).toBe(false);
+    const run = await runDashboard(asEnvelope(blocks));
+    expect(run.result).toMatchObject({ kind: "refusal" });
+    return { run, line: run.failureLines.find((line) => line["field"] !== undefined) };
+  };
+  it("a long structural string is capped in the log", async () => {
+    const { line } = await valueLine([chart(PLAN_SQL, { chart_type: "z".repeat(200) }), definition(PLAN_SQL)]);
+    expect((line!["value"] as string).length).toBeLessThanOrEqual(67);
+  });
+  it("a missing label logs (missing)", async () => {
+    const { line } = await valueLine([kpi({}), definition(PLAN_SQL)]);
+    expect(line).toMatchObject({ site: "normalize_refused", field: "label", value: "(missing)" });
+  });
+  it("a label given as an object logs its key names only", async () => {
+    const { line } = await valueLine([kpi({ label: { text: "Customers", n: 12345 } }), definition(PLAN_SQL)]);
+    expect(line).toMatchObject({ field: "label", value: "object{text,n}" });
+  });
+  it("a kpi_card with title but no label logs label=(missing) and the block's key names", async () => {
+    const { line } = await valueLine([kpi({ title: "Customers" }), definition(PLAN_SQL)]);
+    expect(line).toMatchObject({ field: "label", value: "(missing)", block_keys: "type,value,title" });
+  });
+  it("a data field is described by its type only, and no data value reaches any log line", async () => {
+    const { run } = await valueLine([chart(PLAN_SQL, { series: "customers-secret-77" }), definition(PLAN_SQL)]);
+    const line = run.failureLines.find((entry) => entry["field"] === "series");
+    expect(line).toMatchObject({ field: "series", value: "string" });
+    const wrongRows = await valueLine([chart(PLAN_SQL, { rows: "free-pro-secret-99" }), definition(PLAN_SQL)]);
+    expect(wrongRows.line).toMatchObject({ field: "rows", value: "string" });
+    const numericX = await valueLine([chart(PLAN_SQL, { x: 424242 }), definition(PLAN_SQL)]);
+    expect(numericX.line).toMatchObject({ field: "x", value: "number" });
+    expect(JSON.stringify([run.failureLines, wrongRows.run.failureLines, numericX.run.failureLines])).not.toMatch(/secret|424242|"free"|"pro"/);
+  });
+  it("an unknown block type logs the type string, capped", async () => {
+    const { line } = await valueLine([{ type: "heading", text: "Overview" }]);
+    expect(line).toMatchObject({ field: "type", value: "heading" });
   });
 
   const violations: readonly [string, string, RegExp][] = [
