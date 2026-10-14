@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import { dialectGuidance } from "./sql-dialect.js";
 import type { ComponentBinding, ComponentEvidence, ComponentPlan, ExecutionPlan, RunnerHost, StepResponse, StepRun } from "./runner.js";
 import type { ComponentInvocationResult } from "@warble/claude-agent-sdk";
 import { planDigest } from "./plan.js";
@@ -17,6 +18,8 @@ export interface ComponentIdentity {
   readonly planDigest: string;
 }
 export interface ComponentAccess {
+  /** The SQL dialect queries are parsed with, when the bound project declares a known data source. */
+  readonly sqlDialect?: string;
   /** Must execute against the captured project and enforce read-only access. */
   query(input: { sql: string; limit: number }, signal: AbortSignal): Promise<unknown>;
   inspect(signal: AbortSignal): Promise<unknown>;
@@ -101,6 +104,7 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
         isCurrent: current, close,
         tools: grants.map((grant, index) => ({ ...grant,
           inputSchema: operations[index] === "query" ? QUERY_SCHEMA : INSPECT_SCHEMA,
+          ...(operations[index] === "query" && access.sqlDialect ? { description: `Run one read-only SELECT over the bound semantic models. ${dialectGuidance(access.sqlDialect)}` } : {}),
           async execute(input, parent) {
             check(parent);
             if (closed) throw new Error("Component access is closed");
