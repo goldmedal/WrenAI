@@ -27,6 +27,7 @@ export function AskSession({ sessionId }: Props) {
   const streaming = useSessionStore((s) => s.streaming[sessionId] ?? false);
   const error = useSessionStore((s) => s.streamError[sessionId]);
   const errorCode = useSessionStore((s) => s.streamErrorCode[sessionId]);
+  const errorKind = useSessionStore((s) => s.streamErrorKind[sessionId]);
   const sendMessage = useSessionStore((s) => s.sendMessage);
   const saveArtifact = useSessionStore((s) => s.saveArtifact);
   const publishArtifact = useSessionStore((s) => s.publishArtifact);
@@ -86,7 +87,7 @@ export function AskSession({ sessionId }: Props) {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ flex: 1, overflow: 'auto' }}>
         <PageContainer maxWidth={840}>
-          {readiness?.backend === 'openshell' ? <Alert type="info" showIcon message="The model runs in OpenShell. Read-only Wren queries execute on the host." description="Answer a question is supported. Setup, dashboards, native terminals and hybrid modes are unavailable. Verification covers query results and SQL, not interpretation." /> : null}
+          {readiness?.backend === 'openshell' ? <Alert type="info" showIcon message="The model and read-only Wren queries run in separate OpenShell workers." description="Answer a question supports approved DuckDB file snapshots on Linux arm64. Setup, dashboards, native terminals and hybrid modes are unavailable. Verification covers query results and SQL, not interpretation." /> : null}
           {isBffEnabled() && (readinessError || readiness?.ask === false) ? <Alert type="warning" showIcon message={readinessError ?? 'Structured Ask is unavailable.'} /> : null}
           {events.length === 0 ? (
             <PageState
@@ -130,7 +131,7 @@ export function AskSession({ sessionId }: Props) {
             <Alert
               type="error"
               showIcon
-              message={t(errorCode ? 'ask.componentErrorTitle' : 'ask.streamErrorTitle')}
+              message={t(errorCode && errorKind !== 'query' && errorKind !== 'connection' ? 'ask.componentErrorTitle' : errorKind === 'connection' ? 'ask.streamErrorTitle' : errorKind === 'query' ? 'ask.queryErrorTitle' : 'ask.requestErrorTitle')}
               description={error}
               action={
                 lastUserText ? (

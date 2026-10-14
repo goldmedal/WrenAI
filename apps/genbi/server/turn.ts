@@ -14,6 +14,7 @@ import type { StructuredRuntime } from "./structured-runtime.js";
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { ComponentExecutionError, componentFailureCodeOf, redactForLog } from "../harness/components/runner.js";
+import { storedStructuredFailure, structuredDataRefusal, structuredFailureFeedback } from "./structured-error-feedback.js";
 import type { AgentEvent, AuthChoice, Bundle, LoginProbe, RouteOptions, RouteResult, SetupStepRunner, SetupTerminalResult } from "../harness/index.js";
 import type { SubscriptionModelCatalog, SubscriptionProvider } from "./wire-types.js";
 import {
@@ -506,9 +507,17 @@ export async function streamTurn(
 
 async function replayResolvedTurn(store: Store, turn: TurnRow, emit: (frame: SseFrame) => Promise<void>): Promise<void> {
   if (turn.resultKind === "error") {
+    const refusal = turn.setupStepKey === null ? structuredDataRefusal(turn.errorCode) : undefined;
+    if (refusal) {
+      await emit({ event: "worklog", data: turn.traceJson ? JSON.parse(turn.traceJson) : [] });
+      const stored = store.listEventsForTurn(turn.id).find(event => event.kind === "refusal");
+      await emit({ event: "event", data: stored?.payload ?? { id: `historical-refusal:${turn.id}`, kind: "refusal", ...refusal } });
+      await emit({ event: "done", data: {} });
+      return;
+    }
     const message = turn.errorMessage ?? "unknown error";
-    const code = componentFailureCodeOf(message);
-    await emit({ event: "error", data: { message, ...(code !== undefined ? { code } : {}) } });
+    const componentCode = componentFailureCodeOf(message);
+    await emit({ event: "error", data: componentCode !== undefined ? { message, code: componentCode } : turn.setupStepKey === null ? storedStructuredFailure(turn.errorCode) : { message } });
     return; // spec: on error emit ONLY the error frame, never a trailing done
   }
   const worklog: ToolStep[] = turn.traceJson ? (JSON.parse(turn.traceJson) as ToolStep[]) : [];
@@ -566,10 +575,13 @@ async function executeTurn(
   const assertCurrent = () => { deps.structuredRuntime?.assertActive(); runtimeScope?.assertCurrent(); };
   const failTurn = async (err: unknown) => {
     await chain;
-    const message = err instanceof Error ? err.message : String(err);
-    const code = err instanceof ComponentExecutionError ? err.code : undefined;
-    // The public message is generic by construction; the detail is logged where the failure happened.
-    if (code === undefined) console.error(`[turn-failure] ${JSON.stringify({ turn: turn.id, error: err instanceof Error ? err.name : typeof err, detail: redactForLog(message) })}`);
+    const componentCode = err instanceof ComponentExecutionError ? err.code : undefined;
+    let feedback = deps.structuredRuntime && componentCode === undefined ? structuredFailureFeedback(err) : undefined;
+    if (feedback?.kind === "query" || feedback?.kind === "connection") {
+      try { assertCurrent(); } catch (error) { feedback = structuredFailureFeedback(error); }
+    }
+    const message = feedback?.message ?? (err instanceof Error ? err.message : String(err));
+    if (componentCode === undefined) console.error(`[turn-failure] ${JSON.stringify({ turn: turn.id, error: err instanceof Error ? err.name : typeof err, detail: redactForLog(message) })}`);
     // Persist the PARTIAL work log on failure — the Route/Clarify
     // decision(s) seeded at postTurn plus whatever step/tool rows the live log
     // captured before the throw, ended with a failure Verify-gate entry saying
@@ -578,9 +590,22 @@ async function executeTurn(
     // The SSE stream stays error-only (no worklog frame emitted here); only the
     // persisted traceJson changes.
     const partialWorklog = [...preDecisions, ...liveLog.snapshot(), gateFailureStep(message)];
-    deps.store.resolveTurn(turn.id, { backend: null, resultKind: "error", answerSummary: null, traceJson: JSON.stringify(partialWorklog), errorMessage: message });
+    const refusal = feedback ? structuredDataRefusal(feedback.code) : undefined;
+    if (refusal) {
+      // All host failure attribution, cleanup and currentness checks above still precede this
+      // normal terminal event. No failed query becomes data evidence or a Verified answer.
+      const terminalEvent: RefusalEvent = { id: newId("evt"), kind: "refusal", ...refusal };
+      deps.store.insertEvent({ sessionId: session.id, kind: "refusal", payload: terminalEvent, turnId: turn.id });
+      deps.store.resolveTurn(turn.id, { backend: null, resultKind: "refusal", answerSummary: refusal.reason, traceJson: JSON.stringify(partialWorklog), errorMessage: message, errorCode: feedback!.code });
+      deps.store.updateSessionStatus(session.id, "active", null);
+      await emit({ event: "worklog", data: partialWorklog });
+      await emit({ event: "event", data: terminalEvent });
+      await emit({ event: "done", data: {} });
+      return;
+    }
+    deps.store.resolveTurn(turn.id, { backend: null, resultKind: "error", answerSummary: null, traceJson: JSON.stringify(partialWorklog), errorMessage: message, errorCode: feedback?.code ?? componentCode ?? null });
     deps.store.updateSessionStatus(session.id, "active", null);
-    await emit({ event: "error", data: { message, ...(code !== undefined ? { code } : {}) } });
+    await emit({ event: "error", data: feedback ?? { message, ...(componentCode !== undefined ? { code: componentCode } : {}) } });
   };
   let result: RouteResult;
   try {
@@ -1358,10 +1383,24 @@ async function executeSetupTurn(deps: TurnDeps, session: SessionRow, turn: TurnR
 export function getAskSessionData(store: Store, sessionId: string): AskSessionData {
   const session = store.getSession(sessionId);
   if (!session) throw new SessionNotFoundError(sessionId);
-  const events: SessionEvent[] = store.listEventsForSession(sessionId).map((e) => e.payload);
+  const storedEvents = store.listEventsForSession(sessionId);
+  // Older typed failures retain their original row/event provenance. This read-only projection
+  // gives them the same normal explanation without manufacturing a saved answer or rerunning work.
+  const projected = store.listTurnsForSession(sessionId).flatMap(turn => {
+    const refusal = turn.resultKind === "error" && turn.setupStepKey === null ? structuredDataRefusal(turn.errorCode) : undefined;
+    return refusal && !storedEvents.some(event => event.turnId === turn.id && event.kind === "refusal")
+      ? [{ createdAt: turn.createdAt, payload: { id: `historical-refusal:${turn.id}`, kind: "refusal" as const, ...refusal } }] : [];
+  });
+  const ordered = storedEvents.map(event => ({ createdAt: event.createdAt, payload: event.payload }));
+  for (const event of projected) {
+    const index = ordered.findIndex(stored => stored.createdAt > event.createdAt);
+    ordered.splice(index < 0 ? ordered.length : index, 0, event);
+  }
+  const events: SessionEvent[] = ordered.map(event => event.payload);
   const latestTurn = store.getLatestTurn(sessionId);
   const workLog: ToolStep[] = latestTurn?.traceJson ? (JSON.parse(latestTurn.traceJson) as ToolStep[]) : [];
-  return { id: session.id, title: session.title, updatedAt: session.updatedAt, events, workLog };
+  return { id: session.id, title: session.title, updatedAt: session.updatedAt, events, workLog,
+    ...(latestTurn?.resultKind === "error" && latestTurn.setupStepKey === null && !structuredDataRefusal(latestTurn.errorCode) ? { error: storedStructuredFailure(latestTurn.errorCode) } : {}) };
 }
 
 const PUBLISH_LINK_BASE = "https://share.genbi.example";

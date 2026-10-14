@@ -62,9 +62,31 @@ beforeEach(() => {
   postTurn.mockReset();
   getStructuredAskReadiness.mockReset().mockResolvedValue({ active: { backend: 'local', state: 'ready', ask: true, reason: 'Synthetic local runtime.' } });
   useSessionStore.setState(
-    { sessionsById: {}, streaming: {}, streamError: {}, streamErrorCode: {}, backendSessionId: {}, sessionList: [], structuredReadiness: undefined, structuredReadinessError: undefined },
+    { sessionsById: {}, streaming: {}, streamError: {}, streamErrorKind: {}, streamErrorCode: {}, backendSessionId: {}, sessionList: [], structuredReadiness: undefined, structuredReadinessError: undefined },
     false,
   );
+});
+
+it.each([
+  ['query', 'The query could not be completed', 'Check the required columns and types.'],
+  ['runtime', 'The request could not be completed', 'Structured runtime failed.'],
+  ['connection', 'The connection to the agent was lost', 'The data worker connection is unavailable.'],
+])('shows the hydrated %s title without resubmitting the question', async (kind, title, message) => {
+  getSession.mockResolvedValueOnce({ id: 'stored', title: 'Orders', events: [], workLog: [], error: { code: 'safe', kind, message } });
+  renderWithProviders(<SessionsAskWithLocationProbe />, { route: '/sessions/ask/stored' });
+  expect(await screen.findByText(title)).toBeInTheDocument(); expect(screen.getByText(message)).toBeInTheDocument();
+  expect(postTurn).not.toHaveBeenCalled();
+});
+
+it('renders a historical data refusal as a normal explanation without retrying or showing an error banner', async () => {
+  const reason = 'I could not answer this question from the current dataset because the query could not be completed.';
+  const fix = 'Check whether the required fields are available and their types match the query.';
+  getSession.mockResolvedValueOnce({ id: 'stored', title: 'Orders', events: [{ id: 'historical', kind: 'refusal', reason, fix }], workLog: [] });
+  renderWithProviders(<SessionsAskWithLocationProbe />, { route: '/sessions/ask/stored' });
+  expect(await screen.findByText(reason)).toBeInTheDocument(); expect(await screen.findByText(fix, { exact: false })).toBeInTheDocument();
+  expect(screen.queryByText('The query could not be completed')).not.toBeInTheDocument();
+  expect(screen.queryByText('The connection to the agent was lost')).not.toBeInTheDocument();
+  expect(postTurn).not.toHaveBeenCalled();
 });
 
 describe('AskSession (live mode) — draft to real-id transition', () => {
@@ -78,10 +100,10 @@ describe('AskSession (live mode) — draft to real-id transition', () => {
   });
   it('describes OpenShell model and host queries without exposing identity, and ignores an older ready response', async () => {
     let old!: (value: unknown) => void;
-    getStructuredAskReadiness.mockImplementationOnce(() => new Promise(resolve => { old = resolve; })).mockResolvedValueOnce({ active: { backend: 'openshell', state: 'ready', ask: true, reason: 'Ready.', modelExecution: 'openshell', queryExecution: 'host', supportedAgents: ['answer_query'] } });
+    getStructuredAskReadiness.mockImplementationOnce(() => new Promise(resolve => { old = resolve; })).mockResolvedValueOnce({ active: { backend: 'openshell', state: 'ready', ask: true, reason: 'Ready.', modelExecution: 'openshell', queryExecution: 'openshell', supportedAgents: ['answer_query'] } });
     renderWithProviders(<SessionsAskWithLocationProbe />, { route: '/sessions/ask' });
     await useSessionStore.getState().loadStructuredReadiness();
-    expect(await screen.findByText('The model runs in OpenShell. Read-only Wren queries execute on the host.')).toBeInTheDocument();
+    expect(await screen.findByText('The model and read-only Wren queries run in separate OpenShell workers.')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText('Ask a question')).toBeEnabled());
     old({ active: { backend: 'local', state: 'ready', ask: true } }); await Promise.resolve();
     expect(useSessionStore.getState().structuredReadiness?.backend).toBe('openshell');

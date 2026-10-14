@@ -10,6 +10,8 @@ import type { RuntimeBackendId, RuntimeBackendProbeResult } from "./runtime-host
 import { DockerSnapshotDriver } from "./runtime-host/openshell-snapshot-driver.js";
 import { OpenShellProjectSnapshots, snapshotSourceAuthority } from "./runtime-host/openshell-project-snapshots.js";
 import { readOpenShellClaudeBoot, verifyRetainedOpenShellClaudeBoot } from "./runtime-host/openshell-claude-boot.js";
+import { snapshotHash } from "./runtime-host/openshell-snapshot-driver.js";
+import { openOpenShellWrenAccess } from "./runtime-host/openshell-wren-access.js";
 import { OpenShellError } from "./runtime-host/openshell-types.js";
 
 /** BFF-owned lifecycle seam. Deliberately supplies no model operation or browser command API. */
@@ -36,6 +38,7 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
   let lifecycle: OpenShellLifecycle | undefined;
   let snapshots: OpenShellProjectSnapshots | undefined;
   let runtimeEpoch = 0;
+  let approvedContext: string | undefined;
   if (configuration.configuration) {
     const config = configuration.configuration;
     const driver = options.driver ?? new OpenShellCliDriver(config, (intent) => { if (!snapshots) throw new Error("Snapshot authority unavailable"); return snapshots.mount(intent); }, options.claude?.duplex);
@@ -43,7 +46,7 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
       stateRoot: options.stateRoot, exclusive: configuration.configuration.exclusive });
     if (config.snapshotCapture && config.dataPolicy && config.dataPolicyDigest) {
       snapshots = new OpenShellProjectSnapshots({ lifecycle, journal: options.store, driver: new DockerSnapshotDriver(config, (publication, name, id) => snapshots!.recordHelper(publication, name, id)), stateRoot: options.stateRoot,
-        currentSource: snapshotSourceAuthority({ store: options.store, currentProject: options.currentProject ?? (() => undefined), approvedFiles: config.snapshotCapture.approvedFiles, currentContext: options.currentContext ?? (() => undefined) }) });
+        currentSource: snapshotSourceAuthority({ store: options.store, currentProject: options.currentProject ?? (() => undefined), approvedFiles: config.snapshotCapture.approvedFiles, currentContext: options.currentContext ?? (() => approvedContext), preserveProjectConfig: !!config.dataWorker }) });
       lifecycle.attachOwnedResources(snapshots);
     }
     try { await lifecycle.initialize(); } catch { /* startup ownership uncertainty remains unavailable */ }
@@ -53,8 +56,37 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
   });
   const adapter: StructuredAdapter = { vendor: "claude", backend: "openshell", probe: async () => (await probe()).readiness };
   return { selected: configuration.selected, lifecycle, snapshots, adapter, probe,
+    dataWorkerAvailable: !!(configuration.configuration?.dataWorker && snapshots && options.claude),
     /** Explicit protected operator call, never an HTTP/browser enrollment route. */
     claudeVault: vault,
+    /** Host-captured component preparation alone calls this; no browser tool exposes it. */
+    bindDataContext(context: string, assertCurrent: () => void) {
+      assertCurrent(); approvedContext = context; const epoch = runtimeEpoch;
+      return async (scope: Omit<Extract<import("./runtime-host/openshell-types.js").OpenShellIdentity, { purpose: "lifecycle" }>, "purpose" | "operation" | "snapshot" | "image" | "policy" | "gateway" | "workspace" | "configuration">, signal: AbortSignal) => {
+        const config = configuration.configuration;
+        if (!snapshots || !lifecycle || !config?.dataWorker || !lifecycle.dataIdentity) throw new OpenShellError("openshell_unavailable");
+        const check = () => { signal.throwIfAborted(); assertCurrent(); if (epoch !== runtimeEpoch || context !== approvedContext || scope.context !== context) throw new OpenShellError("openshell_scope_invalid"); };
+        check();
+        const identity = { ...scope, binding: snapshotHash(scope.binding), ...lifecycle.identity, purpose: "lifecycle" as const, operation: "worker" as const, snapshot: "none" as const };
+        const current = () => { try { check(); return identity; } catch { return undefined; } };
+        const publicationPermit = await snapshots.preparePublication(identity, current, signal);
+        let publication: Awaited<ReturnType<typeof snapshots.publish>> | undefined;
+        let delivery: Awaited<ReturnType<OpenShellProjectSnapshots["prepareDelivery"]>> | undefined;
+        let lease: Awaited<ReturnType<typeof snapshots.deliver>> | undefined;
+        try {
+          publication = await snapshots.publish(publicationPermit); check();
+          delivery = await snapshots.prepareDelivery(publication, identity, current, signal);
+          lease = await snapshots.deliver(delivery);
+          check();
+          const expected = { worker: "genbi-wren-worker/1" as const, snapshot: publication.digest, script: config.dataWorker.script, wheel: config.dataWorker.wheel, toolchain: config.dataWorker.toolchain, architecture: config.dataWorker.architecture, protocol: config.dataWorker.protocol };
+          const access = await openOpenShellWrenAccess({ lease, expected, signal, assertCurrent: check });
+          let closing: Promise<void> | undefined;
+          return { ...access, close: () => closing ??= (async () => { try { await access.close(); await snapshots!.remove(publication!.id); } finally { delivery!.release(); } })() };
+        } catch (error) {
+          delivery?.release(); await lease?.close(); if (publication) await snapshots.remove(publication.id); throw error;
+        } finally { publicationPermit.release(); }
+      };
+    },
     claudeProvider: (input: Omit<Parameters<typeof createOpenShellClaudeProvider>[0], "lifecycle" | "vault">) => {
       if (!lifecycle || !options.claude) throw new Error("OpenShell Claude unavailable");
       const epoch = runtimeEpoch;

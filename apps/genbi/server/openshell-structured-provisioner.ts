@@ -19,8 +19,10 @@ import { produceComponentHostPlan } from "./runtime-host/component-host-plan.js"
 import { runtimeNotReady } from "./runtime-host/policy.js";
 import type { RuntimeSettings } from "./wire-types.js";
 import { StructuredRuntimeError } from "./structured-runtime.js";
+import { createStructuredQueryFailureTracker, observeStructuredQueryAccess } from "./structured-error-feedback.js";
+import { isClaudeQueryAbort } from "./runtime-host/claude-component-step.js";
 
-type Composition = Pick<Awaited<ReturnType<typeof createOpenShellRuntimeComposition>>, "lifecycle" | "claudeVault" | "claudeProvider" | "probe">;
+type Composition = Pick<Awaited<ReturnType<typeof createOpenShellRuntimeComposition>>, "lifecycle" | "claudeVault" | "claudeProvider" | "probe" | "bindDataContext" | "dataWorkerAvailable">;
 type ModelScope = Parameters<Composition["claudeProvider"]>[0]["scope"];
 interface Options {
   readonly diagnostics?: StructuredDiagnosticObserver;
@@ -48,7 +50,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
     const settings = options.store.getRuntimeSettings();
     if (!options.store.hasExplicitRuntimeSettings() || settings.authMode !== "subscription" || settings.subscriptionProvider !== "claude" || settings.hybrid) throw unavailable();
     assertRuntimeSettingsDispatchable(settings); options.modelsFor(settings);
-    if (!options.getBinding()) throw unavailable();
+    if (!options.getBinding() || !composition.dataWorkerAvailable) throw unavailable();
     return status;
   };
   return {
@@ -105,6 +107,8 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       });
       check();
       let modelScope: ModelScope | undefined;
+      let dataAccess: ReturnType<Composition["bindDataContext"]> | undefined;
+      const queryFailure = createStructuredQueryFailureTracker();
       const openStep = async (model: string, tier: string, parent: AbortSignal) => {
         check(); parent.throwIfAborted();
         if (!modelScope) throw unavailable();
@@ -120,13 +124,19 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         verifierBinary: producer.executable, contextLoaderBinary: loader.executable, wrenBinary: wren.executable, project: binding.path, signal, assertExecutableCurrent,
         wrenEnvironment: { PATH: [path.dirname(wren.executable), path.dirname(node.executable), "/usr/bin", "/bin"].join(path.delimiter), HOME: options.hostHome,
           WREN_HOME: sourceHome, WREN_PROJECT_HOME: binding.path, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" },
-        vendor, persistRoot: input.persistRoot, onEvent: input.onEvent, ...(options.diagnostics ? { diagnostics: options.diagnostics } : {}),
+        openDataAccess: async parent => { if (!dataAccess || !modelScope) throw unavailable(); return observeStructuredQueryAccess(await dataAccess(modelScope, parent), queryFailure.record); },
+        vendor, persistRoot: input.persistRoot, onEvent: event => {
+          if (event.kind === "step.start") queryFailure.start();
+          if (event.kind === "step.finish") queryFailure.finish(event.status);
+          input.onEvent(event);
+        }, ...(options.diagnostics ? { diagnostics: options.diagnostics } : {}),
       }); });
       check();
       const { root, plan } = await observeStructuredAsync(options.diagnostics, "host_plan", () => { assertExecutableCurrent(); return produceComponentHostPlan({ irDocument, prepared, producerBinary: producer.executable, signal, assertCurrent: check, assertExecutableCurrent }); });
       modelScope = observeStructured(options.diagnostics, "model_scope", () => Object.freeze({ backend: "openshell", account: status.fingerprint!, generation: status.generation!, session: input.scope.sessionId, turn: input.scope.turnId,
         binding: binding.identity, bindingGeneration: String(binding.generation), bindingRevision: binding.revision,
         context: planDigest(prepared.contexts), plan: plan.identity, ...composition.lifecycle!.modelIdentity! }));
+      dataAccess = composition.bindDataContext(modelScope.context, check);
       check();
       let runner: ComponentRunner | undefined;
       let active: Promise<unknown> | undefined;
@@ -138,9 +148,12 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         async run(request) {
           assertExecutableCurrent(); if (started || closing) throw new StructuredRuntimeError("failed"); started = true;
           const host = await observeStructuredAsync(options.diagnostics, "broker_host", () => prepared.host(root, plan, signal));
-          check(); runner = new ComponentRunner(plan, host);
+          check(); runner = new ComponentRunner(plan, { ...host, async runStep(...args) {
+            try { const response = await host.runStep(...args); queryFailure.providerReturned(response.failed === true); return response; }
+            catch (error) { if (isClaudeQueryAbort(error)) queryFailure.providerQueryAborted(); else queryFailure.providerRejected(); throw error; }
+          } });
           const pending = runner.run(root, { request }, signal); active = pending;
-          try { const result = await pending; check(); return result; } finally { active = undefined; }
+          try { const result = await pending; check(); const failure = queryFailure.terminalFailure(); if (result.status === "error" && result.code === "callee_failed" && failure && !runner.cleanupFailed) throw failure; return result; } finally { active = undefined; }
         },
         dispose() { return closing ??= (async () => { if (active) runner?.cancel(); await active?.catch(() => {}); if (runner?.cleanupFailed) throw new StructuredRuntimeError("cleanup"); })(); },
       };

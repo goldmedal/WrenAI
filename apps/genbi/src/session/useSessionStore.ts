@@ -41,6 +41,7 @@ interface SessionStoreState {
   streamError: Record<string, string | undefined>;
   /** The component failure code the server reported for that error, unset for transport loss and other errors. */
   streamErrorCode: Record<string, string | undefined>;
+  streamErrorKind: Record<string, 'query' | 'connection' | 'runtime' | undefined>;
   /** Local session id → real backend session id, once created live. Fixture mode never populates this. */
   backendSessionId: Record<string, string>;
   /** Real, persisted sessions from the BFF for the sidebar, most-recent first. Fixture mode leaves this empty — the sidebar renders fixtures instead. */
@@ -157,6 +158,7 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
   streaming: {},
   streamError: {},
   streamErrorCode: {},
+  streamErrorKind: {},
   backendSessionId: {},
   sessionList: [],
   async loadStructuredReadiness() {
@@ -195,7 +197,9 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
           // appended a turn (or a stream is in flight), and a wholesale
           // replace would wipe the just-typed question / in-progress answer.
           if (current.events.length > 0 || s.streaming[id]) return s;
-          return { sessionsById: { ...s.sessionsById, [id]: hydrated } };
+          return { sessionsById: { ...s.sessionsById, [id]: hydrated },
+            streamError: { ...s.streamError, [id]: hydrated.error?.message },
+            streamErrorKind: { ...s.streamErrorKind, [id]: hydrated.error?.kind } };
         });
       })
       .catch(() => {
@@ -209,7 +213,7 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
     const trimmed = text.trim();
     if (!trimmed) return;
     if (isBffEnabled() && get().structuredReadiness?.ask === false) {
-      set((s) => ({ streamError: { ...s.streamError, [id]: 'Structured Ask is unavailable.' } }));
+      set((s) => ({ streamError: { ...s.streamError, [id]: 'Structured Ask is unavailable.' }, streamErrorKind: { ...s.streamErrorKind, [id]: 'runtime' } }));
       return;
     }
     get().getOrCreate(id);
@@ -225,6 +229,7 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
         streaming: { ...s.streaming, [id]: true },
         streamError: { ...s.streamError, [id]: undefined },
         streamErrorCode: { ...s.streamErrorCode, [id]: undefined },
+        streamErrorKind: { ...s.streamErrorKind, [id]: undefined },
       };
     });
 
@@ -264,11 +269,15 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
           };
         });
       },
-      onError: (message, code) => {
+      onError: (message, codeOrKind, explicitKind) => {
+        const isKind = codeOrKind === 'query' || codeOrKind === 'connection' || codeOrKind === 'runtime';
+        const kind = explicitKind ?? (isKind ? codeOrKind : 'runtime');
+        const code = isKind ? undefined : codeOrKind;
         set((s) => ({
           streaming: { ...s.streaming, [targetId]: false },
           streamError: { ...s.streamError, [targetId]: message },
           streamErrorCode: { ...s.streamErrorCode, [targetId]: code },
+          streamErrorKind: { ...s.streamErrorKind, [targetId]: kind },
         }));
       },
       onDone: () => {
@@ -309,6 +318,7 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
               streaming: { ...s.streaming, [backendId]: s.streaming[id] },
               streamError: { ...s.streamError, [backendId]: s.streamError[id] },
               streamErrorCode: { ...s.streamErrorCode, [backendId]: s.streamErrorCode[id] },
+              streamErrorKind: { ...s.streamErrorKind, [backendId]: s.streamErrorKind[id] },
             };
           }
         : undefined;
@@ -368,7 +378,8 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
       const { [DRAFT_SESSION_ID]: _droppedStreaming, ...streaming } = s.streaming;
       const { [DRAFT_SESSION_ID]: _droppedStreamError, ...streamError } = s.streamError;
       const { [DRAFT_SESSION_ID]: _droppedStreamErrorCode, ...streamErrorCode } = s.streamErrorCode;
-      return { sessionsById, backendSessionId, streaming, streamError, streamErrorCode };
+      const { [DRAFT_SESSION_ID]: _droppedStreamErrorKind, ...streamErrorKind } = s.streamErrorKind;
+      return { sessionsById, backendSessionId, streaming, streamError, streamErrorCode, streamErrorKind };
     });
   },
 

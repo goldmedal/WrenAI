@@ -221,6 +221,13 @@ describe("packaged descriptor-anchored capture helper", () => {
     const b = await driver.capture(f.request, path.join(f.root, "b.tar"), new AbortController().signal); expect(a).toEqual(b); expect(a.files.some((file) => file.path === "project/data/input.txt")).toBe(true);
     expect(paths.map((name) => snapshotHash(readFileSync(path.join(f.project, name))))).toEqual(before);
   });
+  it("preserves approved project metadata for governed execution with a closed strict-config projection", async () => {
+    const f = source(), driver = captureDriver();
+    const request = { ...f.request, projection: { "wren-home/profiles.yml": f.request.projection["wren-home/profiles.yml"]!, "wren-home/config.json": '{"strict_mode":true}\n' } };
+    const manifest = await driver.capture(request, path.join(f.root, "governed.tar"), new AbortController().signal);
+    expect(manifest.files.find(file => file.path === "project/wren_project.yml")?.sha256).toBe(snapshotHash(readFileSync(path.join(f.project, "wren_project.yml"))).slice(7));
+    expect(manifest.files.find(file => file.path === "wren-home/config.json")?.sha256).toBe(snapshotHash('{"strict_mode":true}\n').slice(7));
+  });
   it("independently verifies all files and refuses extra files, empty directories and changed bytes", async () => {
     const f = source(), driver = captureDriver(); const archive = path.join(f.root, "verify.tar");
     const manifest = await driver.capture(f.request, archive, new AbortController().signal);

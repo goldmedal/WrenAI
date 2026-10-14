@@ -66,7 +66,7 @@ export class StructuredRuntime {
       const ready = !this.lifetime.signal.aborted && probe?.state === "ready";
       return [vendor, { backend, state: ready ? "ready" : "unavailable", ask: ready && !!adapter?.ask, setup: ready && !!adapter?.setup,
         reason: !adapter ? "Selected vendor backend is not configured." : !ready ? "Selected vendor backend is not ready." : "Only explicitly supported operations are available.",
-        ...(backend === "openshell" ? { modelExecution: "openshell", queryExecution: "host", supportedAgents: ["answer_query"] } : {}),
+        ...(backend === "openshell" ? { modelExecution: "openshell", queryExecution: "openshell", supportedAgents: ["answer_query"] } : {}),
         ...(probe && probe.state !== "ready" ? { code: probe.code } : {}) }] as const;
     }));
     const vendors = Object.fromEntries(entries);

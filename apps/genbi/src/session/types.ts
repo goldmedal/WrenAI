@@ -243,4 +243,5 @@ export interface AskSessionData {
    * history; this slot itself is never read again after that point.
    */
   workLog: ToolStep[];
+  error?: { message: string; code: string; kind: "query" | "connection" | "runtime" };
 }

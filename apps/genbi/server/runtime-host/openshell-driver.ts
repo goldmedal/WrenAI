@@ -16,9 +16,10 @@ const configurationSchema = z.object({
   dockerExecutable: absolute, dockerRealpath: absolute, dockerDigest: digest, dockerSocket: absolute, dockerNamespace: token, exclusive: z.literal(true),
   model: z.object({ image: digest, policy: absolute, policyDigest: digest }).strict().optional(),
   dataPolicy: absolute.optional(), dataPolicyDigest: digest.optional(),
+  dataWorker: z.object({ image: digest, script: digest, wheel: digest, toolchain: digest, architecture: z.literal("linux-arm64"), protocol: z.literal("wren-governed/2") }).strict().optional(),
   snapshotCapture: z.object({ executable: absolute, realpath: absolute, digest, helperDigest: digest, approvedFiles: z.array(z.string()).min(2).max(4094) }).strict().optional(),
 }).strict().refine((value) => [value.dataPolicy, value.dataPolicyDigest, value.snapshotCapture].every((item) => item === undefined)
-  || [value.dataPolicy, value.dataPolicyDigest, value.snapshotCapture].every((item) => item !== undefined), "Snapshot configuration must be complete");
+  || [value.dataPolicy, value.dataPolicyDigest, value.snapshotCapture].every((item) => item !== undefined), "Snapshot configuration must be complete").refine(value => !value.dataWorker || !!value.snapshotCapture, "Data worker requires snapshot authority");
 export type OpenShellConfiguration = z.infer<typeof configurationSchema>;
 const hash = (bytes: string | Buffer) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 const resourceSchema = z.object({ id: token, name: token, workspace: token, labels: z.record(z.string(), z.string()) }).passthrough();
@@ -55,12 +56,20 @@ export class OpenShellCliDriver implements OpenShellDriver {
     this.identity = Object.freeze({ image: configuration.image, policy: configuration.policyDigest, gateway: configuration.gateway,
       workspace: configuration.workspace, configuration: hash(JSON.stringify(this.configuration)) });
     this.modelIdentity = configuration.model ? Object.freeze({ ...this.identity, image: configuration.model.image, policy: configuration.model.policyDigest }) : undefined;
-    this.dataIdentity = configuration.dataPolicy && configuration.dataPolicyDigest ? Object.freeze({ ...this.identity, policy: configuration.dataPolicyDigest }) : undefined;
+    this.dataIdentity = configuration.dataPolicy && configuration.dataPolicyDigest ? Object.freeze({ ...this.identity, image: configuration.dataWorker?.image ?? configuration.image, policy: configuration.dataPolicyDigest }) : undefined;
     this.environment = Object.freeze({ PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: configuration.home,
       XDG_CONFIG_HOME: configuration.configHome, XDG_STATE_HOME: configuration.stateHome, LANG: "en_US.UTF-8" });
   }
   private attest(): void {
     try {
+      if (this.configuration.dataWorker) {
+        const policy = JSON.parse(readFileSync(this.configuration.dataPolicy!, "utf8"));
+        const fs = policy.filesystem_policy;
+        if (policy.version !== 1 || !policy.network_policies || Object.keys(policy.network_policies).length !== 0
+          || policy.landlock?.compatibility !== "hard_requirement" || policy.process?.run_as_user !== "1500" || policy.process?.run_as_group !== "1500"
+          || fs?.include_workdir !== false || !Array.isArray(fs.read_only) || !fs.read_only.includes("/opt/genbi-project") || !fs.read_only.includes("/opt/genbi")
+          || !Array.isArray(fs.read_write) || JSON.stringify([...fs.read_write].sort()) !== JSON.stringify(["/sandbox", "/tmp", "/dev/null", "/home/sandbox"].sort())) throw new Error();
+      }
       if (realpathSync(this.configuration.executable) !== this.configuration.executable || hash(readFileSync(this.configuration.executable)) !== this.configuration.executableDigest
         || realpathSync(this.configuration.dockerExecutable) !== this.configuration.dockerRealpath || hash(readFileSync(this.configuration.dockerExecutable)) !== this.configuration.dockerDigest
         || hash(readFileSync(this.configuration.policy)) !== this.configuration.policyDigest
@@ -79,7 +88,7 @@ export class OpenShellCliDriver implements OpenShellDriver {
     if (version.trim() !== `openshell ${this.configuration.version}`) throw new OpenShellError("openshell_version_mismatch");
     const info = z.object({ version: z.string(), status: z.string(), compute_drivers: z.array(z.object({ name: z.string() }).passthrough()) }).passthrough().safeParse(this.json(await this.command(["gateway", "info", "--output", "json"])));
     if (!info.success || info.data.version !== this.configuration.version || info.data.status !== "healthy" || info.data.compute_drivers.length !== 1 || info.data.compute_drivers[0]?.name !== "docker") throw new OpenShellError("openshell_gateway_unavailable");
-    for (const expected of [this.configuration.image, this.configuration.supervisorImage, ...(this.configuration.model ? [this.configuration.model.image] : [])]) {
+    for (const expected of [this.configuration.image, this.configuration.supervisorImage, ...(this.configuration.model ? [this.configuration.model.image] : []), ...(this.configuration.dataWorker ? [this.configuration.dataWorker.image] : [])]) {
       const image = z.array(z.object({ Id: z.string() }).passthrough()).safeParse(this.json(await this.docker(["image", "inspect", expected])));
       if (!image.success || image.data.length !== 1 || image.data[0]?.Id !== expected) throw new OpenShellError("openshell_identity_mismatch");
     }
@@ -94,7 +103,7 @@ export class OpenShellCliDriver implements OpenShellDriver {
     const mount = intent.identity.purpose === "data" ? this.snapshotMount?.(intent) : undefined;
     if (intent.identity.purpose === "data" && (!mount || !this.dataIdentity)) throw new OpenShellError("openshell_scope_invalid");
     if (intent.identity.purpose === "model" && !this.configuration.model) throw new OpenShellError("openshell_scope_invalid");
-    await this.command(["sandbox", "create", "--name", intent.name, "--from", intent.identity.purpose === "model" ? this.configuration.model!.image : this.configuration.image, "--policy", intent.identity.purpose === "model" ? this.configuration.model!.policy : mount ? this.configuration.dataPolicy! : this.configuration.policy,
+    await this.command(["sandbox", "create", "--name", intent.name, "--from", intent.identity.purpose === "model" ? this.configuration.model!.image : intent.identity.purpose === "data" ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image, "--policy", intent.identity.purpose === "model" ? this.configuration.model!.policy : mount ? this.configuration.dataPolicy! : this.configuration.policy,
       ...(mount ? ["--driver-config-json", JSON.stringify({ docker: { mounts: [{ type: "volume", source: mount.volume, target: "/opt/genbi-project", read_only: true }] } })] : []),
       "--no-auto-providers", "--approval-mode", "manual", "--detach", "--tty", "--cpu", "1", "--memory", "1Gi",
       "--label", `${OPEN_SHELL_OWNER_LABEL}=${intent.owner}`, "--", "/bin/sleep", "1800"], signal, 180_000);
@@ -129,7 +138,7 @@ export class OpenShellCliDriver implements OpenShellDriver {
     const snapshot = intent.identity.purpose === "data" ? this.snapshotMount?.(intent) : undefined;
     if (intent.identity.purpose === "data" && !snapshot) throw new OpenShellError("openshell_scope_invalid");
     if ((purpose === "runnable" && owned.length !== 2) || owned.length > 2 || owned.some((row) => row.Config.Labels?.["openshell.ai/sandbox-id"] !== resource.id
-      || row.Config.Labels?.["openshell.ai/sandbox-namespace"] !== this.configuration.dockerNamespace || row.Image !== (row.Name.endsWith("-supervisor") ? this.configuration.supervisorImage : intent.identity.purpose === "model" ? this.configuration.model!.image : this.configuration.image)
+      || row.Config.Labels?.["openshell.ai/sandbox-namespace"] !== this.configuration.dockerNamespace || row.Image !== (row.Name.endsWith("-supervisor") ? this.configuration.supervisorImage : intent.identity.purpose === "model" ? this.configuration.model!.image : intent.identity.purpose === "data" ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image)
       || row.Mounts.some((mount) => mount.Type !== "volume" || !mount.Name || (!this.volumeNames(resource.id).includes(mount.Name)
         && !(snapshot && !row.Name.endsWith("-supervisor") && mount.Name === snapshot.volume && mount.Destination === "/opt/genbi-project" && mount.RW === false)))
       || (snapshot && !row.Name.endsWith("-supervisor") && row.Mounts.filter((mount) => mount.Name === snapshot.volume).length !== 1))) throw new OpenShellError("openshell_identity_mismatch");
@@ -163,7 +172,9 @@ export class OpenShellCliDriver implements OpenShellDriver {
     if ([...this.volumeNames(intent.remoteId), ...(intent.volumes ?? [])].some((volume) => volumes.includes(volume))) throw new OpenShellError("openshell_cleanup_pending");
   }
   async duplex(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex> {
-    if (intent.identity.purpose !== "model" || !this.openDuplex || !this.modelIdentity || argv.length !== 2 || argv[0] !== "/usr/local/bin/node" || argv[1] !== "/opt/genbi/claude-worker.mjs") throw new OpenShellError("openshell_scope_invalid");
+    const model = intent.identity.purpose === "model" && this.modelIdentity && argv.length === 2 && argv[0] === "/usr/local/bin/node" && argv[1] === "/opt/genbi/claude-worker.mjs";
+    const data = intent.identity.purpose === "data" && this.configuration.dataWorker && argv.length === 3 && argv[0] === "/usr/local/bin/python" && argv[1] === "-I" && argv[2] === "/opt/genbi/worker.py";
+    if ((!model && !data) || !this.openDuplex) throw new OpenShellError("openshell_scope_invalid");
     this.attest(); await this.inspect(intent); signal.throwIfAborted();
     const stream = await this.openDuplex(intent, argv, signal);
     try { await this.inspect(intent); signal.throwIfAborted(); this.attest(); return stream; }

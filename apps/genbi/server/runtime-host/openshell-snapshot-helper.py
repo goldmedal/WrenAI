@@ -180,7 +180,10 @@ def capture(request):
             os.close(current)
         payload = {'project/' + p: data for p, data in files.items()}
         projection = request['projection']
-        if not isinstance(projection, dict) or set(projection) != {'project/wren_project.yml', 'wren-home/profiles.yml'}:
+        if not isinstance(projection, dict) or set(projection) not in (
+            {'project/wren_project.yml', 'wren-home/profiles.yml'},
+            {'wren-home/profiles.yml', 'wren-home/config.json'},
+        ):
             raise ValueError('projection')
         for p, text in projection.items():
             if not isinstance(text, str) or len(text.encode()) > 65536:

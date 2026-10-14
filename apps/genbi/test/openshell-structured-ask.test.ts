@@ -5,6 +5,8 @@ import { createOpenShellStructuredAdapter, readOpenShellStructuredResult, type O
 import { StructuredRuntime, type StructuredScope } from "../server/structured-runtime.js";
 import { runtimeReady } from "../server/runtime-host/policy.js";
 import { toAnswerOrRefusalEvent } from "../server/fold.js";
+import { GovernedWrenError } from "../harness/components/wren-access.js";
+import { observeStructuredQueryAccess, structuredFailureFeedback } from "../server/structured-error-feedback.js";
 
 const request: RouteOptions = { authChoice: { mode: "subscription", provider: "claude" }, profileSource: "fixture", userProject: "/fixture", question: "count" };
 const root = (): ComponentInvocationResult => ({ status: "ok", output: { kind: "value", value: { columns: ["n"], rows: [{ n: 7 }] } }, provenance: { verified: true, definition: { sql: "SELECT COUNT(*) AS n FROM orders" } } });
@@ -28,6 +30,17 @@ function fixture() {
 }
 
 describe("OpenShell structured root authority", () => {
+  it.each(["query", "cleanup", "stale", "cancel"])("preserves the actual %s cause over a captured query error", async kind => {
+    const f = fixture();
+    let captured: Error | undefined;
+    const access = observeStructuredQueryAccess({ async query() { throw new GovernedWrenError("execution_failed"); }, async inspect() {}, async close() {} }, value => { captured = value; });
+    await access.query({ sql: "SELECT unavailable", limit: 1 }, new AbortController().signal).catch(() => {});
+    f.run.mockImplementation(async () => { if (kind === "stale") f.revoke(); if (kind === "cancel") f.controller.abort(); throw captured; });
+    if (kind === "cleanup") f.dispose.mockRejectedValue(Error("private details"));
+    const error = await f.runtime.route(request, f.scope).catch(error => error);
+    expect(structuredFailureFeedback(error).code).toBe(kind === "query" ? "query.execution_failed" : `runtime.${kind === "cancel" ? "cancelled" : kind}`);
+    expect(f.dispose).toHaveBeenCalledOnce(); expect(f.local).not.toHaveBeenCalled();
+  });
   it("returns a host-root answer only after settlement and cleanup, with truthful readiness", async () => {
     const f = fixture(); let close!: () => void;
     f.dispose.mockImplementation(() => new Promise<void>(resolve => { close = resolve; }));
@@ -38,7 +51,7 @@ describe("OpenShell structured root authority", () => {
     expect(result).toMatchObject({ backend: "openshell", envelope: { verified: true, verificationScope: "query-results", blocks: [{ type: "table", rows: [{ n: 7 }] }, { type: "definition" }] } });
     expect(result).not.toHaveProperty("finalText"); expect(f.dispose).toHaveBeenCalledOnce(); expect(f.local).not.toHaveBeenCalled();
     expect(toAnswerOrRefusalEvent("answer", result)).toMatchObject({ answer: { form: "rich", envelope: { verified: true } } });
-    expect(await f.runtime.readiness(request.authChoice)).toMatchObject({ active: { backend: "openshell", ask: true, setup: false, modelExecution: "openshell", queryExecution: "host", supportedAgents: ["answer_query"] } });
+    expect(await f.runtime.readiness(request.authChoice)).toMatchObject({ active: { backend: "openshell", ask: true, setup: false, modelExecution: "openshell", queryExecution: "openshell", supportedAgents: ["answer_query"] } });
   });
   it.each(["missing-root", "unverified", "different-result", "duplicate-root", "cleanup", "stale", "cancel"])("does not promote %s into an answer", async kind => {
     const f = fixture(); const original = f.run.getMockImplementation()!;

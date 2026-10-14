@@ -48,6 +48,7 @@ async function fixture(diagnostics: StructuredDiagnosticObserver) {
   expect(oracle).toEqual([{ id: 0, protocol: "wren-governed/2" }, { id: 1, result: { columns: ["n"], rows: [{ n: 7 }], definition: { sql, source_tables: ["orders"], filters: [] } } }]);
   const oracleAccess = await openWrenComponentAccess({ executable: wren, project, fingerprint: await hashDirectory(project), signal: new AbortController().signal,
     environment: { PATH: [root, path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter), HOME: root, WREN_HOME: home, WREN_PROJECT_HOME: project, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" } });
+  const oracleManifest = await oracleAccess.inspect(new AbortController().signal);
   try { expect(await oracleAccess.query({ sql, limit: 1000 }, new AbortController().signal)).toMatchObject({ rows: [{ n: 7 }] }); } finally { await oracleAccess.close(); }
   const config = path.join(root, "configuration.json");
   writeFileSync(config, JSON.stringify({ executable: wren, executableDigest: digest, version: "0.0.1", gateway: "synthetic", workspace: "default", image: digest, supervisorImage: digest,
@@ -67,6 +68,9 @@ async function fixture(diagnostics: StructuredDiagnosticObserver) {
   const driver: OpenShellDriver = { version: "synthetic", identity, modelIdentity: identity, probe: async () => {}, create: never, list: never, inspect: never, remove: never, assertAbsent: never, exec: never, duplex: never };
   const composition = await createOpenShellRuntimeCompositionForTesting({ env: { GENBI_CLAUDE_RUNTIME: "openshell", GENBI_OPENSHELL_CONFIG: config }, store, stateRoot: path.join(root, "lifecycle"), driver, claude: { vault, duplex: driver.duplex! } });
   cleanup.push(async () => { await composition.shutdown(); store.close(); });
+  // This diagnostic fixture stops before opening any worker; admit preparation explicitly.
+  Object.defineProperty(composition, "dataWorkerAvailable", { value: true });
+  vi.spyOn(composition, "bindDataContext").mockImplementation(() => async () => ({ inspect: async () => oracleManifest, query: never, close: async () => {} }));
   composition.claudeProvider = () => { providerBoundaries++; throw Error("pre-SDK hardstop private-sentinel"); };
   const producer = await resolveWarbleBinary();
   const profileSource = path.join(application, "profiles/genbi-default");
