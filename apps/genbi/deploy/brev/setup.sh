@@ -35,7 +35,7 @@
 # and restarts the service. It never upgrades past the pins on its own.
 set -euo pipefail
 
-GENBI_VERSION="${GENBI_VERSION:-0.0.7}"
+GENBI_VERSION="${GENBI_VERSION:-0.0.8}"
 # The PyPI `wrenai` lacks APIs the pinned GenBI release calls, so install the
 # GenBI-compatible fork wheel, verified by checksum before it is installed.
 WRENAI_WHEEL_URL="${WRENAI_WHEEL_URL:-https://github.com/goldmedal/WrenAI/releases/download/wrenai-genbi-v0.15.0-genbi.1/wrenai-0.15.0+genbi.1-py3-none-any.whl}"
