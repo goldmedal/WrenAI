@@ -1,0 +1,25 @@
+name: customers
+properties:
+  description: "One row per customer with region, plan and signup date."
+table_reference:
+  catalog: poc
+  schema: main
+  table: customers
+primary_key: customer_id
+columns:
+  - name: customer_id
+    type: BIGINT
+    not_null: true
+    properties: { description: "Unique customer id." }
+  - name: name
+    type: VARCHAR
+    properties: { description: "Customer display name." }
+  - name: region
+    type: VARCHAR
+    properties: { description: "Sales region: East, West, North or South." }
+  - name: plan
+    type: VARCHAR
+    properties: { description: "Subscription plan: starter, team or enterprise." }
+  - name: signup_date
+    type: DATE
+    properties: { description: "Date the customer signed up." }

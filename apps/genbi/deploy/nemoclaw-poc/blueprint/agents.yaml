@@ -1,0 +1,27 @@
+# NemoClaw declarative agents manifest (nemoclaw onboard --agents ./agents.yaml).
+# Mirrors OpenClaw's agents.list[] field names. `main` stays the default agent;
+# genbi_answer is a secondary agent with only the Wren MCP tools.
+#
+# The MCP server itself is registered with `openclaw mcp add wren ...` (see
+# bootstrap.sh); OpenClaw spawns `wren serve mcp` over stdio inside the sandbox.
+agents:
+  - id: genbi_answer
+    description: "GenBI analyst: answers business questions over one Wren semantic project with verified SQL"
+    model: inference/nvidia/nemotron-3-super-120b-a12b
+    tools:
+      profile: minimal
+      # MCP tools are exposed to the agent as <server>__<tool>; verified in the POC.
+      allow:
+        - wren__run_sql
+        - wren__dry_run
+        - wren__dry_plan
+        - wren__list_models
+        - wren__describe_model
+        - wren__describe_schema
+        - wren__get_context
+        - wren__get_instructions
+        - wren__list_cubes
+        - wren__describe_cube
+        - wren__query_cube
+        - wren__recall_queries
+      deny: [write, edit, exec, read, apply_patch, browser, sessions_spawn, message, web_fetch, web_search]
