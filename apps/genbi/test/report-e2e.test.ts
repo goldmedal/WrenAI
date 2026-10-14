@@ -9,7 +9,7 @@ import { runAiComponentStep } from "../harness/components/ai-step.js";
 import { buildCapabilityCard } from "../harness/components/capability-card.js";
 import { describeComponentPlan } from "../harness/components/display.js";
 import type { StepRun, StepUsage } from "../harness/components/runner.js";
-import { COMPONENT_LIMITS } from "../harness/components/runner.js";
+import { DEFAULT_COMPONENT_LIMITS } from "../harness/components/runner.js";
 import { GovernedWrenError, openWrenComponentAccess } from "../harness/components/wren-access.js";
 import { ZoneGateError } from "../harness/components/zone-gate.js";
 import { parseDisclosurePolicy, type AdapterSpec } from "../harness/providers/index.js";
@@ -298,12 +298,12 @@ describe("M1: the annual revenue report end to end, offline", () => {
       const rootSteps = events.filter((event) => event.kind === "step.start").length;
       const requestBytes = Buffer.byteLength(JSON.stringify(askRequests[0]));
       const resultBytes = Buffer.byteLength(JSON.stringify(askResults[0]));
-      const budget = { step_starts: rootSteps, child_step_starts: childSteps.length, call_attempts: askRequests.length, request_bytes: requestBytes, disclosed_result_bytes: resultBytes, host_wall_clock_ms_fake_models: elapsedMs, limits: COMPONENT_LIMITS };
+      const budget = { step_starts: rootSteps, child_step_starts: childSteps.length, call_attempts: askRequests.length, request_bytes: requestBytes, disclosed_result_bytes: resultBytes, host_wall_clock_ms_fake_models: elapsedMs, limits: DEFAULT_COMPONENT_LIMITS };
       console.info(`report budget ${JSON.stringify(budget)}`);
-      expect(rootSteps).toBeLessThanOrEqual(COMPONENT_LIMITS.steps);
-      expect(childSteps.length).toBeLessThanOrEqual(COMPONENT_LIMITS.childSteps);
-      expect(requestBytes).toBeLessThanOrEqual(COMPONENT_LIMITS.requestBytes);
-      expect(resultBytes).toBeLessThanOrEqual(COMPONENT_LIMITS.resultBytes);
+      expect(rootSteps).toBeLessThanOrEqual(DEFAULT_COMPONENT_LIMITS.steps);
+      expect(childSteps.length).toBeLessThanOrEqual(DEFAULT_COMPONENT_LIMITS.childSteps);
+      expect(requestBytes).toBeLessThanOrEqual(DEFAULT_COMPONENT_LIMITS.requestBytes);
+      expect(resultBytes).toBeLessThanOrEqual(DEFAULT_COMPONENT_LIMITS.resultBytes);
     } finally { await rm(project, { recursive: true, force: true }); }
   });
 

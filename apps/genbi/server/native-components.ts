@@ -1,3 +1,4 @@
+import type { ComponentLimits } from "../harness/components/runner.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -46,6 +47,8 @@ export interface NativeComponentPreparation {
   /** Revalidates the approved account and exact vendor execution generation. */
   assertCurrent(): void;
   host(root: string, plan: ExecutionPlan, signal: AbortSignal): Promise<RunnerHost>;
+  /** The host's component run budget; unset means `DEFAULT_COMPONENT_LIMITS`. */
+  readonly componentLimits?: ComponentLimits;
 }
 
 export function nativeComponentHostContract(prepared: NativeComponentPreparation): Readonly<Record<string, unknown>> {
@@ -106,7 +109,8 @@ export class NativeComponentAdmission {
   private closing?: Promise<void>;
   private readonly plans: NativeComponentPlans;
   constructor(plans: NativeComponentPlans, private readonly current: () => NativeComponentIdentity | undefined,
-    private readonly host: (root: string, plan: ExecutionPlan, signal: AbortSignal) => Promise<RunnerHost>) {
+    private readonly host: (root: string, plan: ExecutionPlan, signal: AbortSignal) => Promise<RunnerHost>,
+    private readonly limits?: ComponentLimits) {
     this.plans = structuredClone(plans);
   }
   private check(): void {
@@ -137,7 +141,7 @@ export class NativeComponentAdmission {
     const run = (async () => {
       const host = await this.host(root, plan, combined);
       this.check(); combined.throwIfAborted();
-      const runner = new ComponentRunner(plan, host);
+      const runner = new ComponentRunner(plan, host, this.limits);
       const result = await runner.run(root, parsed, combined);
       this.cleanupFailure ||= runner.cleanupFailed;
       this.check(); combined.throwIfAborted();

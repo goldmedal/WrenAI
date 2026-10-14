@@ -190,12 +190,13 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
         if (event.kind === "step.start") emitter.emit({ kind: "step.start", stepId, name: event.step,
           tier: plan.components[event.component]!.steps.find((step) => step.name === event.step)!.tier,
           ...(event.parent ? { parent: event.parent } : {}), depth: event.depth });
-        if (event.kind === "step.finish") emitter.emit({ kind: "step.finish", stepId, name: event.step, status: event.status === "ok" ? "ok" : "error" });
+        if (event.kind === "step.finish") emitter.emit({ kind: "step.finish", stepId, name: event.step, status: event.status === "ok" ? "ok" : "error",
+          ...(event.elapsedMs !== undefined ? { elapsedMs: event.elapsedMs } : {}) });
         if (event.tool && event.callId && event.kind === "tool.start") emitter.emit({ kind: "tool.call", stepId, callId: event.callId, tool: event.tool, depth: event.depth, status: "running" });
         if (event.tool && event.callId && event.kind === "tool.finish") emitter.emit({ kind: "tool.result", stepId, callId: event.callId, tool: event.tool, status: event.status === "ok" ? "success" : "error" });
       },
     });
-    const result = await new ComponentRunner(plan, broker).run(entry, { request: options.question }, signal);
+    const result = await new ComponentRunner(plan, broker, options.componentLimits).run(entry, { request: options.question }, signal);
     if (result.status === "error") throw new ComponentExecutionError(result.code);
     if (result.status !== "ok") {
       const envelope = { blocks: [], verified: false };

@@ -91,6 +91,12 @@ export function HarnessOverview({ harness }: HarnessOverviewProps) {
                 {runtime.dispatcher !== undefined && (
                   <KVRow label={t('harness.dispatcherImplementation')} value={DISPATCHER_LABELS[runtime.dispatcher]} />
                 )}
+                {runtime.limits !== undefined && (
+                  <KVRow
+                    label={t('harness.componentTimeout')}
+                    value={`${runtime.limits.componentTimeoutMs / 1000} s · ${runtime.limits.componentTimeoutSource === 'env' ? t('harness.limitSourceEnv') : t('harness.limitSourceDefault')}`}
+                  />
+                )}
                 <DataTable<TierModelBinding>
                   rowKey="tier"
                   dataSource={runtime.tierModels}

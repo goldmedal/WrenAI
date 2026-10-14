@@ -21,7 +21,12 @@ export const VERCEL_HOST_CONTRACT = Object.freeze({
 const limits = z.object({
   max_depth: z.literal(8), max_attempts: z.literal(32), max_steps: z.literal(40),
   max_steps_per_child: z.literal(12), max_in_flight: z.literal(1),
-  max_request_bytes: z.literal(65536), max_result_bytes: z.literal(1048576), timeout_ms: z.literal(120000),
+  max_request_bytes: z.literal(65536), max_result_bytes: z.literal(1048576),
+  // The dispatcher's declared default, not an enforced value: `readExecutionPlan` drops `limits`,
+  // and the runner's deadline is the host's `ComponentLimits.timeoutMs` (built-in 120000, raised by
+  // the deployer through WREN_HARNESS_COMPONENT_TIMEOUT_MS). Any positive value is accepted so a
+  // dispatcher that declares a different default does not invalidate an otherwise-valid plan.
+  timeout_ms: z.number().int().positive(),
 }).strict();
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const strings = z.array(z.string());

@@ -43,6 +43,8 @@ describe('HarnessOverview', () => {
     expect(screen.getByText('Dispatcher implementation')).toBeInTheDocument();
     expect(screen.getByText('Claude Agent SDK')).toBeInTheDocument();
     expect(screen.getByText('claude-haiku')).toBeInTheDocument();
+    expect(screen.getByText('Component run timeout')).toBeInTheDocument();
+    expect(screen.getByText('120 s · built-in default')).toBeInTheDocument();
     expect(screen.queryByText(/in-process/)).not.toBeInTheDocument();
     expect(screen.queryByText(/dispatched/)).not.toBeInTheDocument();
   });

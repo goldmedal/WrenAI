@@ -1,3 +1,4 @@
+import type { ComponentLimits } from "../harness/components/runner.js";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { createComponentBroker, type ComponentBrokerOptions } from "../harness/components/broker.js";
@@ -32,6 +33,8 @@ export interface NativeComponentBindings {
   readonly normalize: ComponentBrokerOptions["normalize"];
   readonly persistRoot?: ComponentBrokerOptions["persistRoot"];
   readonly onEvent?: ComponentBrokerOptions["onEvent"];
+  /** The host's component run budget, carried onto the preparation for the admission's runner. */
+  readonly componentLimits?: ComponentLimits;
   currentIdentity(): NativeComponentIdentity | undefined;
   /** Includes exact executable/account/generation and context snapshot provenance. */
   assertCurrent(): void;
@@ -58,6 +61,7 @@ function prepareHost(irDocument: string, scope: Readonly<Record<string, unknown>
   const currentIdentity = bindings.currentIdentity.bind(bindings);
   const prepare = bindings.prepare, step = bindings.step, normalize = bindings.normalize;
   const persistRoot = bindings.persistRoot, onEvent = bindings.onEvent, verifierBinary = bindings.verifierBinary;
+  const componentLimits = bindings.componentLimits;
   const check = () => {
     assertCurrent();
     if (!isDeepStrictEqual(currentIdentity(), identity)) throw new Error("Native component binding expired");
@@ -109,6 +113,7 @@ function prepareHost(irDocument: string, scope: Readonly<Record<string, unknown>
   const snapshots = Object.fromEntries(Object.entries(selectedContexts).map(([id, value]) => [id, value.snapshot]));
   return freeze<NativeComponentPreparation>({
     identity, hostRoots, contexts: freeze(snapshots), assertCurrent: check,
+    ...(componentLimits ? { componentLimits: { ...componentLimits } } : {}),
     async host(root, plan, signal) {
       check(); signal.throwIfAborted();
       const descriptor = hostRoots[root];

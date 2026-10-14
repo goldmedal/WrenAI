@@ -706,6 +706,17 @@ export type HarnessRuntimeBackend = "subscription" | "api-key" | "local" | "gate
  */
 export type HarnessRuntimeDispatcher = "claude-agent-sdk" | "codex-local" | "in-process";
 
+/** Where an execution limit's effective value came from. An operator-editable layer is a later ticket. */
+export type HarnessLimitSource = "default" | "env";
+
+/** The execution budget the BFF enforces, read-only, so a timeout is diagnosable from the Harness page. */
+export interface HarnessRuntimeLimits {
+  /** Wall-clock budget for one component run (the root plus every child it calls), in milliseconds. */
+  readonly componentTimeoutMs: number;
+  /** `"env"` when `WREN_HARNESS_COMPONENT_TIMEOUT_MS` set it, else the built-in default. */
+  readonly componentTimeoutSource: HarnessLimitSource;
+}
+
 export interface HarnessRuntime {
   readonly backend: HarnessRuntimeBackend;
   readonly label: string;
@@ -727,6 +738,7 @@ export interface HarnessRuntime {
    * per-component binding, see `buildComponent`.
    */
   readonly tierModels: readonly TierModelBinding[];
+  readonly limits: HarnessRuntimeLimits;
 }
 
 export type ConnectionHealth = "healthy" | "degraded" | "down";

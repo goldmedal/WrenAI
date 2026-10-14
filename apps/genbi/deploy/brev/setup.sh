@@ -28,6 +28,10 @@
 #   GENBI_MODEL      model id on NVIDIA endpoints (default below)
 #   GENBI_VERSION    published @wrenai/genbi version to install (default below)
 #   GENBI_PROVIDER   pi-ai provider id label for the endpoint (default nvidia)
+#   GENBI_COMPONENT_TIMEOUT_MS
+#                    wall-clock budget in ms for one component run (a dashboard is
+#                    10+ sequential model calls). Default 300000 here; GenBI's own
+#                    default is 120000, which hosted reasoning models exceed.
 #   WRENAI_WHEEL_URL     wren CLI wheel to install (default below)
 #   WRENAI_WHEEL_SHA256  expected sha256 of that wheel; a mismatch aborts
 #
@@ -47,6 +51,7 @@ GENBI_PORT="${GENBI_PORT:-4787}"
 GENBI_HOST="${GENBI_HOST:-0.0.0.0}"
 # pi-ai provider id for the custom endpoint (only a label: the base URL is set).
 GENBI_PROVIDER="${GENBI_PROVIDER:-nvidia}"
+GENBI_COMPONENT_TIMEOUT_MS="${GENBI_COMPONENT_TIMEOUT_MS:-300000}"
 
 LAUNCH_LOG="${LAUNCH_LOG:-/tmp/genbi-launchable.log}"
 SENTINEL="/var/run/genbi-launchable-ready"
@@ -211,6 +216,9 @@ run_root install -d -m 0750 -o root -g "$RUN_USER" "$ENV_DIR"
   echo "WREN_HARNESS_PROVIDER=${GENBI_PROVIDER}"
   echo "WREN_HARNESS_ENDPOINT=${NVIDIA_API_BASE}"
   echo "WREN_HARNESS_MODEL=${GENBI_MODEL}"
+  # One deadline for a whole component run; the BFF validates 30000..1800000 at boot.
+  # Releases that predate the setting ignore it.
+  echo "WREN_HARNESS_COMPONENT_TIMEOUT_MS=${GENBI_COMPONENT_TIMEOUT_MS}"
   if [ -n "${NVIDIA_API_KEY:-}" ]; then
     echo "WREN_HARNESS_API_KEY=${NVIDIA_API_KEY}"
     # Gateway mode reads its credential from GENBI_GATEWAY_API_KEY at request

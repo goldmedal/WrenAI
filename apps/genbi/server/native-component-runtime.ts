@@ -25,7 +25,7 @@ export type NativeComponentVendor = {
 });
 
 export interface NativeComponentRuntimeOptions extends Pick<NativeComponentBindings,
-  "identity" | "contexts" | "verifierBinary" | "currentIdentity" | "assertCurrent" | "persistRoot" | "onEvent"> {
+  "identity" | "contexts" | "verifierBinary" | "currentIdentity" | "assertCurrent" | "persistRoot" | "onEvent" | "componentLimits"> {
   readonly vendor: NativeComponentVendor;
   /** Optional cheap scope guard; integrity remains mandatory at protected operations. */
   assertLive?(): void;
@@ -63,6 +63,7 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
     signal.throwIfAborted(); check(); };
   return {
     identity, contexts, verifierBinary: options.verifierBinary, currentIdentity, assertCurrent: check,
+    ...(options.componentLimits ? { componentLimits: options.componentLimits } : {}),
     ...(persistRoot ? { persistRoot: async (...args: Parameters<NonNullable<NativeComponentBindings["persistRoot"]>>) => { await checkAccess(args[2]); await persistRoot(...args); } } : {}), ...(options.onEvent ? { onEvent: options.onEvent } : {}),
     async prepare(component, _identity, signal): Promise<ComponentAccess> {
       await checkAccess(signal);

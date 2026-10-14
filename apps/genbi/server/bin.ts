@@ -73,6 +73,18 @@ import { shutdownNativeResources } from "./native-shutdown.js";
  *                               of the turn being killed and reported as a timeout. Must be a
  *                               positive integer (milliseconds); an invalid value fails fast at
  *                               boot via the same parseChatTimeoutMs used by harness/cli.ts.
+ *   WREN_HARNESS_COMPONENT_TIMEOUT_MS
+ *                               the wall-clock budget, in milliseconds, for one composed component
+ *                               run: a root such as generate_dashboard plus every child it calls
+ *                               (children run sequentially, so a dashboard is 10+ model calls under
+ *                               one deadline). Default 120000; an integer in 30000..1800000, anything
+ *                               else fails boot with the range in the message. Enforced by
+ *                               ComponentRunner for in-process and native sessions alike; a plan's
+ *                               own limits.timeout_ms is the dispatcher's declared default and is
+ *                               never enforced (harness/components/plan.ts). The effective value and
+ *                               its source are reported on GET /api/harness (runtime.limits) and in
+ *                               the boot log. Raise it for hosted reasoning models, whose sequential
+ *                               calls do not fit in 120 s (see server/execution-limits.ts).
  *   WREN_HARNESS_SETUP_MAX_TURNS  agentic setup only: caps the agent loop per setup turn,
  *                               forwarded as "warble-agent-sdk chat --max-turns". Defaults to
  *                               DEFAULT_SETUP_MAX_TURNS (120) — well above the dispatcher's own
@@ -128,12 +140,15 @@ import {
 import type { AuthChoice, RouteOptions, SetupStepRunner } from "../harness/index.js";
 import {
   buildTierBindingFromFlags,
+  CliUsageError,
   parseChatTimeoutMs,
   parseSetupMaxTurns,
   resolveAuthChoice,
   resolveDeployment,
 } from "../harness/cli-args.js";
 import type { CliFlags } from "../harness/cli-args.js";
+import { describeExecutionLimits, resolveExecutionLimits } from "./execution-limits.js";
+import type { ExecutionLimits } from "./execution-limits.js";
 import { createApp } from "./app.js";
 import { recoverBootstrapProjectBinding } from "./bootstrap-project-binding.js";
 import { createHarnessProfileSources } from "./harness-profile-sources.js";
@@ -197,7 +212,19 @@ function isLoopbackHost(host: string): boolean {
 }
 
 async function main(): Promise<void> {
-  const flags = envFlags();
+  let flags: CliFlags;
+  let executionLimits: ExecutionLimits;
+  try {
+    flags = envFlags();
+    executionLimits = resolveExecutionLimits(process.env);
+  } catch (error) {
+    // A misconfigured env var is a deployer mistake: name it and stop, instead of a stack trace.
+    if (!(error instanceof CliUsageError)) throw error;
+    process.stderr.write(`error: ${error.message}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(`${describeExecutionLimits(executionLimits)}\n`);
   const port = Number.parseInt(process.env["PORT"] ?? "4787", 10);
   const host = process.env["GENBI_HOST"]?.trim() || "127.0.0.1";
   const workspaceRoot = process.env["WREN_HARNESS_WORKSPACE_ROOT"];
@@ -324,6 +351,8 @@ async function main(): Promise<void> {
     ...(tierBinding !== undefined ? { tierBinding } : {}),
     ...(flags.modelsConfig !== undefined ? { modelsConfig: flags.modelsConfig } : {}),
     ...(flags.chatTimeoutMs !== undefined ? { chatTimeoutMs: flags.chatTimeoutMs } : {}),
+    // Only set when the deployer overrode it; `buildRuntime` reads absence as "built-in default".
+    ...(executionLimits.componentTimeoutSource === "env" ? { componentLimits: executionLimits.componentLimits } : {}),
     codexModels: getCodexModels,
     ...(process.env["WREN_HARNESS_CODEX_HOME"] !== undefined
       ? { codexHome: process.env["WREN_HARNESS_CODEX_HOME"] }
@@ -624,7 +653,8 @@ async function main(): Promise<void> {
   const codexConfiguration = readCodexBootConfiguration(process.env);
   const codexComposition = createCodexRuntimeComposition({ configuration: codexConfiguration, packageRoot,
     producerBinary: producerExecutable?.executable ?? "", profileSource: harnessProfileSources.analysis, store,
-    getBinding: currentInteractiveBinding, sourceWrenHome: nativeSourceWrenHome, artifacts: nativeArtifacts });
+    getBinding: currentInteractiveBinding, sourceWrenHome: nativeSourceWrenHome, artifacts: nativeArtifacts,
+    componentLimits: executionLimits.componentLimits });
   const nativeRuntimeHost = new RuntimeHost({
     selected: codexConfiguration.selected,
     deployment: process.env["NODE_ENV"] === "production" ? "production" : "development",
@@ -634,6 +664,7 @@ async function main(): Promise<void> {
   const nativeSessions = new NativeSessionService({
     store,
     terminalManager,
+    componentLimits: executionLimits.componentLimits,
     getBinding: currentInteractiveBinding,
     workspaceRoot,
     materializationState: nativeMaterializationState,

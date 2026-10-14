@@ -1,3 +1,5 @@
+import { DEFAULT_COMPONENT_LIMITS } from "../harness/components/runner.js";
+import type { HarnessRuntimeLimits } from "./wire-types.js";
 /**
  * GET /api/harness — read-only introspection of how the CURRENTLY compiled
  * profile is realized. `buildHarnessDto` is a pure mapping from an
@@ -423,7 +425,11 @@ function buildRuntime(bundle: Bundle, baseRouteOptions: BaseRouteOptions, resolv
   const { backend, label } = runtimeBackendAndLabel(baseRouteOptions.authChoice);
   const dispatcher = runtimeDispatcher(baseRouteOptions.authChoice);
   const tierModels: TierModelBinding[] = collectBundleTierNames(bundle).map((tier) => ({ tier, model: resolver.resolve(tier) }));
-  return { backend, label, dispatcher, tierModels };
+  // `bin.ts` sets `componentLimits` only when the deployer overrode it, so absence means the default.
+  const limits: HarnessRuntimeLimits = baseRouteOptions.componentLimits
+    ? { componentTimeoutMs: baseRouteOptions.componentLimits.timeoutMs, componentTimeoutSource: "env" }
+    : { componentTimeoutMs: DEFAULT_COMPONENT_LIMITS.timeoutMs, componentTimeoutSource: "default" };
+  return { backend, label, dispatcher, tierModels, limits };
 }
 
 // `type`/`location` are resolved via `server/conn-config.ts`'s

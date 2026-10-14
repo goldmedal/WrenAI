@@ -52,7 +52,7 @@ export async function prepareCodexDirectTools(options: {
     if (plan.entries.length !== 1 || plan.entries[0] !== root) throw new Error("Direct session entry mismatch");
     const name = `warble_run_${planDigest({ identity: prepared.identity, plan: plan.identity }).slice(7, 39)}`;
     const admission = new NativeComponentAdmission({ identity: prepared.identity, digest: plan.identity, roots: { [root]: plan }, tools: { [root]: name } },
-      () => { check(); return prepared.identity; }, prepared.host);
+      () => { check(); return prepared.identity; }, prepared.host, prepared.componentLimits);
     const lifetime = new AbortController();
     const timeout = setTimeout(() => lifetime.abort(), Math.min(expiresAt - Date.now(), 2_147_483_647));
     timeout.unref();

@@ -9,7 +9,9 @@ import {
   EXIT_OK,
   EXIT_REFUSAL,
   parseChatTimeoutMs,
+  parseComponentTimeoutMs,
   parseSetupMaxTurns,
+  COMPONENT_TIMEOUT_MS_RANGE,
   parseTierAdapterFlag,
   resolveAuthChoice,
   resolveDeployment,
@@ -393,6 +395,27 @@ describe("parseChatTimeoutMs", () => {
     for (const bad of ["0", "-5", "5.5", "abc", "NaN", "Infinity", ""]) {
       expect(() => parseChatTimeoutMs(bad)).toThrow(CliUsageError);
     }
+  });
+});
+
+describe("parseComponentTimeoutMs", () => {
+  it("returns undefined when unset so the built-in default applies", () => {
+    expect(parseComponentTimeoutMs(undefined)).toBeUndefined();
+  });
+
+  it("accepts an integer inside 30 s..30 min", () => {
+    expect(parseComponentTimeoutMs("300000")).toBe(300000);
+    expect(parseComponentTimeoutMs(" 120000 ")).toBe(120000);
+    expect(parseComponentTimeoutMs(String(COMPONENT_TIMEOUT_MS_RANGE.min))).toBe(30_000);
+    expect(parseComponentTimeoutMs(String(COMPONENT_TIMEOUT_MS_RANGE.max))).toBe(1_800_000);
+  });
+
+  it("rejects out-of-range or malformed values and names the variable and range", () => {
+    for (const bad of ["29999", "1800001", "0", "-5", "5.5", "1e5", "0x10", "abc", ""]) {
+      expect(() => parseComponentTimeoutMs(bad)).toThrow(CliUsageError);
+      expect(() => parseComponentTimeoutMs(bad)).toThrow(/WREN_HARNESS_COMPONENT_TIMEOUT_MS .* between 30000 .* and 1800000/);
+    }
+    expect(() => parseComponentTimeoutMs("1", "--component-timeout-ms")).toThrow(/--component-timeout-ms/);
   });
 });
 

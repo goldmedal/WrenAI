@@ -35,6 +35,8 @@ export interface CliFlags {
   readonly zoneDryRun?: boolean;
   /** Dispatched only: `--chat-timeout-ms <n>`, overrides `spawnChat`'s default 10-minute hang guard. See `DispatchedOptions.chatTimeoutMs`. */
   readonly chatTimeoutMs?: number;
+  /** In-process and native: `--component-timeout-ms <n>` / `WREN_HARNESS_COMPONENT_TIMEOUT_MS`, the component run's wall-clock budget. See `ComponentLimits.timeoutMs`. */
+  readonly componentTimeoutMs?: number;
 }
 
 /** Thrown for user-facing CLI misuse (bad/missing flags), surfaced as a top-level `error:` line. */
@@ -86,6 +88,27 @@ export function parseChatTimeoutMs(raw: string | undefined): number | undefined 
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) {
     throw new CliUsageError(`--chat-timeout-ms must be a positive integer (milliseconds), got "${raw}"`);
+  }
+  return value;
+}
+
+/** Inclusive bounds for `WREN_HARNESS_COMPONENT_TIMEOUT_MS` / `--component-timeout-ms`: 30 seconds to 30 minutes. */
+export const COMPONENT_TIMEOUT_MS_RANGE = Object.freeze({ min: 30_000, max: 1_800_000 });
+
+/**
+ * Parses the component run timeout: one wall-clock deadline for a root component and every
+ * child it reaches (`ComponentLimits.timeoutMs`). Returns `undefined` when unset so the built-in
+ * default applies. Anything that is not an integer inside the range is rejected loudly, because a
+ * malformed value here would otherwise be a silent 120 s on a deployment that believed it had
+ * raised the limit.
+ */
+export function parseComponentTimeoutMs(raw: string | undefined, name = "WREN_HARNESS_COMPONENT_TIMEOUT_MS"): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+  if (!Number.isInteger(value) || value < COMPONENT_TIMEOUT_MS_RANGE.min || value > COMPONENT_TIMEOUT_MS_RANGE.max) {
+    throw new CliUsageError(
+      `${name} must be an integer number of milliseconds between ${COMPONENT_TIMEOUT_MS_RANGE.min} (30 s) and ${COMPONENT_TIMEOUT_MS_RANGE.max} (30 min), got "${raw}"`,
+    );
   }
   return value;
 }

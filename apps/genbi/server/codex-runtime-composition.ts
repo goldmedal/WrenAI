@@ -1,3 +1,4 @@
+import type { ComponentLimits } from "../harness/components/runner.js";
 import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
@@ -53,6 +54,8 @@ interface Options {
   readonly getBinding: () => EnrichmentBinding | undefined;
   readonly sourceWrenHome: () => string;
   readonly artifacts: NativeArtifactService;
+  /** The host's component run budget; see `ComponentLimits`. Unset means the built-in default. */
+  readonly componentLimits?: ComponentLimits;
 }
 const unavailable = () => new CodexBackendError("runtime_policy_unavailable");
 
@@ -136,6 +139,7 @@ export function createCodexRuntimeComposition(options: Options) {
       tools = await prepareCapturedCodexDirectTools(irDocument, { binding: identity.binding, entry: { kind: "agent", verb: input.entry, prompt: "Use the selected analysis tool." } }, {
         identity, currentIdentity: () => { checkLive(); return identity; }, assertCurrent: check, assertLive: checkLive,
         verifierBinary: producer.executable, producerBinary: producer.executable, contextLoaderBinary: loader.executable,
+        ...(options.componentLimits ? { componentLimits: options.componentLimits } : {}),
         wrenBinary: wren.executable, project: binding.path, signal: input.signal, expiresAt: Date.now() + 60 * 60_000,
         wrenEnvironment: { PATH: [path.dirname(runtime.launcher), path.dirname(runtime.venv_python), "/usr/bin", "/bin"].join(path.delimiter), HOME: home,
           WREN_HOME: sourceHome, WREN_PROJECT_HOME: binding.path, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" },
