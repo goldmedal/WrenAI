@@ -147,13 +147,35 @@ describe("generate_dashboard failure points (scripted model, no live calls)", ()
     expect(run.result).toMatchObject({ kind: "refusal" });
   });
 
+  const table = (sql: string, rows: unknown[]) => ({ type: "table", columns: RESULTS[sql]!.columns, rows });
+  it.each([
+    ["a chart", () => [chart(PLAN_SQL, { rows: PLAN_ROWS }), definition(PLAN_SQL)], ["free", 3]],
+    ["a table", () => [table(MONTH_SQL, MONTH_ROWS), definition(MONTH_SQL)], ["2025-01-01 00:00:00", 4]],
+    ["a table in a different key order", () => [table(PLAN_SQL, PLAN_ROWS.map((row) => ({ customers: row.customers, plan: row.plan }))), definition(PLAN_SQL)], ["free", 3]],
+  ] as const)("object-shaped rows in %s that match the declared columns assemble as positional rows", async (_name, blocks, first) => {
+    const run = await runDashboard(asEnvelope(blocks()));
+    expect(run.error).toBeUndefined();
+    expect(run.result).toMatchObject({ kind: "answer", envelope: { verified: true } });
+    const rows = (run.result as { envelope: { blocks: { rows?: unknown[][] }[] } }).envelope.blocks[0]!.rows!;
+    expect(rows[0]).toEqual(first);
+    expect(rows.every((row) => Array.isArray(row))).toBe(true);
+    expect(run.failureLines).toEqual([]);
+  });
+  it("object rows with an invented value are coerced, then refused by grounding", async () => {
+    const run = await runDashboard(asEnvelope([chart(PLAN_SQL, { rows: [{ plan: "free", customers: 999 }, { plan: "pro", customers: 5 }] }), definition(PLAN_SQL)]));
+    expect(run.error).toBeUndefined();
+    expect(run.result).toMatchObject({ kind: "refusal" });
+  });
+
   const violations: readonly [string, string, RegExp][] = [
-    ["chart rows as objects instead of positional rows", asEnvelope([chart(PLAN_SQL, { rows: PLAN_ROWS }), definition(PLAN_SQL)]), /block 1 \(chart\): field `rows` must be row\[\]/],
+    ["object rows with an extra key", asEnvelope([chart(PLAN_SQL, { rows: PLAN_ROWS.map((row) => ({ ...row, note: "x" })) }), definition(PLAN_SQL)]), /block 1 \(chart\): field `rows` must be row\[\]/],
+    ["object rows missing a declared column", asEnvelope([chart(PLAN_SQL, { rows: PLAN_ROWS.map((row) => ({ plan: row.plan })) }), definition(PLAN_SQL)]), /block 1 \(chart\): field `rows` must be row\[\]/],
+    ["one object row among positional rows", asEnvelope([chart(PLAN_SQL, { rows: [["free", 3], { plan: "pro", customers: 5 }] }), definition(PLAN_SQL)]), /block 1 \(chart\): field `rows` must be row\[\]/],
     ["chart without its x field", asEnvelope([chart(PLAN_SQL, { x: undefined }), definition(PLAN_SQL)]), /block 1 \(chart\): field `x` must be string/],
     ["chart_type outside the contract", asEnvelope([chart(PLAN_SQL, { chart_type: "donut" }), definition(PLAN_SQL)]), /block 1 \(chart\): field `chart_type`/],
     ["a block type outside the contract", asEnvelope([{ type: "heading", text: "Overview" }]), /block 1 has a type that is not allowed \(allowed: kpi_card, table, chart, definition\)/],
     ["a string series", asEnvelope([chart(PLAN_SQL, { series: "customers" }), definition(PLAN_SQL)]), /block 1 \(chart\): field `series` must be string\[\]/],
-    ["a second block violating after a good one", asEnvelope([chart(PLAN_SQL), definition(PLAN_SQL), chart(MONTH_SQL, { rows: MONTH_ROWS })]), /block 3 \(chart\): field `rows`/],
+    ["a second block violating after a good one", asEnvelope([chart(PLAN_SQL), definition(PLAN_SQL), chart(MONTH_SQL, { rows: MONTH_ROWS.map((row) => ({ ...row, extra: 1 })) })]), /block 3 \(chart\): field `rows`/],
     ["no blocks array", JSON.stringify({ summary: "nothing" }), /no `blocks` array/],
   ];
   it.each(violations)("%s is a refusal that says why, and is logged", async (_name, text, reason) => {
