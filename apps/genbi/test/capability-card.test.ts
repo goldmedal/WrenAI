@@ -11,6 +11,7 @@ import { parseDisclosurePolicy } from "../harness/providers/zone.js";
 import { reportPlan, splitBinding } from "./zone-fixtures.js";
 
 const FIXTURE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "card-project");
+const JAFFLE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "core", "wren-context-loader", "tests", "fixtures", "jaffle-wren");
 
 /** Runs the real generator over `project` and returns the catalog document text. */
 async function catalogOf(project: string): Promise<string> {
@@ -31,6 +32,18 @@ describe("prepared snapshot surface", () => {
       expect(text.startsWith(`Host semantic context:\n${JSON.stringify(snapshot)}\n\n`)).toBe(true);
       expect(text).toContain("Cubes: order_metrics (base model: orders). A cube is a semantic definition");
       expect(text).toContain("not a SQL table");
+    } finally { await rm(scratch, { recursive: true, force: true }); }
+  });
+  it("marks the jaffle project's revenue cube on both surfaces, from the real context producer", async () => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "genbi-jaffle-surface-"));
+    try {
+      await generatePreparedContextAndCatalog(resolveContextLoader().bin, JAFFLE, path.join(scratch, "context.json"), path.join(scratch, "catalog.json"));
+      const surface = snapshotSurfaceText(JSON.parse(await readFile(path.join(scratch, "context.json"), "utf8")));
+      expect(surface).toContain("Cubes: revenue (base model: orders). A cube is a semantic definition");
+      const card = buildCapabilityCard(JSON.parse(await readFile(path.join(scratch, "catalog.json"), "utf8"))).text;
+      expect(card).toContain("- revenue (cube, not a table; base model: orders)");
+      expect(card).toContain("A cube is a semantic definition (a base model plus measures and dimensions), not a table");
+      expect(card).toMatch(/measures: total_revenue DOUBLE; avg_order_value DOUBLE/);
     } finally { await rm(scratch, { recursive: true, force: true }); }
   });
   it("lists each cube with the model or view it is defined over, and adds nothing to a cube-less snapshot", () => {
