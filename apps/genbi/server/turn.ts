@@ -15,6 +15,8 @@ import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { ComponentExecutionError, componentFailureCodeOf, redactForLog } from "../harness/components/runner.js";
 import { storedStructuredFailure, structuredDataRefusal, structuredFailureFeedback } from "./structured-error-feedback.js";
+import { effectiveExecutionLimits, withRunBudget } from "./execution-limits.js";
+import type { ExecutionLimitsConfig } from "./execution-limits.js";
 import type { AgentEvent, AuthChoice, Bundle, LoginProbe, RouteOptions, RouteResult, SetupStepRunner, SetupTerminalResult } from "../harness/index.js";
 import type { SubscriptionModelCatalog, SubscriptionProvider } from "./wire-types.js";
 import {
@@ -208,6 +210,13 @@ export interface TurnDeps {
    * boot-fixed `baseRouteOptions.authChoice`.
    */
   setAuthChoice?(choice: AuthChoice): void;
+  /**
+   * The deployer's execution-limit config (env). When wired, `effectiveRouteOptions` resolves the
+   * component run budget per turn as built-in < env < the operator override saved under
+   * `store.getExecutionLimitSettings()`, and `GET/PUT /api/config/limits` read and write that
+   * override. Absent (tests), `baseRouteOptions.componentLimits` stays fixed.
+   */
+  readonly executionLimits?: ExecutionLimitsConfig;
   /** Injectable, boolean-only subscription login probe used by config UI/API. */
   readonly loginProbe?: LoginProbe;
   /** Provider-owned, already-sanitized model discovery for the Setup form. */
@@ -302,12 +311,17 @@ export function effectiveRouteOptions(
   const userProject = resolveUserProject(deps);
   if (userProject === undefined && !options?.allowUnbound) throw new ProjectNotBoundError();
   const authChoice = resolveAuthChoice(deps);
+  // The run budget is resolved live so an operator override applies to the next turn without a
+  // restart; it is independent of the auth/runtime settings below.
+  const limits = deps.executionLimits
+    ? { componentLimits: effectiveExecutionLimits(deps.executionLimits, deps.store.getExecutionLimitSettings()).componentLimits }
+    : {};
   // Seeded settings only populate the Setup form; they are not an operator
   // decision and must not shadow WREN_HARNESS_MODE/MODEL/API_KEY/ENDPOINT (or
   // their CLI equivalents). Preserve the complete boot route until a
   // validated PUT marks the persisted runtime settings explicit.
   if (!deps.store.hasExplicitRuntimeSettings()) {
-    return { ...deps.baseRouteOptions, userProject: userProject ?? "", authChoice };
+    return { ...deps.baseRouteOptions, userProject: userProject ?? "", authChoice, ...limits };
   }
   // These three fields are mutually exclusive runtime materializations. Drop
   // any boot-time value before applying the live persisted choice so an auth
@@ -325,6 +339,7 @@ export function effectiveRouteOptions(
     userProject: userProject ?? "",
     authChoice,
     ...materializeRuntimeRouteOptions(settings, authChoice),
+    ...limits,
   };
 }
 
@@ -580,7 +595,11 @@ async function executeTurn(
     if (feedback?.kind === "query" || feedback?.kind === "connection") {
       try { assertCurrent(); } catch (error) { feedback = structuredFailureFeedback(error); }
     }
-    const message = feedback?.message ?? (err instanceof Error ? err.message : String(err));
+    const rawMessage = feedback?.message ?? (err instanceof Error ? err.message : String(err));
+    // A timeout names the budget it ran out of and where to raise it; the code stays in the suffix.
+    const message = componentCode === "cancelled" && deps.executionLimits
+      ? withRunBudget(rawMessage, effectiveExecutionLimits(deps.executionLimits, deps.store.getExecutionLimitSettings()))
+      : rawMessage;
     if (componentCode === undefined) console.error(`[turn-failure] ${JSON.stringify({ turn: turn.id, error: err instanceof Error ? err.name : typeof err, detail: redactForLog(message) })}`);
     // Persist the PARTIAL work log on failure — the Route/Clarify
     // decision(s) seeded at postTurn plus whatever step/tool rows the live log

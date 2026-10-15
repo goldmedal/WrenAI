@@ -137,7 +137,17 @@ export type RuntimeDispatcherKind = 'claude-agent-sdk' | 'codex-local' | 'in-pro
 
 export interface RuntimeLimits {
   componentTimeoutMs: number;
-  componentTimeoutSource: 'default' | 'env';
+  componentTimeoutSource: 'default' | 'env' | 'operator';
+}
+
+/** `GET/PUT /api/config/limits`: the budget in force, its bounds, and whether this operator may change it. */
+export interface ExecutionLimitsInfo extends RuntimeLimits {
+  deployerTimeoutMs: number;
+  ceilingMs: number;
+  minMs: number;
+  editable: boolean;
+  editableReason?: string;
+  operatorTimeoutMs?: number;
 }
 
 export interface RuntimeInfo {

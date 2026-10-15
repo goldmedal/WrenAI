@@ -38,6 +38,7 @@ import type {
 import { hashEnrichmentOperation, normalizeEnrichmentConfidence } from "./enrichment.js";
 import type { EnrichmentApprovalAttestation, EnrichmentBinding, EnrichmentMode, EnrichmentOperation, EnrichmentOperationState, EnrichmentRisk, EnrichmentRunStatus, ProjectIdentity, UnversionedEnrichmentBinding } from "./enrichment.js";
 import { resolveNativeRuntimeBinding } from "./native-dispatch-registry.js";
+import type { OperatorExecutionLimits } from "./wire-types.js";
 import type { NativeRuntimeBinding } from "./native-dispatch-registry.js";
 
 export function newId(prefix: string): string {
@@ -1829,6 +1830,23 @@ export class Store {
   // ---------------------------------------------------------------------
   // typed config accessors
   // ---------------------------------------------------------------------
+
+  /**
+   * The operator's component timeout override, or undefined when none is saved. Its own key
+   * (`execution.limits`), deliberately outside `runtime.settings`: saving it must not bump the
+   * runtime generation or revoke sessions. A malformed row reads as "none".
+   */
+  getExecutionLimitSettings(): OperatorExecutionLimits | undefined {
+    const raw = this.getConfigJson<unknown>("execution.limits");
+    if (raw === null || typeof raw !== "object" || !("componentTimeoutMs" in raw)) return undefined;
+    const value = (raw as { componentTimeoutMs: unknown }).componentTimeoutMs;
+    return Number.isInteger(value) && (value as number) > 0 ? { componentTimeoutMs: value as number } : undefined;
+  }
+
+  setExecutionLimitSettings(value: OperatorExecutionLimits | undefined): void {
+    if (value === undefined) this.deleteConfig("execution.limits");
+    else this.setConfigJson("execution.limits", { componentTimeoutMs: value.componentTimeoutMs });
+  }
 
   getRuntimeSettings(): RuntimeSettings {
     const settings = this.getConfigJson<RuntimeSettings>("runtime.settings");

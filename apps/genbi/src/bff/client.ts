@@ -3,6 +3,7 @@ import type { ContextFileNode, ContextOverviewData, ImpactData } from '@/context
 import type { RenderEnvelope } from '@/envelope/types';
 import type { ComponentScore, EvalRun } from '@/eval/types';
 import { deriveRealizationLabel } from '@/harness/realization';
+import type { ExecutionLimitsInfo } from '@/harness/types';
 import type {
   AgentProfileRow,
   Component,
@@ -502,6 +503,19 @@ export function getSetupSteps(): Promise<SetupStep[]> {
 
 export function getRuntimeSettings(): Promise<RuntimeSettings> {
   return request<RuntimeSettings>('/api/config/runtime');
+}
+
+/** The component run budget in force and its bounds; a separate bucket from runtime settings. */
+export function getExecutionLimits(): Promise<ExecutionLimitsInfo> {
+  return request<ExecutionLimitsInfo>('/api/config/limits');
+}
+
+/** Saves the operator's component timeout (milliseconds), or clears it with `null`. Never revokes sessions. */
+export function putExecutionLimits(componentTimeoutMs: number | null): Promise<ExecutionLimitsInfo> {
+  return request<ExecutionLimitsInfo>('/api/config/limits', {
+    method: 'PUT',
+    body: JSON.stringify({ componentTimeoutMs }),
+  });
 }
 
 /** Saved Runtime health is separate from editable settings so it can never be re-persisted by a form spread. */

@@ -60,6 +60,7 @@ import {
   unsaveArtifactForSession,
 } from "./turn.js";
 import type { TurnDeps } from "./turn.js";
+import { effectiveExecutionLimits, executionLimitsDtoFor, ExecutionLimitsError, validateOperatorComponentTimeoutMs } from "./execution-limits.js";
 import { connectionVariableNames, loadSourceCatalog, supportedSourceTypes } from "./source-catalog.js";
 import { driverProvisionNote, provisionSourceDriver } from "./source-driver.js";
 import { annotateEnvFields } from "./env-field-hints.js";
@@ -1609,6 +1610,8 @@ export function createApp(deps: TurnDeps) {
   // Harness introspection
   // ---------------------------------------------------------------------
 
+  const executionLimitsDto = () => executionLimitsDtoFor(deps.executionLimits, deps.store.getExecutionLimitSettings(), deps.baseRouteOptions.componentLimits);
+
   app.get("/api/harness", async (c) => {
     const purposes = c.req.queries("purpose") ?? [];
     if (purposes.length !== 1 || !NATIVE_PURPOSES.includes(purposes[0] as NativePurpose)) {
@@ -1662,7 +1665,9 @@ export function createApp(deps: TurnDeps) {
       const nativeReadiness = purpose === "setup"
         ? await deps.nativeSessions?.readiness().catch(() => undefined)
         : await deps.nativeSessions?.readiness();
-      return c.json(buildHarnessDto(bundle, deps.store, routeOptions, purpose, nativeReadiness, setupReadiness, selectedProfile));
+      const limits = executionLimitsDto();
+      return c.json(buildHarnessDto(bundle, deps.store, routeOptions, purpose, nativeReadiness, setupReadiness, selectedProfile,
+        { componentTimeoutMs: limits.componentTimeoutMs, componentTimeoutSource: limits.componentTimeoutSource }));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ error: message }, 500);
@@ -1697,6 +1702,32 @@ export function createApp(deps: TurnDeps) {
   });
 
   /** Adapter env-var presence only (booleans) — never the key value itself. See `detectAdapterEnv`. */
+  // Execution limits are their own config bucket. A save here touches only `execution.limits`:
+  // no runtime generation bump, and no native session, structured runtime or interactive
+  // terminal is revoked, unlike PUT /api/config/runtime.
+  app.get("/api/config/limits", (c) => c.json(executionLimitsDto()));
+  app.put("/api/config/limits", async (c) => {
+    if (!deps.executionLimits) return c.json({ error: "Execution limits are not configured on this BFF instance." }, 503);
+    const body: unknown = await c.req.json().catch(() => undefined);
+    if (body === null || typeof body !== "object" || !("componentTimeoutMs" in body)) {
+      return c.json({ error: "componentTimeoutMs is required: a number of milliseconds, or null to clear the override" }, 400);
+    }
+    const raw = (body as { componentTimeoutMs: unknown }).componentTimeoutMs;
+    const current = effectiveExecutionLimits(deps.executionLimits, deps.store.getExecutionLimitSettings());
+    if (!current.editable) return c.json({ error: current.editableReason ?? "Operator overrides are disabled." }, 403);
+    if (raw === null) {
+      deps.store.setExecutionLimitSettings(undefined);
+      return c.json(executionLimitsDto());
+    }
+    try {
+      deps.store.setExecutionLimitSettings({ componentTimeoutMs: validateOperatorComponentTimeoutMs(deps.executionLimits, raw) });
+    } catch (err) {
+      if (err instanceof ExecutionLimitsError) return c.json({ error: err.message }, 400);
+      throw err;
+    }
+    return c.json(executionLimitsDto());
+  });
+
   app.get("/api/config/env-detect", (c) => c.json<AdapterEnvStatus>(detectAdapterEnv()));
 
   app.get("/api/config/subscription-detect", async (c) => {
