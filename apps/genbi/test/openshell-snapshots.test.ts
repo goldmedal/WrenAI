@@ -23,7 +23,7 @@ function source() {
   const store = new Store(":memory:"); stores.push(store); store.activateEnrichmentBinding(resolveEnrichmentBinding(project));
   let currentProject: string | undefined = project, context: string | undefined = digest;
   const authority = snapshotSourceAuthority({ store, currentProject: () => currentProject, approvedFiles: paths, currentContext: () => context });
-  return { root, project, store, authority, request: authority()!, unbind: () => { currentProject = undefined; }, changeContext: () => { context = `sha256:${"b".repeat(64)}`; } };
+  return { root, project, store, authority, request: authority({ backend: "openshell", account: digest, generation: "1", session: "fixture", turn: "fixture", binding: "fixture", bindingGeneration: "1", bindingRevision: digest, context: digest, plan: digest, image: digest, policy: digest, gateway: "gateway", workspace: "default", configuration: digest, purpose: "lifecycle", operation: "worker", snapshot: "none" })!, unbind: () => { currentProject = undefined; }, changeContext: () => { context = `sha256:${"b".repeat(64)}`; } };
 }
 async function fixture() {
   const f = source(); const resources = new Map<string, OpenShellResource>();

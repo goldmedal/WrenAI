@@ -102,8 +102,8 @@ export class OpenShellCliDriver implements OpenShellDriver {
   async create(intent: OpenShellIntent, signal: AbortSignal): Promise<OpenShellResource> {
     const mount = intent.identity.purpose === "data" ? this.snapshotMount?.(intent) : undefined;
     if (intent.identity.purpose === "data" && (!mount || !this.dataIdentity)) throw new OpenShellError("openshell_scope_invalid");
-    if (intent.identity.purpose === "model" && !this.configuration.model) throw new OpenShellError("openshell_scope_invalid");
-    await this.command(["sandbox", "create", "--name", intent.name, "--from", intent.identity.purpose === "model" ? this.configuration.model!.image : intent.identity.purpose === "data" ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image, "--policy", intent.identity.purpose === "model" ? this.configuration.model!.policy : mount ? this.configuration.dataPolicy! : this.configuration.policy,
+    if (["model", "model_session"].includes(intent.identity.purpose) && !this.configuration.model) throw new OpenShellError("openshell_scope_invalid");
+    await this.command(["sandbox", "create", "--name", intent.name, "--from", ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.image : intent.identity.purpose === "data" ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image, "--policy", ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.policy : mount ? this.configuration.dataPolicy! : this.configuration.policy,
       ...(mount ? ["--driver-config-json", JSON.stringify({ docker: { mounts: [{ type: "volume", source: mount.volume, target: "/opt/genbi-project", read_only: true }] } })] : []),
       "--no-auto-providers", "--approval-mode", "manual", "--detach", "--tty", "--cpu", "1", "--memory", "1Gi",
       "--label", `${OPEN_SHELL_OWNER_LABEL}=${intent.owner}`, "--", "/bin/sleep", "1800"], signal, 180_000);
@@ -138,7 +138,7 @@ export class OpenShellCliDriver implements OpenShellDriver {
     const snapshot = intent.identity.purpose === "data" ? this.snapshotMount?.(intent) : undefined;
     if (intent.identity.purpose === "data" && !snapshot) throw new OpenShellError("openshell_scope_invalid");
     if ((purpose === "runnable" && owned.length !== 2) || owned.length > 2 || owned.some((row) => row.Config.Labels?.["openshell.ai/sandbox-id"] !== resource.id
-      || row.Config.Labels?.["openshell.ai/sandbox-namespace"] !== this.configuration.dockerNamespace || row.Image !== (row.Name.endsWith("-supervisor") ? this.configuration.supervisorImage : intent.identity.purpose === "model" ? this.configuration.model!.image : intent.identity.purpose === "data" ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image)
+      || row.Config.Labels?.["openshell.ai/sandbox-namespace"] !== this.configuration.dockerNamespace || row.Image !== (row.Name.endsWith("-supervisor") ? this.configuration.supervisorImage : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.image : intent.identity.purpose === "data" ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image)
       || row.Mounts.some((mount) => mount.Type !== "volume" || !mount.Name || (!this.volumeNames(resource.id).includes(mount.Name)
         && !(snapshot && !row.Name.endsWith("-supervisor") && mount.Name === snapshot.volume && mount.Destination === "/opt/genbi-project" && mount.RW === false)))
       || (snapshot && !row.Name.endsWith("-supervisor") && row.Mounts.filter((mount) => mount.Name === snapshot.volume).length !== 1))) throw new OpenShellError("openshell_identity_mismatch");
@@ -172,7 +172,7 @@ export class OpenShellCliDriver implements OpenShellDriver {
     if ([...this.volumeNames(intent.remoteId), ...(intent.volumes ?? [])].some((volume) => volumes.includes(volume))) throw new OpenShellError("openshell_cleanup_pending");
   }
   async duplex(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex> {
-    const model = intent.identity.purpose === "model" && this.modelIdentity && argv.length === 2 && argv[0] === "/usr/local/bin/node" && argv[1] === "/opt/genbi/claude-worker.mjs";
+    const model = ["model", "model_session"].includes(intent.identity.purpose) && this.modelIdentity && argv.length === 2 && argv[0] === "/usr/local/bin/node" && (argv[1] === "/opt/genbi/claude-worker.mjs" || (intent.identity.purpose === "model_session" && argv[1] === "/opt/genbi/claude-session-step.mjs"));
     const data = intent.identity.purpose === "data" && this.configuration.dataWorker && argv.length === 3 && argv[0] === "/usr/local/bin/python" && argv[1] === "-I" && argv[2] === "/opt/genbi/worker.py";
     if ((!model && !data) || !this.openDuplex) throw new OpenShellError("openshell_scope_invalid");
     this.attest(); await this.inspect(intent); signal.throwIfAborted();

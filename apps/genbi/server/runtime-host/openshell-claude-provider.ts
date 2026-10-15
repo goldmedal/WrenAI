@@ -8,12 +8,13 @@ import type { ClaudeComponentRuntime } from "./claude-component-step.js";
 import { assertActualVault, assertVaultLeaseAfterClose, assertVaultLease, type ClaudeAccountLease, type ClaudeAccountVault } from "./claude-account-vault.js";
 import { openShellIdentitySchema, type OpenShellIdentity } from "./openshell-types.js";
 import type { OpenShellLifecycle, OpenShellLease } from "./openshell-lifecycle.js";
+import { claimOpenShellSessionStep, type OpenShellModelSession } from "./openshell-model-session.js";
 import { ClaudeDuplexProcess } from "./claude-duplex-process.js";
 import { ClaudeRawProtocol, ClaudeProtocolFault } from "./claude-protocol.js";
 
 const environment = Object.freeze({ PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/sandbox/home", CLAUDE_CONFIG_DIR: "/sandbox/config", TMPDIR: "/sandbox/tmp", LANG: "C.UTF-8" });
-function admitSpawn(spawn: SpawnOptions, model: string, run: StepRun): void {
-  if (spawn.command !== "/opt/genbi/claude" || spawn.cwd !== "/sandbox" || !isDeepStrictEqual(spawn.env, { ...environment, CLAUDE_CODE_ENTRYPOINT: "sdk-ts", CLAUDE_AGENT_SDK_VERSION: "0.3.259" })) throw new ClaudeProtocolFault("protocol");
+function admitSpawn(spawn: SpawnOptions, model: string, run: StepRun, cwd = "/sandbox", env: Readonly<Record<string, string>> = environment): void {
+  if (spawn.command !== "/opt/genbi/claude" || spawn.cwd !== cwd || !isDeepStrictEqual(spawn.env, { ...env, CLAUDE_CODE_ENTRYPOINT: "sdk-ts", CLAUDE_AGENT_SDK_VERSION: "0.3.259" })) throw new ClaudeProtocolFault("protocol");
   const expected = new Map<string, string>([["--output-format", "stream-json"], ["--input-format", "stream-json"], ["--max-turns", "12"], ["--model", model], ["--tools", ""], ["--permission-mode", "default"]]);
   const single = new Set(["--verbose", "--setting-sources=", "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands"]);
   const seen = new Set<string>();
@@ -33,6 +34,7 @@ function admitSpawn(spawn: SpawnOptions, model: string, run: StepRun): void {
 /** Internal provider; scope and tier map come from the server, never worker correlation. */
 type ProviderOptions =  { lifecycle: OpenShellLifecycle; vault: ClaudeAccountVault; models: Readonly<Record<string, string>>;
   timing?: StructuredTimingRecorder;
+  modelSession?: OpenShellModelSession;
   scope: Omit<Extract<OpenShellIdentity, { purpose: "model" }>, "purpose" | "operation" | "snapshot" | "invocation" | "step" | "attempt" | "model" | "tier">;
   currentScope(): ProviderOptions["scope"] | undefined; assertCurrent(): void;
   /** Full native executable check at server-owned execution boundaries. */
@@ -58,29 +60,36 @@ function providerWithQuery(options: ProviderOptions, sdkQuery: ClaudeComponentRu
       const identity = Object.freeze(openShellIdentitySchema.parse({ ...scope, purpose: "model", operation: "step", snapshot: "none", invocation, step, attempt: 1, model, tier })) as Extract<OpenShellIdentity, { purpose: "model" }>;
       const account = await options.vault.lease(scope.account, scope.generation);
       const authoritySignal = AbortSignal.any([signal, account.signal]);
-      let lease: OpenShellLease | undefined; let process: ClaudeDuplexProcess | undefined; let protocol: ClaudeRawProtocol | undefined; let run: StepRun | undefined;
+      let lease: OpenShellLease | undefined; let sessionStep: ReturnType<typeof claimOpenShellSessionStep> | undefined; let process: ClaudeDuplexProcess | undefined; let protocol: ClaudeRawProtocol | undefined; let run: StepRun | undefined;
       const current = () => { try { check(); account.assertCurrent(); return identity; } catch { return undefined; } };
-      const assertCurrent = () => { authoritySignal.throwIfAborted(); check(); account.assertCurrent(); lease?.assertActive(); };
+      const assertCurrent = () => { authoritySignal.throwIfAborted(); check(); account.assertCurrent(); lease?.assertActive(); sessionStep?.assertActive(); };
       let closing: Promise<void> | undefined;
-      const close = () => closing ??= (async () => { try { if (process) await process.close(); else await lease?.close(); } finally { account.release(); } })();
+      const close = () => closing ??= (async () => { try { if (process) await process.close(); else if (sessionStep) await sessionStep.close(); else await lease?.close(); } finally { account.release(); } })();
       try {
-        const permit = await options.lifecycle.prepareLaunch(identity, current, authoritySignal);
         assertExecutableCurrent();
-        try { lease = await options.lifecycle.launch(permit); } catch (error) { permit.release(); throw error; }
+        if (options.modelSession) sessionStep = claimOpenShellSessionStep(options.modelSession, identity);
+        else {
+          const permit = await options.lifecycle.prepareLaunch(identity, current, authoritySignal);
+          try { lease = await options.lifecycle.launch(permit); } catch (error) { permit.release(); throw error; }
+        }
         assertCurrent();
         const timing = createStructuredComponentTiming(options.timing);
-        const runtime: ClaudeComponentRuntime = { ...(timing ? { timing } : {}), cwd: "/sandbox", executable: "/opt/genbi/claude", model, signal: AbortSignal.any([authoritySignal, lease.signal]), account: Object.freeze({ email: account.identity.email, tokenSource: "CLAUDE_CODE_OAUTH_TOKEN", subscriptionType: labels[account.identity.subscription] }), environment, query: sdkQuery,
+        const stepRoot = `/sandbox/steps/${step}`;
+        const cwd = sessionStep ? `${stepRoot}/work` : "/sandbox";
+        const env = sessionStep ? Object.freeze({ ...environment, HOME: `${stepRoot}/home`, CLAUDE_CONFIG_DIR: `${stepRoot}/config`, TMPDIR: `${stepRoot}/tmp` }) : environment;
+        const runtime: ClaudeComponentRuntime = { ...(timing ? { timing } : {}), cwd, executable: "/opt/genbi/claude", model, signal: AbortSignal.any([authoritySignal, (sessionStep ?? lease!).signal]), account: Object.freeze({ email: account.identity.email, tokenSource: "CLAUDE_CODE_OAUTH_TOKEN", subscriptionType: labels[account.identity.subscription] }), environment: env, query: sdkQuery,
           assertExecutableCurrent,
-          admitStep(value) { assertExecutableCurrent(); if (value.signal.aborted || value.tier !== tier) throw new ClaudeProtocolFault("protocol"); if (run) throw new ClaudeProtocolFault("protocol"); run = value; protocol = new ClaudeRawProtocol({ run, model, cwd: "/sandbox", check: assertCurrent, secret: account.accessCredential() });
+          admitStep(value) { assertExecutableCurrent(); if (value.signal.aborted || value.tier !== tier) throw new ClaudeProtocolFault("protocol"); if (run) throw new ClaudeProtocolFault("protocol"); run = value; protocol = new ClaudeRawProtocol({ run, model, cwd, check: assertCurrent, secret: account.accessCredential() });
             if (timing) { const originalWorker = protocol.worker; protocol.worker = function(value) { const result = Reflect.apply(originalWorker, this, [value]); recordAdmittedTimingResult(timing, value); return result; }; } },
           claimTool(name, input) { if (!protocol) throw new ClaudeProtocolFault("protocol"); protocol.claim(name, input); },
           assertSettled() { protocol?.settled(); }, assertCurrent, close,
           spawn(spawn) {
-            assertCurrent(); assertExecutableCurrent(); if (process || !run || !protocol) throw new ClaudeProtocolFault("protocol"); admitSpawn(spawn, model, run);
+            assertCurrent(); assertExecutableCurrent(); if (process || !run || !protocol) throw new ClaudeProtocolFault("protocol"); admitSpawn(spawn, model, run, cwd, env);
             const boot = Buffer.from(JSON.stringify({ protocol: 1, scope: step, generation: account.credentialGeneration, expiresAt: account.expiresAt, access: account.accessCredential(), argv: spawn.args }));
             const prefix = Buffer.alloc(4); prefix.writeUInt32BE(boot.length);
             process = new ClaudeDuplexProcess({ signal: AbortSignal.any([signal, run.signal, account.signal]), protocol, bootstrap: Buffer.concat([prefix, boot]), check: assertCurrent,
-              connect: () => lease!.duplex(["/usr/local/bin/node", "/opt/genbi/claude-worker.mjs"]), cleanup: () => lease!.close() });
+              connect: () => sessionStep ? sessionStep.duplex() : lease!.duplex(["/usr/local/bin/node", "/opt/genbi/claude-worker.mjs"]),
+              ...(sessionStep ? { admitPrelude: sessionStep.admitPrelude } : {}), cleanup: () => sessionStep ? sessionStep.close() : lease!.close() });
             return process;
           },
         };

@@ -63,6 +63,8 @@ describe("resuming/replaying an already-resolved turn never re-invokes route()",
 
     const secondFrames = parseSse(await (await app.request(`/api/sessions/${session.id}/stream?turn=${turn.turnId}`)).text());
     expect(calls).toBe(1); // replay path must not call route() again
-    expect(secondFrames).toEqual(firstFrames);
+    // Historical errors without a structured code receive the conservative public
+    // projection on replay; an arbitrary legacy route message is not republished.
+    expect(secondFrames).toEqual([{ event: "error", data: { code: "runtime.failed", kind: "runtime", message: "Structured runtime failed." } }]);
   });
 });

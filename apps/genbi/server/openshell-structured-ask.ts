@@ -8,6 +8,8 @@ import type { RuntimeBackendReadiness } from "./runtime-host/types.js";
 import { structuredQueryEnvelope } from "./structured-query-evidence.js";
 import { StructuredRuntimeError, type StructuredAdapter, type StructuredScope } from "./structured-runtime.js";
 import { isStructuredQueryFailure } from "./structured-error-feedback.js";
+import type { OpenShellModelSession } from "./runtime-host/openshell-model-session.js";
+import type { OpenShellIdentity } from "./runtime-host/openshell-types.js";
 
 type RootResult = Extract<ComponentInvocationResult, { status: "ok" }>;
 type OpenShellResult = Extract<RouteResult, { backend: "openshell" }>;
@@ -23,11 +25,16 @@ export function readOpenShellStructuredResult(result: OpenShellResult): OpenShel
 
 export interface OpenShellStructuredProvisioner {
   probe(): Promise<RuntimeBackendReadiness>;
+  /** Server-owned cleanup proof for one session, never a global idle requirement. */
+  assertSessionCleaned?(sessionId: string): void;
+  reserveSession?(input: { readonly options: RouteOptions; readonly scope: StructuredScope }): Promise<OpenShellModelSession>;
   prepare(input: { readonly options: RouteOptions; readonly scope: StructuredScope;
+    readonly modelSession?: OpenShellModelSession;
     readonly persistRoot: NonNullable<RunnerHost["persistRoot"]>; readonly onEvent: (event: ComponentEvent) => void }): Promise<{
     assertCurrent(): void;
     /** Actual OpenShell preparation supplies a full executable checkpoint. */
     assertExecutableCurrent?(): void;
+    sessionIdentity?(): Extract<OpenShellIdentity, { purpose: "model_session" }>;
     run(request: string): Promise<ComponentInvocationResult>;
     /** Complete all host/worker cleanup before returning an answer. */
     dispose(): Promise<void>;
@@ -37,7 +44,7 @@ export interface OpenShellStructuredProvisioner {
 /** One server-selected analytical root; final text and vendor artifacts have no answer authority. */
 export function createOpenShellStructuredAdapter(provisioner: OpenShellStructuredProvisioner, diagnostics?: StructuredDiagnosticObserver): StructuredAdapter {
   return {
-    vendor: "claude", backend: "openshell", probe: () => provisioner.probe(),
+    vendor: "claude", backend: "openshell", nativeSessions: !!provisioner.reserveSession, probe: () => provisioner.probe(),
     async ask(options, scope) {
       const timing = structuredTimingForObserver(diagnostics);
       markStructuredTiming(timing, "adapter_enter");
@@ -70,7 +77,7 @@ export function createOpenShellStructuredAdapter(provisioner: OpenShellStructure
       try {
         assertCurrent();
         markStructuredTiming(timing, "adapter_prepare");
-        prepared = await observeStructuredAsync(diagnostics, "adapter_preparation", () => provisioner.prepare({ options, scope: guarded,
+        prepared = await observeStructuredAsync(diagnostics, "adapter_preparation", () => provisioner.prepare({ options, scope: guarded, ...(scope.modelSession ? { modelSession: scope.modelSession } : {}),
           async persistRoot(value, binding, parent) {
             parent.throwIfAborted(); assertCurrent();
             prepared?.assertExecutableCurrent?.();

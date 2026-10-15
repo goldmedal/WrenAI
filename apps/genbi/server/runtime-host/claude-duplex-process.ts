@@ -22,7 +22,7 @@ export class ClaudeDuplexProcess extends EventEmitter implements SpawnedProcess 
   private readonly controller = new AbortController();
   private readonly timer: ReturnType<typeof setTimeout>;
   private readonly abort: () => void;
-  constructor(private readonly options: { signal: AbortSignal; protocol: ClaudeRawProtocol; bootstrap: Buffer; connect(signal: AbortSignal): Promise<OpenShellDuplex>; check(): void; cleanup(): Promise<void> }) {
+  constructor(private readonly options: { signal: AbortSignal; protocol: ClaudeRawProtocol; bootstrap: Buffer; connect(signal: AbortSignal): Promise<OpenShellDuplex>; check(): void; cleanup(): Promise<void>; admitPrelude?(value: unknown): void }) {
     super();
     this.on("error", () => {}); this.stdout.on("error", () => {});
     this.stdin = new Writable({ highWaterMark: 65536, write: (chunk: Buffer, _encoding, callback) => {
@@ -53,6 +53,7 @@ export class ClaudeDuplexProcess extends EventEmitter implements SpawnedProcess 
   private check(): void { if (!this.active || this.options.signal.aborted) throw new ClaudeProtocolFault("cancelled"); this.options.check(); }
   private async consume(stream: OpenShellDuplex): Promise<void> {
     let exited = false;
+    let prelude = this.options.admitPrelude === undefined;
     try {
       for await (const event of stream.output) {
         this.check();
@@ -68,6 +69,7 @@ export class ClaudeDuplexProcess extends EventEmitter implements SpawnedProcess 
         if (this.stdout.readableLength + this.output.bufferedBytes + event.data.length > L.unread) throw new ClaudeProtocolFault("overload");
         for (const frame of this.output.feed(event.data)) {
           if (++this.frames > L.frames) throw new ClaudeProtocolFault("overload");
+          if (!prelude) { this.options.admitPrelude!(frame.value); prelude = true; continue; }
           this.options.protocol.secretSafe(frame.bytes); this.options.protocol.worker(frame.value);
           if (this.stdout.readableLength + frame.bytes.length > L.unread) throw new ClaudeProtocolFault("overload");
           this.stdout.push(frame.bytes);

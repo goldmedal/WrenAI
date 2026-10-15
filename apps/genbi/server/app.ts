@@ -37,6 +37,7 @@ import { ProfileRegistryError, toWarbleProfileDto } from "./profile-registry.js"
 import { DEFAULT_CONVERSATION_PROFILE } from "./native-sessions.js";
 import { detectAdapterEnv, GATEWAY_API_KEY_ENV } from "./env-detect.js";
 import { listPiAiCatalog } from "../harness/providers/index.js";
+import { scopedSessionSocket } from "./scoped-session-socket.js";
 import { redactPublicSetupText, redactSetupText, sanitizePublicSetupWorklog } from "./fold.js";
 import { assertHarnessBundlePurpose, buildHarnessDto } from "./harness.js";
 import { requiredInProcessCredentialEnvVars, RuntimeBindingError, runtimeSettingsCorrection, validateRuntimeTierBindings } from "./runtime-binding.js";
@@ -1077,14 +1078,15 @@ export function createApp(deps: TurnDeps) {
   // Native Sessions use their own durable namespace. Ask's `/api/sessions`
   // remains structured conversation storage and is never overloaded with PTYs.
   app.post("/api/native-sessions", async (c) => {
-    const body = await c.req.json().catch(() => ({})) as { purpose?: unknown; intent?: unknown; idempotencyKey?: unknown; sessionId?: unknown; entryVerb?: unknown; profile?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { purpose?: unknown; intent?: unknown; idempotencyKey?: unknown; sessionId?: unknown; entryVerb?: unknown; profile?: unknown; capability?: unknown };
     if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "native session launch request is invalid" }, 400);
     const intent = body.intent === undefined ? "open_existing" : body.intent;
     const requiresAction = intent === "start_separate" || intent === "resume";
     // `profile` names a registry id for a NEW analysis session only: a start-separate, or an
     // open-or-create with no sessionId. A resume or an explicit sessionId already carries its profile.
-    const allowedKeys = intent === "start_separate" ? ["purpose", "intent", "idempotencyKey", "entryVerb", "profile"] : intent === "resume" ? ["purpose", "intent", "sessionId", "idempotencyKey"] : ["purpose", "intent", "sessionId", "profile"];
+    const allowedKeys = intent === "start_separate" ? ["purpose", "intent", "idempotencyKey", "entryVerb", "profile"] : intent === "resume" ? ["purpose", "intent", "sessionId", "idempotencyKey"] : ["purpose", "intent", "sessionId", "profile", "capability"];
     if (!NATIVE_PURPOSES.includes(body.purpose as NativePurpose) || (intent !== "open_existing" && intent !== "start_separate" && intent !== "resume") || !Object.keys(body).every((key) => allowedKeys.includes(key)) || (requiresAction && (typeof body.idempotencyKey !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.idempotencyKey))) || ((intent === "resume" && (typeof body.sessionId !== "string" || !/^native-session-[0-9a-f-]{36}$/i.test(body.sessionId))) || (intent === "open_existing" && body.sessionId !== undefined && (typeof body.sessionId !== "string" || !/^native-session-[0-9a-f-]{36}$/i.test(body.sessionId))))) return c.json({ error: "native session launch request is invalid" }, 400);
+    if (body.capability !== undefined && (intent !== "open_existing" || typeof body.sessionId !== "string" || typeof body.capability !== "string" || !/^[0-9a-f-]{36}$/i.test(body.capability))) return c.json({ error: "native session attachment is invalid" }, 400);
     if (body.entryVerb !== undefined && (body.purpose !== "analysis" || typeof body.entryVerb !== "string" || !["answer_query", "generate_dashboard"].includes(body.entryVerb))) return c.json({ error: "native session entry is invalid" }, 400);
     if (body.profile !== undefined) {
       if (typeof body.profile !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.profile)) return c.json({ error: "native session profile is invalid" }, 400);
@@ -1103,7 +1105,7 @@ export function createApp(deps: TurnDeps) {
         : intent === "resume"
           ? await deps.nativeSessions.resume({ id: body.sessionId as string, idempotencyKey: body.idempotencyKey as string })
         : typeof body.sessionId === "string"
-          ? await deps.nativeSessions.openExisting({ purpose: body.purpose as NativePurpose, id: body.sessionId })
+          ? await deps.nativeSessions.openExisting({ purpose: body.purpose as NativePurpose, id: body.sessionId, ...(typeof body.capability === "string" ? { capability: body.capability } : {}) })
           : await deps.nativeSessions.openOrCreate({ purpose: body.purpose as NativePurpose, ...profile });
       return c.json({ session: { ...created.row, lifecycle: nativeSessionLifecycle(created.row, nativeResumeAvailability(created.row)) }, ...(created.capability ? { capability: created.capability } : {}), ...(created.recoveryCapability ? { recoveryCapability: created.recoveryCapability } : {}) }, 201);
     } catch (error) {
@@ -1156,6 +1158,11 @@ export function createApp(deps: TurnDeps) {
     ? c.json(await deps.structuredRuntime.readiness(resolveAuthChoice(deps))) : c.json({ error: "Structured runtime is not configured." }, 503));
   app.get("/api/native-sessions/:id/conversation", upgradeWebSocket((c) =>
     conversationSocket(deps.nativeSessions, c.req.param("id") ?? "", c.req.query("cap") ?? "", c.req.query("after") ?? "0")));
+  app.get("/api/native-sessions/:id/scoped-events", upgradeWebSocket(c => scopedSessionSocket(deps.nativeSessions, c.req.param("id") ?? "", c.req.query("cap") ?? "", c.req.query("after") ?? "0")));
+  app.get("/api/native-sessions/:id/scoped-history", c => {
+    const history = deps.nativeSessions?.scopedHistory(c.req.param("id") ?? "");
+    return history ? c.json(history) : c.json({ error: "Scoped session history unavailable" }, 404);
+  });
   app.get("/api/native-sessions/:id/attach", upgradeWebSocket((c) => {
     const id = c.req.param("id") ?? "";
     const capability = c.req.query("cap") ?? "";

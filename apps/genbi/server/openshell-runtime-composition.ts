@@ -38,7 +38,8 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
   let lifecycle: OpenShellLifecycle | undefined;
   let snapshots: OpenShellProjectSnapshots | undefined;
   let runtimeEpoch = 0;
-  let approvedContext: string | undefined;
+  const dataApprovals = new Map<string, () => void>();
+  const approvalKey = (scope: import("./runtime-host/openshell-types.js").OpenShellIdentity) => JSON.stringify([scope.session, "turn" in scope ? scope.turn : null, scope.binding, scope.bindingGeneration, scope.bindingRevision, scope.context, scope.plan]);
   if (configuration.configuration) {
     const config = configuration.configuration;
     const driver = options.driver ?? new OpenShellCliDriver(config, (intent) => { if (!snapshots) throw new Error("Snapshot authority unavailable"); return snapshots.mount(intent); }, options.claude?.duplex);
@@ -46,7 +47,7 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
       stateRoot: options.stateRoot, exclusive: configuration.configuration.exclusive });
     if (config.snapshotCapture && config.dataPolicy && config.dataPolicyDigest) {
       snapshots = new OpenShellProjectSnapshots({ lifecycle, journal: options.store, driver: new DockerSnapshotDriver(config, (publication, name, id) => snapshots!.recordHelper(publication, name, id)), stateRoot: options.stateRoot,
-        currentSource: snapshotSourceAuthority({ store: options.store, currentProject: options.currentProject ?? (() => undefined), approvedFiles: config.snapshotCapture.approvedFiles, currentContext: options.currentContext ?? (() => approvedContext), preserveProjectConfig: !!config.dataWorker }) });
+        currentSource: snapshotSourceAuthority({ store: options.store, currentProject: options.currentProject ?? (() => undefined), approvedFiles: config.snapshotCapture.approvedFiles, currentContext: scope => { const approval = dataApprovals.get(approvalKey(scope)); if (!approval) return undefined; try { approval(); return options.currentContext ? options.currentContext() : scope.context; } catch { return undefined; } }, preserveProjectConfig: !!config.dataWorker }) });
       lifecycle.attachOwnedResources(snapshots);
     }
     try { await lifecycle.initialize(); } catch { /* startup ownership uncertainty remains unavailable */ }
@@ -61,15 +62,19 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
     claudeVault: vault,
     /** Host-captured component preparation alone calls this; no browser tool exposes it. */
     bindDataContext(context: string, assertCurrent: () => void) {
-      assertCurrent(); approvedContext = context; const epoch = runtimeEpoch;
+      assertCurrent(); const epoch = runtimeEpoch;
       return async (scope: Omit<Extract<import("./runtime-host/openshell-types.js").OpenShellIdentity, { purpose: "lifecycle" }>, "purpose" | "operation" | "snapshot" | "image" | "policy" | "gateway" | "workspace" | "configuration">, signal: AbortSignal) => {
         const config = configuration.configuration;
         if (!snapshots || !lifecycle || !config?.dataWorker || !lifecycle.dataIdentity) throw new OpenShellError("openshell_unavailable");
-        const check = () => { signal.throwIfAborted(); assertCurrent(); if (epoch !== runtimeEpoch || context !== approvedContext || scope.context !== context) throw new OpenShellError("openshell_scope_invalid"); };
+        const check = () => { signal.throwIfAborted(); assertCurrent(); if (epoch !== runtimeEpoch || scope.context !== context) throw new OpenShellError("openshell_scope_invalid"); };
         check();
         const identity = { ...scope, binding: snapshotHash(scope.binding), ...lifecycle.identity, purpose: "lifecycle" as const, operation: "worker" as const, snapshot: "none" as const };
         const current = () => { try { check(); return identity; } catch { return undefined; } };
-        const publicationPermit = await snapshots.preparePublication(identity, current, signal);
+        const key = approvalKey(identity);
+        if (dataApprovals.has(key)) throw new OpenShellError("openshell_scope_invalid");
+        dataApprovals.set(key, check);
+        let publicationPermit: Awaited<ReturnType<OpenShellProjectSnapshots["preparePublication"]>>;
+        try { publicationPermit = await snapshots.preparePublication(identity, current, signal); } catch (error) { dataApprovals.delete(key); throw error; }
         let publication: Awaited<ReturnType<typeof snapshots.publish>> | undefined;
         let delivery: Awaited<ReturnType<OpenShellProjectSnapshots["prepareDelivery"]>> | undefined;
         let lease: Awaited<ReturnType<typeof snapshots.deliver>> | undefined;
@@ -81,9 +86,9 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
           const expected = { worker: "genbi-wren-worker/1" as const, snapshot: publication.digest, script: config.dataWorker.script, wheel: config.dataWorker.wheel, toolchain: config.dataWorker.toolchain, architecture: config.dataWorker.architecture, protocol: config.dataWorker.protocol };
           const access = await openOpenShellWrenAccess({ lease, expected, signal, assertCurrent: check });
           let closing: Promise<void> | undefined;
-          return { ...access, close: () => closing ??= (async () => { try { await access.close(); await snapshots!.remove(publication!.id); } finally { delivery!.release(); } })() };
+          return { ...access, close: () => closing ??= (async () => { try { await access.close(); await snapshots!.remove(publication!.id); } finally { delivery!.release(); dataApprovals.delete(key); } })() };
         } catch (error) {
-          delivery?.release(); await lease?.close(); if (publication) await snapshots.remove(publication.id); throw error;
+          delivery?.release(); dataApprovals.delete(key); await lease?.close(); if (publication) await snapshots.remove(publication.id); throw error;
         } finally { publicationPermit.release(); }
       };
     },

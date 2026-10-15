@@ -14,6 +14,7 @@ const baseIdentitySchema = z.object({
 export const openShellIdentitySchema = z.discriminatedUnion("purpose", [
   baseIdentitySchema.extend({ purpose: z.literal("lifecycle"), operation: z.literal("worker"), snapshot: z.literal("none") }),
   baseIdentitySchema.extend({ purpose: z.literal("model"), operation: z.literal("step"), snapshot: z.literal("none"), invocation: z.uuid(), step: z.uuid(), attempt: z.literal(1), model: token, tier: token }),
+  baseIdentitySchema.omit({ turn: true }).extend({ purpose: z.literal("model_session"), operation: z.literal("session"), snapshot: z.literal("none") }),
   baseIdentitySchema.extend({ purpose: z.literal("data"), operation: z.literal("read"), snapshot: digest, publication: z.uuid(), reference: z.uuid() }),
 ]);
 export type OpenShellIdentity = z.infer<typeof openShellIdentitySchema>;

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { createNativeSession, getNativeSession, getNativeSessionReadiness, isNativeSessionLaunchActionStale, listNativeSessions, postNativeSetupRecoveryAction, type NativeSession, type NativeSessionPurpose, type NativeSessionReadiness } from '@/bff/client';
-import { clearNativeSessionCapability, clearNativeSetupRecoveryCapability, nativeSessionReturnSource, saveNativeSessionCapability, saveNativeSessionReturnSource, saveNativeSetupRecoveryCapability, type NativeSessionReturnSource } from './capability';
+import { clearNativeSessionCapability, clearNativeSetupRecoveryCapability, nativeSessionCapability, nativeSessionReturnSource, saveNativeSessionCapability, saveNativeSessionReturnSource, saveNativeSetupRecoveryCapability, type NativeSessionReturnSource } from './capability';
 import { createNativeSessionLaunchId } from './launchId';
 
 interface NativeSessionsState {
@@ -236,7 +236,9 @@ export const useNativeSessions = create<NativeSessionsState>((set, get) => ({
   },
   async openSession(purpose, id, returnSource) {
     try {
-      const { session, capability, recoveryCapability } = await createNativeSession(purpose, { intent: 'open_existing', sessionId: id });
+      const held = nativeSessionCapability(id);
+      const scoped = get().sessions.find(session => session.id === id)?.transport === 'scoped-events';
+      const { session, capability, recoveryCapability } = await createNativeSession(purpose, { intent: 'open_existing', sessionId: id, ...(scoped && held ? { capability: held } : {}) });
       if (capability) saveNativeSessionCapability(session.id, capability);
       if (recoveryCapability) saveNativeSetupRecoveryCapability(session.id, recoveryCapability);
       if (returnSource) saveNativeSessionReturnSource(session.id, returnSource);

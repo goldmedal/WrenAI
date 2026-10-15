@@ -6,6 +6,7 @@ import { getNativeSetupRecovery, stopNativeSession, type NativeSession, type Nat
 import { isBffEnabled } from '@/bff/env';
 import { clearNativeSessionCapability, clearNativeSessionReturnSource, clearNativeSetupRecoveryCapability, nativeSessionCapability, nativeSessionReturnSource, nativeSetupRecoveryCapability } from './capability';
 import { NativeTerminal } from './NativeTerminal';
+import { NativeScopedSession } from './NativeScopedSession';
 import { NativeConversation } from './NativeConversation';
 import { deadNativeSessionActions } from './lifecycle';
 import { purposeLabels, statusLabels, targetLabels } from './sessionLabels';
@@ -85,7 +86,12 @@ export function SessionsPage() {
     setReconnecting(false); setTerminalDisconnected(true);
     if (id) void refresh(id);
   }, [id, refresh]);
-  const onConnected = useCallback(() => { setTerminalDisconnected(false); setReconnecting(false); }, []);
+  const onConnected = useCallback(() => {
+    setTerminalDisconnected(false); setReconnecting(false);
+    // Replay/attach has already restored the server-owned session to running.
+    // Refresh once so the pre-attach Detached listing does not outlive connection.
+    if (id && session?.transport === 'scoped-events') void refresh(id);
+  }, [id, refresh, session?.transport]);
   const onConnectionLost = useCallback(() => {
     setTerminalDisconnected(true);
     // Keep a user-initiated reconnect locked until its one authoritative
@@ -171,11 +177,11 @@ export function SessionsPage() {
   const recoveryCanRetryWithoutReport = session.purpose === 'setup' && session.status === 'failed' && !recovery;
   return <main className={`sessions-workbench${compact ? ' is-compact' : ''}`} data-testid="sessions-workbench">
     <header className="sessions-toolbar">
-      <div className="sessions-toolbar-title"><strong>{session.entryVerb === 'generate_dashboard' ? 'Build a dashboard' : purposeLabels[session.purpose]}</strong><span>{session.dispatchProfile ?? session.agent} · {session.dispatchTarget ? targetLabels[session.vendor] : session.vendor}</span></div>
+      <div className="sessions-toolbar-title"><strong>{session.entryVerb === 'generate_dashboard' ? 'Build a dashboard' : purposeLabels[session.purpose]}</strong><span>{session.dispatchProfile ?? session.agent} · {session.transport === "scoped-events" ? "OpenShell scoped analysis" : session.dispatchTarget ? targetLabels[session.vendor] : session.vendor}</span></div>
       <Tag variant="filled" color={session.status === 'running' ? 'processing' : session.status === 'failed' || session.status === 'stale' ? 'error' : 'default'}>{status}</Tag>
       <div className="sessions-toolbar-actions">
         {canReconnect ? <Button size="small" icon={<ReloadOutlined />} loading={reconnecting} disabled={reconnecting} onClick={() => { setReconnecting(true); setTerminalDisconnected(false); setReconnectNonce((value) => value + 1); }}>Reconnect</Button> : null}
-        {session.status === 'running' || session.status === 'detached' ? <Button size="small" danger icon={<StopOutlined />} loading={stopping} onClick={() => void stop()}>Stop</Button> : null}
+        {session.status === 'running' || session.status === 'detached' ? <Button size="small" danger icon={<StopOutlined />} loading={stopping} disabled={session.transport === 'scoped-events' && !capability} onClick={() => void stop()}>Stop</Button> : null}
         {resumeAction ? <Button size="small" loading={resuming} disabled={restarting} onClick={() => void resume()}>{resumeAction.label}</Button> : null}
         {restartAction ? <Button size="small" loading={restarting} disabled={resuming} onClick={() => void restart()}>{restartAction.label}</Button> : null}
         {returnSource ? <Button size="small" onClick={returnToSource}>Return to {returnSource === 'setup' ? 'Setup' : 'Context'}</Button> : null}
@@ -194,7 +200,7 @@ export function SessionsPage() {
         {recoveryError ? <span className="sessions-toolbar-error" role="alert">Recovery action failed. {recoveryError}</span> : null}
       </section> : null}
     </header>
-    {showTerminal && session.transport === "conversation" ? <NativeConversation sessionId={session.id} reconnectNonce={reconnectNonce} onExit={onConversationExit} onConnected={onConnected} onConnectionLost={onConnectionLost} /> : showTerminal ? <NativeTerminal sessionId={session.id} reconnectNonce={reconnectNonce} onExit={onExit} onConnected={onConnected} onConnectionLost={onConnectionLost} /> : <section className="sessions-terminal-state" aria-live="polite">
+    {session.transport === "scoped-events" ? <NativeScopedSession sessionId={session.id} reconnectNonce={reconnectNonce} readOnly={!showTerminal} onExit={onConversationExit} onConnected={onConnected} onConnectionLost={onConnectionLost} /> : showTerminal && session.transport === "conversation" ? <NativeConversation sessionId={session.id} reconnectNonce={reconnectNonce} onExit={onConversationExit} onConnected={onConnected} onConnectionLost={onConnectionLost} /> : showTerminal ? <NativeTerminal sessionId={session.id} reconnectNonce={reconnectNonce} onExit={onExit} onConnected={onConnected} onConnectionLost={onConnectionLost} /> : <section className="sessions-terminal-state" aria-live="polite">
       <Alert
         type={session.status === 'failed' || session.status === 'stale' || session.status === 'interrupted' ? 'error' : 'info'}
         title={terminalEligible(session) && !capability ? `${session.transport === 'conversation' ? 'Conversation' : 'Terminal'} capability unavailable in this browser session` : `Session ${status.toLowerCase()}`}
