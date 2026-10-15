@@ -666,6 +666,7 @@ async function main(): Promise<void> {
   const openshellProvisioner = createOpenShellStructuredProvisioner({
     composition: openshellComposition, store, producerBinary: producerExecutable?.executable ?? "", wrenBinary: nativeWrenExecutable?.executable ?? "",
     profileSource, hostHome: nativeHome, sourceWrenHome: nativeSourceWrenHome, getBinding: currentInteractiveBinding,
+    componentLimits: executionLimits.componentLimits,
     assertConfigurationCurrent() { if (!openshellComposition.claudeBoot) throw new Error("OpenShell model configuration unavailable"); openshellComposition.claudeBoot.assertCurrent(); },
     modelsFor(settings) {
       const boot = openshellComposition.claudeBoot;

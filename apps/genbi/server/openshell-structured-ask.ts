@@ -55,11 +55,12 @@ export function createOpenShellStructuredAdapter(provisioner: OpenShellStructure
         || options.bundle !== undefined || options.inProcess !== undefined || options.dispatched !== undefined || options.codexAsk !== undefined)
         throw new StructuredRuntimeError("unsupported");
       });
-      const timeoutMs = options.chatTimeoutMs ?? 120_000;
-      if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new StructuredRuntimeError("unsupported");
+      const componentTimeoutMs = options.componentLimits?.timeoutMs ?? 120_000;
+      const timeoutMs = options.chatTimeoutMs ?? componentTimeoutMs;
+      if (!Number.isSafeInteger(componentTimeoutMs) || componentTimeoutMs <= 0 || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new StructuredRuntimeError("unsupported");
       const timeout = new AbortController();
       const signal = AbortSignal.any([timeout.signal, ...(scope.signal ? [scope.signal] : [])]);
-      const deadline = Math.min(timeoutMs, 120_000);
+      const deadline = Math.min(timeoutMs, componentTimeoutMs, 2_147_483_647);
       recordStructuredTimingTimer(timing, "registering", deadline);
       const timer = setTimeout(() => { recordStructuredTimingTimer(timing, "callback"); recordStructuredTimingAbort(timing, "adapter_timeout"); timeout.abort(); }, deadline);
       recordStructuredTimingTimer(timing, "registered", deadline);

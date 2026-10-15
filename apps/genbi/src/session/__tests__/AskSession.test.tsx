@@ -19,7 +19,7 @@ beforeEach(() => {
     {
       sessionsById: JSON.parse(JSON.stringify(fixtureAskSessions)),
       streaming: {},
-      streamError: {}, streamErrorCode: {},
+      streamError: {}, streamErrorCode: {}, streamErrorKind: {},
     },
     false,
   );
@@ -183,7 +183,7 @@ describe('AskSession', () => {
     expect(screen.queryByText('The connection to the agent was lost')).not.toBeInTheDocument();
     unmount();
 
-    useSessionStore.setState({ streamError: { s2: 'Lost connection to the harness stream.' }, streamErrorCode: {} });
+    useSessionStore.setState({ streamError: { s2: 'Lost connection to the harness stream.' }, streamErrorCode: {}, streamErrorKind: { s2: 'connection' } });
     renderWithProviders(<AskSession sessionId="s2" />);
     expect(screen.getByText('The connection to the agent was lost')).toBeInTheDocument();
   });

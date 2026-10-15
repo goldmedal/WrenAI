@@ -1,3 +1,5 @@
+import { resolveExecutionLimits } from "../server/execution-limits.js";
+import type { ComponentLimits } from "../harness/components/runner.js";
 import {createStructuredTimingRecorder,createStructuredTimingObserver,readStructuredTimingReceipt} from "../server/structured-timing.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -91,7 +93,7 @@ function peer(model: string, receipt: { calls: number; replies: number; streams:
   };
 }
 
-async function fixture(change?: (store: Store) => void, failureMode?: "query" | "provider-failed" | "hold-query", controls: { delayedClose?: boolean; helperFailure?: boolean; cleanupProofFailure?: boolean } = {}) {
+async function fixture(change?: (store: Store) => void, failureMode?: "query" | "provider-failed" | "hold-query", controls: { componentLimits?: ComponentLimits; delayedClose?: boolean; helperFailure?: boolean; cleanupProofFailure?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "openshell-structured-roundtrip-")));
   cleanup.push(async () => { rmSync(root, { recursive: true, force: true }); });
   const project = path.join(root, "project"), home = path.join(root, "wren-home"), database = path.join(root, "data");
@@ -154,11 +156,11 @@ async function fixture(change?: (store: Store) => void, failureMode?: "query" | 
   const producer = await resolveWarbleBinary();
   const profileSource = path.join(application, "profiles/genbi-default");
   const timing=createStructuredTimingRecorder({role:"utility"});timing.beginSession(1);const diagnostics=createStructuredTimingObserver(timing);
-  const provisioner = createOpenShellStructuredProvisioner({ composition, store, diagnostics, producerBinary: producer, wrenBinary: wren, profileSource, hostHome: root, sourceWrenHome: () => home, getBinding: () => store.getEnrichmentBinding(), modelsFor: settings => resolveStructuredClaudeModels(settings, () => "synthetic-model"), assertConfigurationCurrent() {} });
+  const provisioner = createOpenShellStructuredProvisioner({ composition, store, diagnostics, ...(controls.componentLimits ? { componentLimits: controls.componentLimits } : {}), producerBinary: producer, wrenBinary: wren, profileSource, hostHome: root, sourceWrenHome: () => home, getBinding: () => store.getEnrichmentBinding(), modelsFor: settings => resolveStructuredClaudeModels(settings, () => "synthetic-model"), assertConfigurationCurrent() {} });
   if (controls.cleanupProofFailure) provisioner.assertSessionCleaned = () => { throw Error("synthetic owned cleanup remains uncertain"); };
-  const phases: string[] = [];
+  const phases: string[] = []; const capturedLimits: (ComponentLimits | undefined)[] = [];
   const realBindings = componentRuntime.createNativeComponentRuntimeBindings;
-  vi.spyOn(componentRuntime, "createNativeComponentRuntimeBindings").mockImplementation(options => { const bindings = realBindings(options); const step = bindings.step; return { ...bindings, async step(...args) { expectedTools = Object.keys(args[0].tools).length; phases.push("step-start"); try { const value = await step(...args); phases.push("step-pass"); return failureMode === "provider-failed" && expectedTools > 0 ? { ...value, failed: true } : value; } catch (error) { phases.push("step-error:" + String(error)); if (failureMode === "provider-failed") throw Error("synthetic later provider transport failure"); throw error; } } }; });
+  vi.spyOn(componentRuntime, "createNativeComponentRuntimeBindings").mockImplementation(options => { capturedLimits.push(options.componentLimits); const bindings = realBindings(options); const step = bindings.step; return { ...bindings, async step(...args) { expectedTools = Object.keys(args[0].tools).length; phases.push("step-start"); try { const value = await step(...args); phases.push("step-pass"); return failureMode === "provider-failed" && expectedTools > 0 ? { ...value, failed: true } : value; } catch (error) { phases.push("step-error:" + String(error)); if (failureMode === "provider-failed") throw Error("synthetic later provider transport failure"); throw error; } } }; });
   const realAccess = wrenAccess.openWrenComponentAccess, realContext = contextVerification.verifyComponentContext;
   vi.spyOn(wrenAccess, "openWrenComponentAccess").mockImplementation(async options => { phases.push("wren-start"); try { const value = await realAccess(options); phases.push("wren-ready"); return value; } catch (error) { phases.push("wren-error:" + String(error)); throw error; } });
   vi.spyOn(contextVerification, "verifyComponentContext").mockImplementation(async (...args) => { phases.push("context-start"); try { await realContext(...args); phases.push("context-pass"); } catch (error) { phases.push("context-error:" + String(error)); throw error; } });
@@ -169,16 +171,17 @@ async function fixture(change?: (store: Store) => void, failureMode?: "query" | 
   };
   const local = vi.fn(async () => { throw Error("local fallback forbidden"); });
   const runtime = new StructuredRuntime({ diagnostics, selected: { claude: "openshell", codex: "local" }, allowLocal: false, localRoute: local, localSetupFor: () => undefined, adapters: { claude: createOpenShellStructuredAdapter(provisioner,diagnostics) }, onRevoke: composition.revokeRuntime });
-  const deps = { store, structuredRuntime: runtime, route: local, baseRouteOptions: { authChoice: { mode: "subscription", provider: "claude" }, profileSource, userProject: project, question: "count orders" } } as TurnDeps;
+  const deps = { store, structuredRuntime: runtime, route: local, baseRouteOptions: { ...(controls.componentLimits ? { componentLimits: controls.componentLimits } : {}), authChoice: { mode: "subscription", provider: "claude" }, profileSource, userProject: project, question: "count orders" } } as TurnDeps;
   const native = new OpenShellNativeSessions({ store, provisioner, runtime: () => runtime, getBinding: () => store.getEnrichmentBinding(), routeOptions: () => effectiveRouteOptions(deps) });
   const nativeService = new NativeSessionService({ store, openShellNative: native, workspaceRoot: root, terminalManager: async () => { throw Error("no terminal"); }, getBinding: () => store.getEnrichmentBinding(), warbleBin: producer, irPaths: { analysis: path.join(profileSource, "ir.golden.json"), setup: undefined, context_enrichment: undefined }, nativeHome: root, sourceWrenHome: () => home, runtimeHost: new RuntimeHost({ selected: "openshell", deployment: "development", localAvailable: () => false, vendorProbes: { openshell: composition.probe } }) });
   Object.defineProperty(deps, "nativeSessions", { value: nativeService }); cleanup.push(async () => { releaseClose(); if (controls.cleanupProofFailure) await expect(native.shutdown()).rejects.toThrow(); else await native.shutdown(); });
   const session = store.createSession("analysis"), turn = store.createTurn({ id: "synthetic-turn", sessionId: session.id, question: "count orders", composedInput: null });
-  return { root, store, timing, composition, runtime, local, deps, session, turn, receipt, resources, before, retained, phases, native, nativeService, vault, queryStarted, queryClosed: () => queryClosed, querySettled: () => querySettled, closeRequested, releaseClose };
+  return { root, store, timing, capturedLimits, composition, runtime, local, deps, session, turn, receipt, resources, before, retained, phases, native, nativeService, vault, queryStarted, queryClosed: () => queryClosed, querySettled: () => querySettled, closeRequested, releaseClose };
 }
 
 it("HTTP-selected Ask runs pinned plan → branded SDK peer → synthetic Wren data peer → one verified durable answer", async () => {
-  const f = await fixture(); const app = createApp(f.deps);
+  const componentLimits = resolveExecutionLimits({ WREN_HARNESS_COMPONENT_TIMEOUT_MS: "300000" }).componentLimits;
+  const f = await fixture(undefined, undefined, { componentLimits }); const app = createApp(f.deps);
   expect(await (await app.request("/api/structured-runtime/readiness")).json()).toMatchObject({ active: { backend: "openshell", ask: true, queryExecution: "openshell" } });
   const frames: unknown[] = []; await streamTurn(f.deps, f.session.id, f.turn.id, async frame => { frames.push(frame); });
   const stored = f.store.getTurn(f.turn.id);
@@ -193,7 +196,8 @@ it("HTTP-selected Ask runs pinned plan → branded SDK peer → synthetic Wren d
   // prove both that it ran and that it did not restore per-progress hashing.
   expect(timing.metrics.exact_bytes.count).toBeGreaterThanOrEqual(4);
   expect(timing.metrics.exact_bytes.count).toBeLessThan(timing.metrics.currentness.count);
-  expect(timing.sessions[0]!.adapterTimer.deadlineMs).toBe(120000);expect(timing.sessions[0]!.adapterTimer.callbackMs).toBeNull();
+  expect(timing.sessions[0]!.adapterTimer.deadlineMs).toBe(300000);
+  expect(f.capturedLimits.length).toBeGreaterThan(0); expect(f.capturedLimits.every(limits => JSON.stringify(limits) === JSON.stringify(componentLimits))).toBe(true);expect(timing.sessions[0]!.adapterTimer.callbackMs).toBeNull();
   expect(timing.sessions[0]!.phases.compile_profile.wallMs).toBeGreaterThan(0);expect(timing.sessions[0]!.phases.context_capture.wallMs).toBeGreaterThan(0);expect(timing.sessions[0]!.phases.host_plan.wallMs).toBeGreaterThan(0);
   expect(timing.sessions[0]!.steps.filter(s=>s.opened).length).toBe(f.receipt.streams);expect(timing.sessions[0]!.steps.filter(s=>s.opened).every(s=>s.firstResult?.category==="success"&&s.firstResult.isError===false)).toBe(true);
   const calls = { ...f.receipt }; await streamTurn(f.deps, f.session.id, f.turn.id, async () => {}); expect(f.receipt).toEqual(calls);
@@ -359,3 +363,11 @@ it.each(["binding", "account-generation"] as const)("scoped Native %s invalidati
   expect(f.store.listOpenShellIntents().filter(row=>row.identity.session===a.row.id).every(row=>row.phase==="cleaned")).toBe(true);
   expect(f.local).not.toHaveBeenCalled();
 },120_000);
+
+it("gateway runtime selection cannot launch a scoped Claude Native sandbox or persist root effects", async () => {
+  const f = await fixture();
+  f.store.setRuntimeSettings({ ...f.store.getRuntimeSettings(), authMode: "gateway", gatewayProvider: "openrouter", gatewayModel: "synthetic", tierModels: [{ tier: "cheap" }, { tier: "strong" }] });
+  await expect(f.native.open({ purpose: "analysis" })).rejects.toThrow();
+  expect(f.store.listNativeSessions()).toHaveLength(0); expect(f.store.listOpenShellIntents()).toHaveLength(0);
+  expect(f.receipt.streams).toBe(0); expect(f.resources.size).toBe(0); expect(f.local).not.toHaveBeenCalled();
+}, 120_000);

@@ -128,6 +128,30 @@ describe('live sessionStream', () => {
     expect(source.closed).toBe(true);
   });
 
+  it.each([
+    '{}',
+    '{"kind":"query"}',
+    '{"message":null,"code":"invalid_result","kind":"query"}',
+    '{"message":42}',
+    '{"message":false}',
+    '{"message":""}',
+    '{"message":"   ","kind":"connection"}',
+    'null',
+    '[]',
+    '7',
+    '"message only"',
+    '{broken',
+  ])('surfaces malformed error payload %s as a generic runtime failure', async (data) => {
+    postTurn.mockResolvedValueOnce({ turnId: 't1' });
+    const h = handlers();
+    sessionStream('question', h, 's1');
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    const source = FakeEventSource.instances[0]!;
+    expect(() => source.emit('error', { data })).not.toThrow();
+    expect(h.onError).toHaveBeenCalledExactlyOnceWith('The harness stream reported an error.', 'runtime');
+    expect(source.closed).toBe(true);
+  });
+
   it('passes the component failure code of a named `error` frame to onError', async () => {
     postTurn.mockResolvedValueOnce({ turnId: 't1' });
     const h = handlers();
@@ -201,4 +225,12 @@ describe('live sessionStream', () => {
 
     expect(FakeEventSource.instances).toHaveLength(0);
   });
+  it('retains both a stable server code and a structured failure kind', async () => {
+    postTurn.mockResolvedValueOnce({ turnId: 't1' }); const h = handlers();
+    sessionStream('question', h, 's1');
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    FakeEventSource.instances[0]!.emit('error', { data: JSON.stringify({ message: 'Safe reason.', code: 'query.policy_rejected', kind: 'query' }) });
+    expect(h.onError).toHaveBeenCalledWith('Safe reason.', 'query.policy_rejected', 'query');
+  });
+
 });
