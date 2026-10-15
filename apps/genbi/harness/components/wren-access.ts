@@ -15,12 +15,13 @@ import { dialectGuidance, readProjectSqlDialect } from "./sql-dialect.js";
  * (exception text, SQL, paths, credentials) can reach a model even if that process is stale
  * or compromised. `transport` is host-only: the channel itself failed or closed.
  */
-export const GOVERNED_ERROR_CLASSES = ["invalid_request", "model_not_found", "policy_rejected", "invalid_sql", "execution_failed",
+export const GOVERNED_ERROR_CLASSES = ["invalid_request", "model_not_found", "cube_not_queryable", "policy_rejected", "invalid_sql", "execution_failed",
   "timeout", "datasource_unavailable", "result_too_large", "internal", "transport"] as const;
 export type GovernedErrorClass = (typeof GOVERNED_ERROR_CLASSES)[number];
 const GOVERNED_ERROR_TEXT: Readonly<Record<GovernedErrorClass, string>> = Object.freeze({
   invalid_request: "The request did not match the governed operation contract.",
   model_not_found: "The query references a table that is not a model in the bound semantic context; query only the models it defines.",
+  cube_not_queryable: "The query reads a cube as if it were a table. A cube is a semantic definition (a base model plus measure and dimension expressions), not a SQL table; query the cube's base model instead and compute the measure from the cube definition's expression over the base model's columns.",
   policy_rejected: "The read-only analytical policy rejected the query: use one SELECT over the bound models with standard analytical functions only.",
   invalid_sql: "The SQL could not be parsed or planned against the semantic context.",
   execution_failed: "The data source rejected the query at execution time, for example an unknown column or a type mismatch.",

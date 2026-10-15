@@ -368,3 +368,119 @@ def test_semantic_proof_is_derived_at_governed_transport_boundary(
         }
     else:
         assert "semantics" not in result
+
+
+JAFFLE_SHAPED = {
+    "models": [{"name": "orders"}, {"name": "customers"}],
+    "views": [{"name": "example_view"}],
+    "cubes": [
+        {
+            "name": "revenue",
+            "baseObject": "orders",
+            "measures": [{"name": "total_revenue", "expression": "SUM(amount)"}],
+            "dimensions": [{"name": "status"}],
+            "timeDimensions": [{"name": "order_date"}],
+        }
+    ],
+}
+
+
+def query_frame(f, sql):
+    return f.run(
+        (
+            json.dumps({"id": 1, "operation": "query", "sql": sql, "limit": 5}) + "\n"
+        ).encode()
+    )[-1]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT SUM(total_revenue) FROM revenue",
+        'SELECT total_revenue FROM "Revenue"',
+        "SELECT o.status FROM orders o JOIN revenue r ON TRUE",
+        "WITH x AS (SELECT total_revenue FROM revenue) SELECT * FROM x",
+    ],
+)
+def test_reading_a_cube_as_a_table_gets_the_cube_class(bound_transport, sql):
+    f = bound_transport
+    f.build.return_value = JAFFLE_SHAPED
+    f.engine.query.side_effect = WrenError(
+        ErrorCode.MODEL_NOT_FOUND,
+        "Table 'revenue' is not defined in /private/manifest.json",
+        phase=ErrorPhase.SQL_PLANNING,
+    )
+    frame = query_frame(f, sql)
+    assert frame == {
+        "id": 1,
+        "error": {
+            "class": "cube_not_queryable",
+            "message": transport.ERROR_MESSAGES["cube_not_queryable"],
+        },
+    }
+    message = frame["error"]["message"]
+    assert "cube" in message and "base model" in message
+    for leak in ("revenue", "/private", "manifest.json", "total_revenue"):
+        assert leak not in message
+
+
+@pytest.mark.parametrize(
+    ("sql", "manifest", "error_code"),
+    [
+        ("SELECT 1 FROM missing_table", JAFFLE_SHAPED, ErrorCode.MODEL_NOT_FOUND),
+        # A model that shares the cube's name is a table the engine can resolve.
+        (
+            "SELECT 1 FROM revenue",
+            {**JAFFLE_SHAPED, "models": [{"name": "revenue"}]},
+            ErrorCode.MODEL_NOT_FOUND,
+        ),
+    ],
+)
+def test_an_unknown_table_stays_model_not_found(
+    bound_transport, sql, manifest, error_code
+):
+    f = bound_transport
+    f.build.return_value = manifest
+    f.engine.query.side_effect = WrenError(
+        error_code, "x", phase=ErrorPhase.SQL_PLANNING
+    )
+    assert query_frame(f, sql)["error"]["class"] == "model_not_found"
+
+
+def test_only_a_model_not_found_failure_is_refined_to_the_cube_class(bound_transport):
+    f = bound_transport
+    f.build.return_value = JAFFLE_SHAPED
+    f.engine.query.side_effect = WrenError(
+        ErrorCode.GENERIC_USER_ERROR, "boom", phase=ErrorPhase.SQL_EXECUTION
+    )
+    assert (
+        query_frame(f, "SELECT 1 FROM revenue")["error"]["class"] == "execution_failed"
+    )
+
+
+def test_a_failure_before_any_table_is_read_is_not_attributed_to_the_previous_query(
+    bound_transport,
+):
+    f = bound_transport
+    f.build.return_value = JAFFLE_SHAPED
+    f.engine.query.side_effect = WrenError(
+        ErrorCode.MODEL_NOT_FOUND, "x", phase=ErrorPhase.SQL_PLANNING
+    )
+    frames = f.run(
+        b'{"id":1,"operation":"query","sql":"SELECT 1 FROM revenue","limit":1}\n'
+        b'{"id":2,"operation":"query","sql":"SELECT 1 FROM missing_table","limit":1}\n'
+    )
+    assert [frame["error"]["class"] for frame in frames[1:]] == [
+        "cube_not_queryable",
+        "model_not_found",
+    ]
+
+
+def test_a_model_next_to_a_cube_still_executes(bound_transport):
+    f = bound_transport
+    f.build.return_value = JAFFLE_SHAPED
+    frame = query_frame(f, "SELECT n FROM orders")
+    assert frame["result"]["definition"]["source_tables"] == ["orders"]
+    f.engine.query.assert_called_once_with(
+        "SELECT n FROM orders", limit=5, read_only=True
+    )

@@ -28,6 +28,32 @@ export interface ComponentAccess {
 }
 /** Which host context a step receives: the full prepared snapshot (private zone) or the capability card (public zone). */
 export interface ContextSurface { readonly kind: "snapshot" | "card"; readonly text: string }
+const snapshotLineage = z.object({ lineage: z.object({
+  nodes: z.array(z.object({ id: z.string(), kind: z.string() }).passthrough()),
+  edges: z.array(z.object({ from: z.string(), to: z.string() }).passthrough()),
+}).passthrough() }).passthrough();
+/** The declared cubes of a prepared snapshot, with the model or view each is defined over. */
+function snapshotCubes(snapshot: unknown): { name: string; base?: string }[] {
+  const parsed = snapshotLineage.safeParse(snapshot);
+  if (!parsed.success) return [];
+  const { nodes, edges } = parsed.data.lineage;
+  return nodes.filter((node) => node.kind === "cube" && node.id.startsWith("cube:")).map((node) => {
+    const source = edges.find((edge) => edge.to === node.id && /^(model|view):/.test(edge.from))?.from;
+    return { name: node.id.slice("cube:".length), ...(source ? { base: source.slice(source.indexOf(":") + 1) } : {}) };
+  });
+}
+/**
+ * The prepared snapshot as a model sees it. Cubes appear in it only as the owner of metrics and
+ * dimensions, next to the models, so each cube is named once more as a semantic definition over a
+ * base model: a model otherwise reads one as a queryable table.
+ */
+export function snapshotSurfaceText(snapshot: unknown): string {
+  const text = `Host semantic context:\n${JSON.stringify(snapshot)}`;
+  const cubes = snapshotCubes(snapshot);
+  if (cubes.length === 0) return text;
+  const list = cubes.map((cube) => cube.base ? `${cube.name} (base model: ${cube.base})` : cube.name).join("; ");
+  return `${text}\n\nCubes: ${list}. A cube is a semantic definition (a base model plus measure and dimension expressions), not a SQL table: never reference a cube by name in a query. Query its base model and compute a measure from that model's columns.`;
+}
 /** The step run as the host's `step` sees it: the assembled prompt plus its named parts for fingerprinting. */
 export type BrokeredStepRun = StepRun & {
   /** Named prompt parts exactly as assembled into `prompt`, for the per-surface fingerprint (per surface and in total). Absent when a host bypasses the broker. */
@@ -135,7 +161,7 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
       const context = contexts[component.id];
       const render = z.object({ render_blocks: z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict()).optional() }).passthrough().parse(component.declaration.effect ?? {}).render_blocks;
       const surface = options.contextSurface ? options.contextSurface(component, run)
-        : context ? { kind: "snapshot" as const, text: `Host semantic context:\n${JSON.stringify(context.snapshot)}` } : undefined;
+        : context ? { kind: "snapshot" as const, text: snapshotSurfaceText(context.snapshot) } : undefined;
       const renderText = run.terminal && render?.length ? `Render output: Return only one JSON object with a blocks array.\n${describeRenderContract(render)}\nCopy data and definitions only from successful host tool or child results. A KPI label must identify its returned column; do not invent units or deltas. If evidence is insufficient, return {"status":"refused","message":"Insufficient verified data"}.` : "";
       const surfaces: Record<string, string> = { prompt: run.prompt };
       if (surface) surfaces["context"] = surface.text;

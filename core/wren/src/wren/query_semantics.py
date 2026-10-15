@@ -3,6 +3,21 @@
 from sqlglot import exp, parse_one
 
 
+def cubes_read_as_tables(source_tables: list[str], manifest: dict) -> list[str]:
+    """Return the source tables that name a cube and no model or view.
+
+    Cubes are queried through ``wren cube query``, never as a SQL table, so a
+    name here is a cube the query tried to read. A model or view of the same
+    name wins: the engine resolves that table, so it is not a cube misuse.
+    """
+
+    def names(kind: str) -> set[str]:
+        return {item.get("name", "").casefold() for item in manifest.get(kind, [])}
+
+    cubes = names("cubes") - names("models") - names("views")
+    return [table for table in source_tables if table.casefold() in cubes]
+
+
 def query_semantics(ast: exp.Expression, sql: str, manifest: dict) -> dict | None:
     """Resolve a simple cube projection; unsupported SQL earns no semantic proof.
 
