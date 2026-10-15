@@ -1,12 +1,13 @@
 /** Executed in the fresh installed package's process with checkout access blocked. */
 export async function installedSnapshotHelperFixture(installedRoot, configuredPython) {
   const fs = await import("node:fs/promises"); const sync = await import("node:fs"); const path = await import("node:path"); const os = await import("node:os"); const url = await import("node:url");
+  installedRoot = await fs.realpath(installedRoot);
   if (!configuredPython || !path.isAbsolute(configuredPython)) throw new Error("Snapshot acceptance requires an explicitly configured Python interpreter");
   const { DockerSnapshotDriver, SNAPSHOT_HELPER_PATH, snapshotHash } = await import(url.pathToFileURL(path.join(installedRoot, "dist-server/server/runtime-host/openshell-snapshot-driver.js")).href);
   const { snapshotSourceAuthority } = await import(url.pathToFileURL(path.join(installedRoot, "dist-server/server/runtime-host/openshell-project-snapshots.js")).href);
   const { resolveEnrichmentBinding } = await import(url.pathToFileURL(path.join(installedRoot, "dist-server/server/enrichment.js")).href);
   const { Store } = await import(url.pathToFileURL(path.join(installedRoot, "dist-server/server/db.js")).href);
-  if (!SNAPSHOT_HELPER_PATH.startsWith(installedRoot + path.sep)) throw new Error("Snapshot helper escaped the installed package");
+  if (await fs.realpath(SNAPSHOT_HELPER_PATH) !== path.join(installedRoot, "dist-server/server/runtime-host/openshell-snapshot-helper.py")) throw new Error("Snapshot helper escaped the installed package");
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "genbi-installed-snapshot-")));
   const store = new Store(":memory:"); const helper = await fs.readFile(SNAPSHOT_HELPER_PATH);
   try {
