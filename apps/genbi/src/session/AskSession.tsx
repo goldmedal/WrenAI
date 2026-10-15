@@ -1,3 +1,4 @@
+import { COMPONENT_FAILURE_CODES, type ComponentFailureCode } from "../../harness/components/failure.js";
 import { useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Alert, Button } from 'antd';
@@ -131,7 +132,7 @@ export function AskSession({ sessionId }: Props) {
             <Alert
               type="error"
               showIcon
-              message={t(errorCode && errorKind !== 'query' && errorKind !== 'connection' ? 'ask.componentErrorTitle' : errorKind === 'connection' ? 'ask.streamErrorTitle' : errorKind === 'query' ? 'ask.queryErrorTitle' : 'ask.requestErrorTitle')}
+              message={t(COMPONENT_FAILURE_CODES.includes(errorCode as ComponentFailureCode) && errorKind !== 'query' && errorKind !== 'connection' ? 'ask.componentErrorTitle' : errorKind === 'connection' ? 'ask.streamErrorTitle' : errorKind === 'query' ? 'ask.queryErrorTitle' : 'ask.requestErrorTitle')}
               description={error}
               action={
                 lastUserText ? (

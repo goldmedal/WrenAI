@@ -93,16 +93,18 @@ function attachTurnStreamListeners<E>(source: EventSource, handlers: EventSource
       let code: string | undefined;
       let kind: 'query' | 'connection' | 'runtime' | undefined;
       try {
-        const failure = JSON.parse((evt as MessageEvent).data) as { message: string; code?: unknown; kind?: unknown };
-        message = failure.message;
-        if (typeof failure.code === 'string') code = failure.code;
-        if (failure.kind === 'query' || failure.kind === 'connection' || failure.kind === 'runtime') kind = failure.kind;
+        const failure = JSON.parse((evt as MessageEvent).data) as { message?: unknown; code?: unknown; kind?: unknown } | null;
+        if (typeof failure?.message === 'string' && failure.message.trim().length > 0) {
+          message = failure.message;
+          if (typeof failure.code === 'string') code = failure.code;
+          if (failure.kind === 'query' || failure.kind === 'connection' || failure.kind === 'runtime') kind = failure.kind;
+        }
       } catch {
         // Malformed frames surface a generic message without throwing in the listener.
       }
       if (code !== undefined && kind !== undefined) handlers.onError?.(message, code, kind);
       else if (code !== undefined || kind !== undefined) handlers.onError?.(message, code ?? kind);
-      else handlers.onError?.(message);
+      else handlers.onError?.(message, 'runtime');
     } else {
       handlers.onError?.(t('ask.streamConnectionLost'), 'connection');
     }

@@ -18,19 +18,22 @@ async function errorFrames(route: (options: RouteOptions) => Promise<RouteResult
   const session = (await (await app.request("/api/sessions", { method: "POST", body: "{}" })).json()) as { id: string };
   const { turnId } = (await (await app.request(`/api/sessions/${session.id}/turns`, { method: "POST", body: JSON.stringify({ question: "How many customers per plan?" }) })).json()) as { turnId: string };
   const stream = async () => parseSse(await (await app.request(`/api/sessions/${session.id}/stream?turn=${turnId}`)).text());
-  return { live: await stream(), replay: await stream() };
+  const live = await stream(), replay = await stream();
+  const hydrated = await (await app.request(`/api/sessions/${session.id}`)).json();
+  return { live, replay, hydrated };
 }
 
 describe("a failed component run reaches the client with its code", () => {
   it.each(COMPONENT_FAILURE_CODES)("code %s is carried on the live and the replayed error frame", async (code) => {
-    const { live, replay } = await errorFrames(async () => { throw new ComponentExecutionError(code); });
+    const { live, replay, hydrated } = await errorFrames(async () => { throw new ComponentExecutionError(code); });
     const expected = { event: "error", data: { message: new ComponentExecutionError(code).message, code } };
     expect(live.at(-1)).toEqual(expected);
     expect(replay.at(-1)).toEqual(expected);
+    expect(hydrated).toMatchObject({ error: { message: expected.data.message, code, kind: "runtime" } });
     expect(live.some((frame) => frame.event === "done")).toBe(false);
   });
 
-  it("an unrelated failure keeps the message-only frame and is logged server-side, redacted", async () => {
+  it("an unrelated live failure remains message-only, while replay uses safe feedback and logs are redacted", async () => {
     const logged: string[] = [];
     const original = console.error;
     console.error = (line: unknown) => { logged.push(String(line)); };
@@ -38,7 +41,9 @@ describe("a failed component run reaches the client with its code", () => {
       const { live, replay } = await errorFrames(async () => { throw new Error("upstream said api_key=sk-secret-123456 is bad"); });
       expect(live.at(-1)).toMatchObject({ event: "error" });
       expect((live.at(-1)!.data as { code?: string }).code).toBeUndefined();
-      expect((replay.at(-1)!.data as { code?: string }).code).toBeUndefined();
+      expect(replay.at(-1)).toMatchObject({ event: "error", data: { code: "runtime.failed", kind: "runtime" } });
+      expect(JSON.stringify(replay)).not.toContain("sk-secret-123456");
+      expect(JSON.stringify(replay)).not.toContain("upstream said");
     } finally { console.error = original; }
     const line = logged.find((entry) => entry.startsWith("[turn-failure]"));
     expect(line).toBeDefined();

@@ -1,3 +1,4 @@
+import { DEFAULT_COMPONENT_LIMITS } from "../harness/components/runner.js";
 import { describe, expect, it, vi } from "vitest";
 import type { ComponentInvocationResult } from "@warble/claude-agent-sdk";
 import type { RouteOptions } from "../harness/index.js";
@@ -30,6 +31,29 @@ function fixture() {
 }
 
 describe("OpenShell structured root authority", () => {
+  it("does not admit a gateway or pi-ai execution into the protected Claude OpenShell adapter", async () => {
+    const f = fixture();
+    await expect(f.adapter.ask!({ ...request, authChoice: { mode: "gateway", config: { provider: "openrouter", model: "synthetic", apiKey: "synthetic-request-key" } } }, f.scope)).rejects.toMatchObject({ code: "unsupported" });
+    expect(f.prepare).not.toHaveBeenCalled(); expect(f.local).not.toHaveBeenCalled();
+  });
+  it("honors the deployer root budget beyond the old default while retaining stricter chat cancellation", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture(); const original = f.run.getMockImplementation()!;
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      f.run.mockImplementation(async () => { await held; return original(); });
+      const pending = f.runtime.route({ ...request, componentLimits: { ...DEFAULT_COMPONENT_LIMITS, timeoutMs: 300_000 } }, f.scope);
+      await vi.advanceTimersByTimeAsync(120_001);
+      expect(f.preparedInput().scope.signal?.aborted).toBe(false);
+      release(); expect(await pending).toMatchObject({ backend: "openshell", envelope: { verified: true } });
+      const shorter = fixture(); shorter.run.mockImplementation(() => new Promise((_resolve, reject) => { const signal = shorter.preparedInput().scope.signal!; signal.addEventListener("abort", () => reject(signal.reason), { once: true }); }));
+      const cancelled = shorter.runtime.route({ ...request, componentLimits: { ...DEFAULT_COMPONENT_LIMITS, timeoutMs: 300_000 }, chatTimeoutMs: 10 }, shorter.scope);
+      const rejected = expect(cancelled).rejects.toMatchObject({ code: "timeout" });
+      await vi.advanceTimersByTimeAsync(10); await rejected;
+      expect(shorter.dispose).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
   it.each(["query", "cleanup", "stale", "cancel"])("preserves the actual %s cause over a captured query error", async kind => {
     const f = fixture();
     let captured: Error | undefined;

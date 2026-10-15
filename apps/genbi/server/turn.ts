@@ -1399,8 +1399,10 @@ export function getAskSessionData(store: Store, sessionId: string): AskSessionDa
   const events: SessionEvent[] = ordered.map(event => event.payload);
   const latestTurn = store.getLatestTurn(sessionId);
   const workLog: ToolStep[] = latestTurn?.traceJson ? (JSON.parse(latestTurn.traceJson) as ToolStep[]) : [];
+  const componentCode = componentFailureCodeOf(latestTurn?.errorMessage ?? "");
+  const error = componentCode !== undefined ? { message: latestTurn!.errorMessage!, code: componentCode, kind: "runtime" as const } : storedStructuredFailure(latestTurn?.errorCode);
   return { id: session.id, title: session.title, updatedAt: session.updatedAt, events, workLog,
-    ...(latestTurn?.resultKind === "error" && latestTurn.setupStepKey === null && !structuredDataRefusal(latestTurn.errorCode) ? { error: storedStructuredFailure(latestTurn.errorCode) } : {}) };
+    ...(latestTurn?.resultKind === "error" && latestTurn.setupStepKey === null && !structuredDataRefusal(latestTurn.errorCode) ? { error } : {}) };
 }
 
 const PUBLISH_LINK_BASE = "https://share.genbi.example";

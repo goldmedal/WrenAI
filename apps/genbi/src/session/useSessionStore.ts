@@ -199,6 +199,7 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
           if (current.events.length > 0 || s.streaming[id]) return s;
           return { sessionsById: { ...s.sessionsById, [id]: hydrated },
             streamError: { ...s.streamError, [id]: hydrated.error?.message },
+            streamErrorCode: { ...s.streamErrorCode, [id]: hydrated.error?.code },
             streamErrorKind: { ...s.streamErrorKind, [id]: hydrated.error?.kind } };
         });
       })
@@ -213,7 +214,7 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
     const trimmed = text.trim();
     if (!trimmed) return;
     if (isBffEnabled() && get().structuredReadiness?.ask === false) {
-      set((s) => ({ streamError: { ...s.streamError, [id]: 'Structured Ask is unavailable.' }, streamErrorKind: { ...s.streamErrorKind, [id]: 'runtime' } }));
+      set((s) => ({ streamError: { ...s.streamError, [id]: 'Structured Ask is unavailable.' }, streamErrorCode: { ...s.streamErrorCode, [id]: undefined }, streamErrorKind: { ...s.streamErrorKind, [id]: 'runtime' } }));
       return;
     }
     get().getOrCreate(id);

@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { compileProfile } from "../harness/compile/index.js";
 import { resolveContextLoaderBinary } from "../harness/compile/context-loader.js";
 import { planDigest } from "../harness/components/plan.js";
-import { ComponentRunner } from "../harness/components/runner.js";
+import { ComponentRunner, type ComponentLimits } from "../harness/components/runner.js";
 import type { Store } from "./db.js";
 import type { EnrichmentBinding } from "./enrichment.js";
 import type { NativeComponentVendor } from "./native-component-runtime.js";
@@ -26,6 +26,7 @@ import { launchOpenShellModelSession } from "./runtime-host/openshell-model-sess
 type Composition = Pick<Awaited<ReturnType<typeof createOpenShellRuntimeComposition>>, "lifecycle" | "claudeVault" | "claudeProvider" | "probe" | "bindDataContext" | "dataWorkerAvailable">;
 type ModelScope = Parameters<Composition["claudeProvider"]>[0]["scope"];
 interface Options {
+  readonly componentLimits?: ComponentLimits;
   readonly diagnostics?: StructuredDiagnosticObserver;
   readonly composition: Composition;
   readonly store: Store;
@@ -44,6 +45,7 @@ const unavailable = () => new StructuredRuntimeError("unavailable");
 /** The same governed native component host, without an outer vendor orchestration session. */
 export function createOpenShellStructuredProvisioner(options: Options): OpenShellStructuredProvisioner {
   const composition = options.composition;
+  const componentLimits = options.componentLimits ? Object.freeze({ ...options.componentLimits }) : undefined;
   const checkConfiguration = () => {
     options.assertConfigurationCurrent();
     const status = composition.claudeVault?.status();
@@ -132,6 +134,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         wrenEnvironment: { PATH: [path.dirname(wren.executable), path.dirname(node.executable), "/usr/bin", "/bin"].join(path.delimiter), HOME: options.hostHome,
           WREN_HOME: sourceHome, WREN_PROJECT_HOME: binding.path, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" },
         openDataAccess: async parent => { if (!dataAccess || !modelScope) throw unavailable(); return observeStructuredQueryAccess(await dataAccess(modelScope, parent), queryFailure.record); },
+        ...(componentLimits ? { componentLimits } : {}),
         vendor, persistRoot: input.persistRoot, onEvent: event => {
           if (event.kind === "step.start") queryFailure.start();
           if (event.kind === "step.finish") queryFailure.finish(event.status);
@@ -159,7 +162,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
           check(); runner = new ComponentRunner(plan, { ...host, async runStep(...args) {
             try { const response = await host.runStep(...args); queryFailure.providerReturned(response.failed === true); return response; }
             catch (error) { if (isClaudeQueryAbort(error)) queryFailure.providerQueryAborted(); else queryFailure.providerRejected(); throw error; }
-          } });
+          } }, componentLimits);
           const pending = runner.run(root, { request }, signal); active = pending;
           try { const result = await pending; check(); const failure = queryFailure.terminalFailure(); if (result.status === "error" && result.code === "callee_failed" && failure && !runner.cleanupFailed) throw failure; return result; } finally { active = undefined; }
         },
