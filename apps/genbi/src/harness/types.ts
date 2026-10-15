@@ -135,11 +135,17 @@ export type RuntimeBackendKind = 'subscription' | 'api-key' | 'local' | 'gateway
  */
 export type RuntimeDispatcherKind = 'claude-agent-sdk' | 'codex-local' | 'in-process';
 
+export interface RuntimeLimits {
+  componentTimeoutMs: number;
+  componentTimeoutSource: 'default' | 'env';
+}
+
 export interface RuntimeInfo {
   backend: RuntimeBackendKind;
   label: string;
   tierModels: TierModelBinding[];
   dispatcher?: RuntimeDispatcherKind;
+  limits?: RuntimeLimits;
 }
 
 export type ConnectionHealth = 'healthy' | 'degraded' | 'down';

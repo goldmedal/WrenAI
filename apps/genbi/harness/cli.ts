@@ -6,6 +6,7 @@ import {
   CliUsageError,
   determineExitCode,
   parseChatTimeoutMs,
+  parseComponentTimeoutMs,
   resolveAuthChoice,
   resolveDeployment,
   validateRequiredInputs,
@@ -18,6 +19,7 @@ import path from "node:path";
 import { generatePreparedContextAndCatalog, resolveContextLoader } from "./compile/context-loader.js";
 import { buildCapabilityCard } from "./components/capability-card.js";
 import { executionPlanFor } from "./components/display.js";
+import { DEFAULT_COMPONENT_LIMITS } from "./components/runner.js";
 import { defaultEntry } from "./components/in-process.js";
 import { describeZoneDryRun, formatZoneDryRun } from "./components/zone-dry-run.js";
 import { readTierBindingFile, type TierBinding } from "./providers/index.js";
@@ -69,6 +71,10 @@ Options:
                           on a "warble-agent-sdk chat" invocation. Raise this for a legitimately
                           slower cold-start turn (e.g. right after onboarding a project) rather
                           than the turn being killed and reported as a timeout.
+  --component-timeout-ms <n>
+                          In-process: the wall-clock budget for one component run (the root and
+                          every child it reaches), 30000..1800000. Default 120000. The same knob
+                          the BFF reads from WREN_HARNESS_COMPONENT_TIMEOUT_MS.
   --help                  Show this help
 
 Default auth-selection policy (when --mode is omitted), in order:
@@ -111,6 +117,7 @@ async function main(): Promise<void> {
       "tier-binding": { type: "string" },
       "zone-dry-run": { type: "boolean" },
       "chat-timeout-ms": { type: "string" },
+      "component-timeout-ms": { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -126,6 +133,7 @@ async function main(): Promise<void> {
   }
 
   const chatTimeoutMs = parseChatTimeoutMs(values["chat-timeout-ms"]);
+  const componentTimeoutMs = parseComponentTimeoutMs(values["component-timeout-ms"], "--component-timeout-ms");
   const flags: CliFlags = {
     ...(values.project !== undefined ? { project: values.project } : {}),
     ...(values.profile !== undefined ? { profile: values.profile } : {}),
@@ -144,6 +152,7 @@ async function main(): Promise<void> {
     ...(values["tier-binding"] !== undefined ? { tierBindingFile: values["tier-binding"] } : {}),
     ...(values["zone-dry-run"] === true ? { zoneDryRun: true } : {}),
     ...(chatTimeoutMs !== undefined ? { chatTimeoutMs } : {}),
+    ...(componentTimeoutMs !== undefined ? { componentTimeoutMs } : {}),
   };
 
   const question = positionals.join(" ");
@@ -219,6 +228,7 @@ async function main(): Promise<void> {
     ...zoneOptions,
     ...(flags.modelsConfig !== undefined ? { modelsConfig: flags.modelsConfig } : {}),
     ...(flags.chatTimeoutMs !== undefined ? { chatTimeoutMs: flags.chatTimeoutMs } : {}),
+    ...(flags.componentTimeoutMs !== undefined ? { componentLimits: { ...DEFAULT_COMPONENT_LIMITS, timeoutMs: flags.componentTimeoutMs } } : {}),
   });
 
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

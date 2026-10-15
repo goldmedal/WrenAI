@@ -125,6 +125,7 @@ export async function route(options: RouteOptions): Promise<RouteResult> {
     ...(options.zoneRoles !== undefined ? { zoneRoles: options.zoneRoles } : {}),
     ...(options.onEvent !== undefined ? { onEvent: options.onEvent } : {}),
     ...(options.agentId !== undefined ? { agentId: options.agentId } : {}),
+    ...(options.componentLimits !== undefined ? { componentLimits: options.componentLimits } : {}),
   });
   return { backend: "agent", warnings, ...result };
 }

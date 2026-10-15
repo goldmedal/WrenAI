@@ -14,7 +14,7 @@ _Anyone with the link_): <https://brev.nvidia.com/launchable/deploy/now?launchab
 | Setup script | **Paste Script** with the full contents of `setup.sh` (Brev requires the first line to be `#!/bin/bash`; limit 16 KiB, the script is ~14.4 KiB). Alternative once the ref is public: `curl -fsSL https://raw.githubusercontent.com/Canner/WrenAI/<REF>/apps/genbi/deploy/brev/setup.sh \| bash` |
 | Secure Link | name `genbi`, port `4787`, shown as the call-to-action on the deployment page |
 | TCP/UDP ports | none |
-| Launch parameters | `NVIDIA_API_KEY` (secret, optional), `GENBI_MODEL` (default `nvidia/nemotron-3-super-120b-a12b`), `GENBI_VERSION` (default from `setup.sh`), `WRENAI_WHEEL_URL` and `WRENAI_WHEEL_SHA256` (defaults from `setup.sh`) |
+| Launch parameters | `NVIDIA_API_KEY` (secret, optional), `GENBI_MODEL` (default `nvidia/nemotron-3-super-120b-a12b`), `GENBI_VERSION` (default from `setup.sh`), `GENBI_COMPONENT_TIMEOUT_MS` (default `300000`), `WRENAI_WHEEL_URL` and `WRENAI_WHEEL_SHA256` (defaults from `setup.sh`) |
 | Visibility | **Everyone (published)** so it appears in Brev's Community Explore |
 | Description | "Open-source GenBI over your data with Nemotron. Ask questions, get verified tables, charts and KPIs. Runs the web app on this VM; the model runs on NVIDIA endpoints. CPU-only." |
 

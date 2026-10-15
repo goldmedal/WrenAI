@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { ComponentRunner, type ComponentBinding, type ComponentEvent, type ExecutionPlan, type RunnerHost, type StepRun } from "../harness/components/runner.js";
+import { describe, expect, it, vi } from "vitest";
+import { ComponentRunner, DEFAULT_COMPONENT_LIMITS, type ComponentBinding, type ComponentEvent, type ExecutionPlan, type RunnerHost, type StepRun } from "../harness/components/runner.js";
 
 function plan(): ExecutionPlan {
   return {
@@ -254,5 +254,33 @@ describe("host-owned component runner", () => {
     const runner = new ComponentRunner(source, f.host);
     (source.components.dashboard!.steps[0]! as { prompt: string }).prompt = "changed";
     expect((await runner.run("dashboard", { request: "go" })).status).toBe("ok");
+  });
+});
+
+describe("host-configured run budget", () => {
+  it("enforces an injected run timeout, times each step, and attributes the cancellation to the budget", async () => {
+    const events: ComponentEvent[] = [];
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      const f = fixture(() => new Promise((resolve) => setTimeout(() => resolve("late"), 200)));
+      const runner = new ComponentRunner(plan(), { ...f.host, onEvent: (event) => events.push(event) }, { ...DEFAULT_COMPONENT_LIMITS, timeoutMs: 50 });
+      const result = await runner.run("dashboard", { request: "go" });
+      expect(result).toMatchObject({ status: "error", code: "cancelled" });
+      const finish = events.find((event) => event.kind === "step.finish");
+      expect(finish).toMatchObject({ status: "cancelled" });
+      expect(typeof finish?.elapsedMs).toBe("number");
+      expect(lines.some((line) => line.startsWith("[component-failure]") && line.includes('"code":"cancelled"') && line.includes('"timeout_ms":50'))).toBe(true);
+      expect(lines.some((line) => line.startsWith("[component-step]") && line.includes('"step":"layout"') && line.includes('"elapsed_ms"'))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("uses the built-in budget when none is injected and rejects a non-positive one", () => {
+    const f = fixture(async () => "x");
+    expect(() => new ComponentRunner(plan(), f.host)).not.toThrow();
+    expect(() => new ComponentRunner(plan(), f.host, { ...DEFAULT_COMPONENT_LIMITS, timeoutMs: 0 })).toThrow(/timeoutMs/);
+    expect(DEFAULT_COMPONENT_LIMITS.timeoutMs).toBe(120_000);
   });
 });

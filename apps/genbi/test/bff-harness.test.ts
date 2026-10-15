@@ -57,6 +57,7 @@ describe("GET /api/harness", () => {
       // reports the effective boot route until the seeded Setup defaults are explicitly saved.
       // That keeps the runtime panel aligned with what dispatch will actually use.
       tierModels: [{ tier: "cheap", model: "mock (no fixed model)" }],
+      limits: { componentTimeoutMs: 120000, componentTimeoutSource: "default" },
     });
     expect(dto.connection.tablesSynced).toBe(3); // Store seeds 3 context models
     expect(dto.components).toHaveLength(1);

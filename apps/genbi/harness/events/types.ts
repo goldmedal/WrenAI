@@ -59,6 +59,8 @@ export interface StepFinishEvent extends AgentEventBase {
    * did before this field existed.
    */
   readonly detail?: string;
+  /** Wall-clock milliseconds from `step.start` to this event. Additive: absent from emitters that do not time steps. */
+  readonly elapsedMs?: number;
 }
 
 export interface ToolCallEvent extends AgentEventBase {

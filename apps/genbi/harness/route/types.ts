@@ -1,5 +1,6 @@
 import type { AuthChoice } from "../auth/index.js";
 import type { Bundle } from "../bundle/schema.js";
+import type { ComponentLimits } from "../components/runner.js";
 import type { Deployment } from "../compliance/index.js";
 import type { AgentEvent } from "../events/index.js";
 import type { AdapterSpec, DisclosurePolicy, ZoneRoles } from "../providers/index.js";
@@ -66,6 +67,8 @@ export interface InProcessOptions {
   readonly zoneRoles?: ZoneRoles;
   /** Hybrid privacy split: size bound for the capability card handed to public-zone steps (default 32 KiB). */
   readonly capabilityCard?: { readonly maxBytes?: number };
+  /** The budget `ComponentRunner` enforces for this run; see `RouteOptions.componentLimits`. */
+  readonly componentLimits?: ComponentLimits;
   /** Live-event layer: forwarded to `RunAgentContext.onEvent`. See that field's doc comment. */
   readonly onEvent?: (event: AgentEvent) => void;
   /**
@@ -294,6 +297,12 @@ export interface RouteOptions {
   readonly agentId?: string;
   /** Subscription subprocess timeout: Claude chat or Codex Ask. Ignored by in-process. */
   readonly chatTimeoutMs?: number;
+  /**
+   * The host's budget for one composed component run; see `ComponentLimits`. Unset means
+   * `DEFAULT_COMPONENT_LIMITS`. Forwarded to in-process as `InProcessOptions.componentLimits`;
+   * native sessions get the same value through the BFF's native wiring, not through here.
+   */
+  readonly componentLimits?: ComponentLimits;
   /** Codex subscription Ask-only configuration. */
   readonly codexModels?: CodexManifestModels | (() => CodexManifestModels);
   readonly codexHome?: string;

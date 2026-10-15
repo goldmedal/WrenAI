@@ -69,6 +69,7 @@ describe("buildHarnessDto — real genbi-default bundle", () => {
         { tier: "cheap", model: "mock (no fixed model)" },
         { tier: "strong", model: "mock (no fixed model)" },
       ],
+      limits: { componentTimeoutMs: 120000, componentTimeoutSource: "default" },
     });
   });
 
@@ -681,5 +682,17 @@ describe("buildHarnessDto — synthetic bundles (mapping edge cases)", () => {
     const dto = buildHarnessDto(setupBundle, new Store(":memory:"), { ...BASE_ROUTE_OPTIONS, authChoice }, "setup", undefined, { available: true });
     expect(dto.purpose).toMatchObject({ executionKind: "setup_runner", target, targetLabel, available: true });
     expect(dto.purpose).not.toHaveProperty("reason");
+  });
+});
+
+describe("buildHarnessDto — runtime.limits", () => {
+  const bundle = loadLegacyFixture("genbi-default.bundle.json");
+
+  it("reports a deployer-set component timeout with its source", () => {
+    const dto = buildHarnessDto(bundle, new Store(":memory:"), {
+      ...BASE_ROUTE_OPTIONS,
+      componentLimits: { depth: 8, calls: 32, steps: 40, childSteps: 12, requestBytes: 65_536, resultBytes: 1_048_576, timeoutMs: 300_000 },
+    });
+    expect(dto.runtime.limits).toEqual({ componentTimeoutMs: 300_000, componentTimeoutSource: "env" });
   });
 });

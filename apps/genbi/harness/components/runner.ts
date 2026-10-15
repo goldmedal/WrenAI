@@ -38,7 +38,23 @@ export interface ExecutionPlan {
   readonly entries: readonly string[];
   readonly components: Readonly<Record<string, ComponentPlan>>;
 }
-export const COMPONENT_LIMITS = Object.freeze({
+/**
+ * The host's execution budget for one component run: the root and every child it reaches.
+ * `timeoutMs` is a single wall-clock deadline for that whole run. The runner never reads the
+ * plan's own `limits.timeout_ms` (see `plan.ts`), so the value injected into `ComponentRunner`
+ * is the only one enforced.
+ */
+export interface ComponentLimits {
+  readonly depth: number;
+  readonly calls: number;
+  readonly steps: number;
+  readonly childSteps: number;
+  readonly requestBytes: number;
+  readonly resultBytes: number;
+  readonly timeoutMs: number;
+}
+/** The built-in budget. `timeoutMs` is what `WREN_HARNESS_COMPONENT_TIMEOUT_MS` overrides. */
+export const DEFAULT_COMPONENT_LIMITS: ComponentLimits = Object.freeze({
   depth: 8, calls: 32, steps: 40, childSteps: 12,
   requestBytes: 65_536, resultBytes: 1_048_576, timeoutMs: 120_000,
 });
@@ -144,6 +160,8 @@ export interface ComponentEvent {
   readonly callId?: string;
   readonly depth: number;
   readonly status?: "ok" | "error" | "cancelled";
+  /** `step.finish` events: wall-clock milliseconds since the matching `step.start`. */
+  readonly elapsedMs?: number;
   /** `egress` events: slot id and outcome only, never the payload. */
   readonly slot?: string;
   readonly egress?: EgressDecision["status"];
@@ -217,16 +235,24 @@ function noteOrigin(error: unknown, origin: FailureOrigin): void {
   if (error !== null && typeof error === "object" && !failureOrigins.has(error)) failureOrigins.set(error, origin);
 }
 /** Emits the single structured line that says why a component run failed; the client only ever sees the code. */
-function logComponentFailure(site: string, code: string, error: unknown, origin?: FailureOrigin): void {
+function logComponentFailure(site: string, code: string, error: unknown, origin?: FailureOrigin, budget?: RunBudget): void {
   const known = origin ?? (error !== null && typeof error === "object" ? failureOrigins.get(error) : undefined);
   const detail = error instanceof ExecutionFailure ? error.reason : error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
   const fields = { site, code, ...(known ? { component: known.component, ...(known.step ? { step: known.step } : {}), depth: known.depth } : {}),
-    ...(error instanceof Error ? { error: error.name } : {}), ...(detail ? { detail: redactForLog(detail) } : {}) };
+    ...(error instanceof Error ? { error: error.name } : {}), ...(detail ? { detail: redactForLog(detail) } : {}), ...(budget ?? {}) };
   console.error(`[component-failure] ${JSON.stringify(fields)}`);
 }
-function safeError(error: unknown, site = "run"): ComponentInvocationResult {
+/** The run's wall-clock budget and how much of it a failing run had used; logged so a `cancelled` is attributable to the limit. */
+interface RunBudget { readonly timeout_ms: number; readonly elapsed_ms: number }
+function checkLimits(limits: ComponentLimits): ComponentLimits {
+  for (const [key, value] of Object.entries(limits)) {
+    if (!Number.isInteger(value) || value <= 0) throw new Error(`Component limit ${key} must be a positive integer, got ${String(value)}`);
+  }
+  return { ...limits };
+}
+function safeError(error: unknown, site = "run", budget?: RunBudget): ComponentInvocationResult {
   const code = error instanceof ExecutionFailure ? error.code : "callee_failed";
-  logComponentFailure(site, code, error);
+  logComponentFailure(site, code, error, undefined, budget);
   return { status: "error", code, message: "Component execution did not complete.", retryable: false };
 }
 function copy<T>(value: T, maxBytes: number): T {
@@ -276,11 +302,22 @@ export class ComponentRunner {
   private steps = 0;
   private usage = { inputTokens: 0, outputTokens: 0 };
   private deadline = 0;
-  constructor(plan: ExecutionPlan, private readonly host: RunnerHost) {
+  private startedAt = 0;
+  private readonly limits: ComponentLimits;
+  constructor(plan: ExecutionPlan, private readonly host: RunnerHost, limits: ComponentLimits = DEFAULT_COMPONENT_LIMITS) {
+    this.limits = freeze(checkLimits(limits));
     this.plan = freeze(copy(plan, 4 * 1024 * 1024));
     this.validate();
   }
   cancel(): void { this.controller.abort(); }
+  /** Emits `step.finish` with the step's wall-clock cost and logs it, so per-call model latency is readable from the host log. */
+  private finishStep(event: { readonly invocation: string; readonly parent: string | null; readonly component: string; readonly depth: number },
+    step: ComponentStep, startedAt: number, status: "ok" | "error" | "cancelled"): void {
+    const elapsedMs = Date.now() - startedAt;
+    console.error(`[component-step] ${JSON.stringify({ component: event.component, step: step.name, tier: step.tier, depth: event.depth, status,
+      elapsed_ms: elapsedMs, budget_ms: this.limits.timeoutMs, remaining_ms: Math.max(0, this.deadline - Date.now()) })}`);
+    this.host.onEvent?.({ ...event, kind: "step.finish", step: step.name, status, elapsedMs });
+  }
   get observedUsage(): Readonly<StepUsage> { return { ...this.usage }; }
 
   async run(entry: string, request: unknown, signal?: AbortSignal): Promise<ComponentInvocationResult> {
@@ -289,8 +326,9 @@ export class ComponentRunner {
     const abort = () => this.cancel();
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) this.cancel();
-    this.deadline = Date.now() + COMPONENT_LIMITS.timeoutMs;
-    const timer = setTimeout(abort, COMPONENT_LIMITS.timeoutMs);
+    this.startedAt = Date.now();
+    this.deadline = this.startedAt + this.limits.timeoutMs;
+    const timer = setTimeout(abort, this.limits.timeoutMs);
     let result: ComponentInvocationResult;
     try {
       if (!this.plan.entries.includes(entry)) throw new ExecutionFailure("callee_failed");
@@ -323,7 +361,7 @@ export class ComponentRunner {
       result = await this.invoke(entry, request, null, 0);
       this.check();
     } catch (error) {
-      result = safeError(error, "run");
+      result = safeError(error, "run", { timeout_ms: this.limits.timeoutMs, elapsed_ms: Date.now() - this.startedAt });
     }
     if (result.status !== "ok") this.cancel();
     try {
@@ -408,10 +446,10 @@ export class ComponentRunner {
 
   private async invoke(id: string, raw: unknown, parent: string | null, depth: number): Promise<ComponentInvocationResult> {
     this.check();
-    const request = normalizeComponentRequest(raw, COMPONENT_LIMITS.requestBytes);
+    const request = normalizeComponentRequest(raw, this.limits.requestBytes);
     if ("error" in request) return request.error;
-    if (depth > COMPONENT_LIMITS.depth || (depth > 0 && ++this.calls > COMPONENT_LIMITS.calls)) {
-      throw new ExecutionFailure("budget_exhausted", depth > COMPONENT_LIMITS.depth ? "call depth" : "call budget");
+    if (depth > this.limits.depth || (depth > 0 && ++this.calls > this.limits.calls)) {
+      throw new ExecutionFailure("budget_exhausted", depth > this.limits.depth ? "call depth" : "call budget");
     }
     const component = this.plan.components[id]!;
     const binding = this.bindings.get(id)!;
@@ -438,8 +476,8 @@ export class ComponentRunner {
         if (!step.repairOf && failed) throw new ExecutionFailure("callee_failed", `step ${failed} failed and no repair step follows`);
         this.check();
         lastStep = step.name;
-        if (++this.steps > COMPONENT_LIMITS.steps || (depth > 0 && ++childSteps > COMPONENT_LIMITS.childSteps)) {
-          throw new ExecutionFailure("budget_exhausted", this.steps > COMPONENT_LIMITS.steps ? "step budget" : "child step budget");
+        if (++this.steps > this.limits.steps || (depth > 0 && ++childSteps > this.limits.childSteps)) {
+          throw new ExecutionFailure("budget_exhausted", this.steps > this.limits.steps ? "step budget" : "child step budget");
         }
         const consumes = object<unknown>();
         for (const name of step.consumes) {
@@ -473,13 +511,13 @@ export class ComponentRunner {
         };
         for (const grant of step.tools) {
           const tool = binding.tools.find((candidate) => candidate.name === grant.name && candidate.source === grant.source)!;
-          if (tool.inputSchema) schemas[grant.name] = freeze(copy(tool.inputSchema, COMPONENT_LIMITS.requestBytes));
+          if (tool.inputSchema) schemas[grant.name] = freeze(copy(tool.inputSchema, this.limits.requestBytes));
           if (tool.description) descriptions[grant.name] = tool.description;
           scoped[grant.name] = (input) => {
             const pending = (async () => {
               assertActive();
               if (!accepting) throw new ExecutionFailure("cancelled");
-              const saved = freeze(copy(input, COMPONENT_LIMITS.requestBytes));
+              const saved = freeze(copy(input, this.limits.requestBytes));
               const result: unknown = await trackTool(grant.name, () => this.wait(tool.execute(saved, this.controller.signal)));
               assertActive();
               // The id is assigned here, once, so the evidence and the model's copy carry the same
@@ -487,7 +525,7 @@ export class ComponentRunner {
               // re-typing SQL, and normalization resolves it against this evidence. The size guard
               // runs once, on the result as recorded, before anything is recorded.
               const output = copy(isQueryGrant(grant) && result !== null && typeof result === "object" && !Array.isArray(result)
-                ? { ...(result as Record<string, unknown>), query_id: `q${++executedQueries}` } : result, COMPONENT_LIMITS.resultBytes);
+                ? { ...(result as Record<string, unknown>), query_id: `q${++executedQueries}` } : result, this.limits.resultBytes);
               tools.push(freeze({ step: step.name, tool: grant.name, input: saved, output: structuredClone(output) }));
               return output;
             })();
@@ -517,11 +555,11 @@ export class ComponentRunner {
               assertActive();
               if (!accepting) throw new ExecutionFailure("cancelled");
             } catch (error) { return Promise.reject(error); }
-            const savedInput = copy(input, COMPONENT_LIMITS.requestBytes);
+            const savedInput = copy(input, this.limits.requestBytes);
             const callId = randomUUID();
             const pending = queue.then(() => trackTool(edge.alias, async () => {
               assertActive();
-              const childRequest = normalizeComponentRequest(savedInput, COMPONENT_LIMITS.requestBytes);
+              const childRequest = normalizeComponentRequest(savedInput, this.limits.requestBytes);
               const raw = await this.invokeChild(edge.component, savedInput, invocation, depth + 1,
                 Boolean(this.host.verifyChild) && !("error" in childRequest) && isPerSlotRequest(childRequest.value));
               assertActive();
@@ -534,9 +572,9 @@ export class ComponentRunner {
                 this.host.onEvent?.({ ...event, kind: "egress", step: step.name, tool: edge.alias, callId, slot: decision.slot_id,
                   egress: decision.status, ...(decision.reason_category ? { reason: decision.reason_category } : {}) });
               }
-              egress.push(...verified.provenance.map((item) => freeze(copy(item, COMPONENT_LIMITS.resultBytes))));
+              egress.push(...verified.provenance.map((item) => freeze(copy(item, this.limits.resultBytes))));
               const result = verified.disclosed;
-              children.push(freeze(copy(result, COMPONENT_LIMITS.resultBytes)));
+              children.push(freeze(copy(result, this.limits.resultBytes)));
               // Tool transports may catch a rejection or ignore the returned value.
               // Retain failure in the host queue so root success cannot hide it.
               if (result.status !== "ok") throw new ExecutionFailure("callee_failed", `child ${edge.component} returned ${result.status}`);
@@ -548,15 +586,16 @@ export class ComponentRunner {
           };
         }
         const terminal = component.steps.indexOf(step) >= lastPrimary;
+        const stepStartedAt = Date.now();
         this.host.onEvent?.({ ...event, kind: "step.start", step: step.name });
         try {
           const pending = this.host.runStep({
             tier: step.tier, request: request.value.request,
             terminal,
-            input: freeze(copy(request.value.input, COMPONENT_LIMITS.requestBytes)),
+            input: freeze(copy(request.value.input, this.limits.requestBytes)),
             ...(component.brief !== undefined ? { brief: component.brief } : {}),
-            prompt: step.prompt, consumes: freeze(copy(consumes, COMPONENT_LIMITS.resultBytes)),
-            children: freeze(copy(children, COMPONENT_LIMITS.resultBytes)),
+            prompt: step.prompt, consumes: freeze(copy(consumes, this.limits.resultBytes)),
+            children: freeze(copy(children, this.limits.resultBytes)),
             tools: Object.freeze(scoped), signal: this.controller.signal,
             toolSchemas: Object.freeze(schemas), toolDescriptions: Object.freeze(descriptions), perSlot,
           }, binding);
@@ -591,22 +630,22 @@ export class ComponentRunner {
             products[step.produces] = { status: "error", code: "step_failed" };
             failed = step.name;
           } else if (stepFailed) {
-            products[step.produces] = freeze(copy({ status: "error", code: "step_failed", reason: violation ?? unparsed, text: response.value }, COMPONENT_LIMITS.resultBytes));
+            products[step.produces] = freeze(copy({ status: "error", code: "step_failed", reason: violation ?? unparsed, text: response.value }, this.limits.resultBytes));
             failed = step.name;
           } else {
-            products[step.produces] = freeze(copy(response.value, COMPONENT_LIMITS.resultBytes));
+            products[step.produces] = freeze(copy(response.value, this.limits.resultBytes));
             failed = undefined;
             unparseable = unparsed !== undefined;
           }
-          this.host.onEvent?.({ ...event, kind: "step.finish", step: step.name, status: stepFailed ? "error" : "ok" });
+          this.finishStep(event, step, stepStartedAt, stepFailed ? "error" : "ok");
         } catch (error) {
-          this.host.onEvent?.({ ...event, kind: "step.finish", step: step.name, status: this.controller.signal.aborted ? "cancelled" : "error" });
+          this.finishStep(event, step, stepStartedAt, this.controller.signal.aborted ? "cancelled" : "error");
           throw error;
         } finally { active = false; }
       }
       if (failed) throw new ExecutionFailure("callee_failed", `step ${failed} failed and its repair step did not recover`);
       const result = unparseable ? unanswerableBatch(request.value)
-        : copy(await this.wait(binding.normalize(freeze({ steps: products, tools, children, egress }), this.controller.signal)), COMPONENT_LIMITS.resultBytes);
+        : copy(await this.wait(binding.normalize(freeze({ steps: products, tools, children, egress }), this.controller.signal)), this.limits.resultBytes);
       if (!normalizedResult.safeParse(result).success) throw new ExecutionFailure("invalid_result", "normalized result does not match the result schema");
       if (result.status === "error") {
         // A returned (not thrown) failure, e.g. the model's output did not satisfy the render contract: say why, with the callee's own static message.
@@ -631,10 +670,10 @@ export class ComponentRunner {
     const heights = new Map<string, number>();
     const visit = (id: string, active: ReadonlySet<string>, depth: number): void => {
       const node = nodes[id];
-      if (!node || node.id !== id || active.has(id) || depth > COMPONENT_LIMITS.depth) throw new Error("Invalid component closure");
+      if (!node || node.id !== id || active.has(id) || depth > this.limits.depth) throw new Error("Invalid component closure");
       const cached = heights.get(id);
       if (cached !== undefined) {
-        if (depth + cached > COMPONENT_LIMITS.depth) throw new Error("Invalid component closure");
+        if (depth + cached > this.limits.depth) throw new Error("Invalid component closure");
         return;
       }
       if (!node.steps.length || node.steps.length > 128 || !unique(node.steps.map((step) => step.name)) || !unique(node.steps.map((step) => step.produces))) throw new Error("Invalid component steps");

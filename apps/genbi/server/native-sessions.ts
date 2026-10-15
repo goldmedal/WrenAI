@@ -1,3 +1,4 @@
+import type { ComponentLimits } from "../harness/components/runner.js";
 import type { DirectCodexProvisioner } from "./codex-native-session.js";
 import { startCodexTerminal } from "./runtime-host/codex-terminal.js";
 import { CodexConversation, type CodexConversationAttachment, type ConversationFrame, type ConversationReplay } from "./runtime-host/codex-conversation.js";
@@ -421,6 +422,8 @@ export interface NativeSessionServiceOptions {
   /** BFF-owned external state root, initialized once from the configured DB path. */
   readonly materializationState?: NativeSessionStateBase;
   readonly irPaths: Readonly<Record<NativePurpose, string | undefined>>;
+  /** The host's component run budget for native component admissions; unset means the built-in default. */
+  readonly componentLimits?: ComponentLimits;
   /**
    * The IR a session actually dispatches from, compiled for the binding it is
    * about to run against.
@@ -1981,7 +1984,8 @@ export class NativeSessionService {
           return componentReceipt.identity;
         };
         this.assertRuntimeDispatchable();
-        this.componentAdmissions.set(id, new NativeComponentAdmission(plans, current, (root, plan, signal) => preparedComponents.host(root, plan, signal)));
+        this.componentAdmissions.set(id, new NativeComponentAdmission(plans, current, (root, plan, signal) => preparedComponents.host(root, plan, signal),
+          preparedComponents.componentLimits ?? this.options.componentLimits));
       }
       let codexWrenHome: CodexWrenHome | undefined;
       // Hosted v5 entries route work through fixed MCP roots. Their outer Codex

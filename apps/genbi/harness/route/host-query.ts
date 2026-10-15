@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ComponentAccess } from "../components/broker.js";
-import { COMPONENT_LIMITS } from "../components/runner.js";
+import { DEFAULT_COMPONENT_LIMITS } from "../components/runner.js";
 import { GovernedWrenError, type GovernedErrorClass } from "../components/wren-access.js";
 import type { ResolvedCli } from "./agent-sdk-cli.js";
 
@@ -29,13 +29,15 @@ export interface HostQueryObservation {
  * governed-stdio's 10000-row bound.
  */
 export const HOST_QUERY_LIMITS = Object.freeze({
-  queries: COMPONENT_LIMITS.calls,
-  requestBytes: COMPONENT_LIMITS.requestBytes,
-  resultBytes: COMPONENT_LIMITS.resultBytes,
-  totalResultBytes: 8 * COMPONENT_LIMITS.resultBytes,
+  queries: DEFAULT_COMPONENT_LIMITS.calls,
+  requestBytes: DEFAULT_COMPONENT_LIMITS.requestBytes,
+  resultBytes: DEFAULT_COMPONENT_LIMITS.resultBytes,
+  totalResultBytes: 8 * DEFAULT_COMPONENT_LIMITS.resultBytes,
   defaultRows: 1000,
   maxRows: 9_999,
-  timeoutMs: COMPONENT_LIMITS.timeoutMs,
+  // A per-statement bound, deliberately pinned to the built-in default: raising the component run
+  // budget (WREN_HARNESS_COMPONENT_TIMEOUT_MS) must not also let one SQL statement run longer.
+  timeoutMs: DEFAULT_COMPONENT_LIMITS.timeoutMs,
 });
 
 /** Error classes a host query may return; each transport owns the sentence the model sees. */

@@ -38,6 +38,7 @@ const fixtureRuntime: RuntimeInfo = {
     { tier: 'strong', model: 'claude-sonnet' },
   ],
   dispatcher: 'claude-agent-sdk',
+  limits: { componentTimeoutMs: 120000, componentTimeoutSource: 'default' },
 };
 
 const fixtureConnection: ConnectionStatus = {
