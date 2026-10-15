@@ -484,3 +484,21 @@ def test_a_model_next_to_a_cube_still_executes(bound_transport):
     f.engine.query.assert_called_once_with(
         "SELECT n FROM orders", limit=5, read_only=True
     )
+
+
+@pytest.mark.parametrize(
+    "cubes", [None, ["revenue", None, 3]], ids=["null", "non-dict-entries"]
+)
+def test_a_malformed_cube_list_keeps_model_not_found_and_the_loop_alive(
+    bound_transport, cubes
+):
+    f = bound_transport
+    f.build.return_value = {**JAFFLE_SHAPED, "cubes": cubes}
+    f.engine.query.side_effect = WrenError(
+        ErrorCode.MODEL_NOT_FOUND, "x", phase=ErrorPhase.SQL_PLANNING
+    )
+    frames = f.run(
+        b'{"id":1,"operation":"query","sql":"SELECT 1 FROM revenue","limit":1}\n'
+        b'{"id":2,"operation":"query","sql":"SELECT 1 FROM revenue","limit":1}\n'
+    )
+    assert [frame["error"]["class"] for frame in frames[1:]] == ["model_not_found"] * 2

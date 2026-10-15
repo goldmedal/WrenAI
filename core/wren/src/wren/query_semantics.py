@@ -12,7 +12,14 @@ def cubes_read_as_tables(source_tables: list[str], manifest: dict) -> list[str]:
     """
 
     def names(kind: str) -> set[str]:
-        return {item.get("name", "").casefold() for item in manifest.get(kind, [])}
+        items = manifest.get(kind)
+        if not isinstance(items, list):
+            return set()
+        return {
+            str(item.get("name", "")).casefold()
+            for item in items
+            if isinstance(item, dict)
+        }
 
     cubes = names("cubes") - names("models") - names("views")
     return [table for table in source_tables if table.casefold() in cubes]

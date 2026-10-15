@@ -116,3 +116,12 @@ def test_a_model_or_view_sharing_a_cube_name_is_not_a_cube_misuse():
     for kind in ("models", "views"):
         manifest = {**MANIFEST, kind: [{"name": "Sales"}]}
         assert cubes_read_as_tables(["sales"], manifest) == []
+
+
+def test_a_null_cube_list_names_no_cube():
+    assert cubes_read_as_tables(["sales"], {"cubes": None, "models": None}) == []
+
+
+def test_a_non_dict_entry_is_skipped_not_raised_on():
+    manifest = {"cubes": ["sales", None, {"name": "Sales"}], "models": [3], "views": 1}
+    assert cubes_read_as_tables(["sales"], manifest) == ["sales"]
