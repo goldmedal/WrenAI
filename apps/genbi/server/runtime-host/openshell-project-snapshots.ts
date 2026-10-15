@@ -18,12 +18,12 @@ interface PublicationGrant { permit: OpenShellPermit; request: SnapshotCaptureRe
 interface DeliveryGrant { permit: OpenShellPermit; publication: SnapshotPublication; request: SnapshotCaptureRequest; identity: OpenShellIdentity; consumed: boolean }
 
 /** Accepted Store binding is authoritative; the exact file list and context are host callbacks. */
-export function snapshotSourceAuthority(options: { store: Store; currentProject: () => string | undefined; approvedFiles: readonly string[]; currentContext: () => string | undefined; preserveProjectConfig?: boolean }): () => SnapshotCaptureRequest | undefined {
+export function snapshotSourceAuthority(options: { store: Store; currentProject: () => string | undefined; approvedFiles: readonly string[]; currentContext: (scope: OpenShellIdentity) => string | undefined; preserveProjectConfig?: boolean }): (scope: OpenShellIdentity) => SnapshotCaptureRequest | undefined {
   const paths = Object.freeze([...options.approvedFiles].sort());
   if (paths.length < 2 || paths.length > 4094 || paths.some((file) => !safeSnapshotPath(file)) || !paths.includes("wren_project.yml") || !paths.includes("target/mdl.json")
     || new Set(paths.map((file) => file.toLowerCase())).size !== paths.length) throw new OpenShellError("openshell_configuration_invalid");
-  return () => {
-    const project = options.currentProject(), stored = options.store.getEnrichmentBinding(), context = options.currentContext();
+  return (scope) => {
+    const project = options.currentProject(), stored = options.store.getEnrichmentBinding(), context = options.currentContext(scope);
     if (!project || !stored || !context) return undefined;
     try {
       const binding = resolveEnrichmentBinding(project);
@@ -47,7 +47,7 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
   private readonly removals = new Map<string, Promise<void>>();
   private firstReconcile = true;
   private failure = false;
-  constructor(private readonly options: { lifecycle: OpenShellLifecycle; journal: SnapshotJournal & Pick<Store, "listOpenShellIntents">; driver: SnapshotVolumeDriver; stateRoot: string; currentSource: () => SnapshotCaptureRequest | undefined }) {}
+  constructor(private readonly options: { lifecycle: OpenShellLifecycle; journal: SnapshotJournal & Pick<Store, "listOpenShellIntents">; driver: SnapshotVolumeDriver; stateRoot: string; currentSource: (scope: OpenShellIdentity) => SnapshotCaptureRequest | undefined }) {}
   private save(row: SnapshotPublication): void {
     try {
       const previous = this.options.journal.listSnapshotPublications().find((value) => value.id === row.id);
@@ -63,8 +63,8 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
     if (!row) throw new OpenShellError("openshell_scope_invalid"); return row;
   }
   private stage(row: SnapshotPublication): string { return path.join(this.options.stateRoot, `snapshot-${row.owner}`); }
-  private checkSource(request: SnapshotCaptureRequest): void {
-    if (!isDeepStrictEqual(request, this.options.currentSource())) throw new OpenShellError("openshell_scope_invalid");
+  private checkSource(request: SnapshotCaptureRequest, scope: OpenShellIdentity): void {
+    if (!isDeepStrictEqual(request, this.options.currentSource(scope))) throw new OpenShellError("openshell_scope_invalid");
   }
   private checkScope(scope: OpenShellIdentity, request: SnapshotCaptureRequest): void {
     if (scope.binding !== request.project || scope.bindingGeneration !== request.bindingGeneration || scope.bindingRevision !== request.bindingRevision || scope.context !== request.context) throw new OpenShellError("openshell_scope_invalid");
@@ -77,11 +77,11 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
     this.pending.add(operation); return operation.finally(() => { this.pending.delete(operation); });
   }
   async preparePublication(scope: LifecycleScope, current: () => OpenShellIdentity | undefined, signal?: AbortSignal): Promise<PublicationPermit> {
-    const request = this.options.currentSource();
+    const request = this.options.currentSource(scope);
     if (!request || scope.purpose !== "lifecycle") throw new OpenShellError("openshell_scope_invalid");
     this.checkScope(scope, request); this.options.driver.attest();
     const captured = structuredClone(request);
-    const permit = await this.options.lifecycle.prepareLaunch(scope, () => { try { this.checkSource(captured); return current(); } catch { return undefined; } }, signal);
+    const permit = await this.options.lifecycle.prepareLaunch(scope, () => { try { this.checkSource(captured, scope); return current(); } catch { return undefined; } }, signal);
     const result = Object.freeze({ expiresAt: permit.expiresAt, release: () => permit.release() });
     this.publications.set(result, { permit, request: captured, scope: structuredClone(scope), consumed: false }); return result;
   }
@@ -92,7 +92,7 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
     const owner = randomUUID();
     let row: SnapshotPublication = { id: randomUUID(), owner, volume: `genbi-snapshot-${owner.replaceAll("-", "")}`, configuration: grant.scope.configuration,
       identity: grant.scope, createdAt: Date.now(), phase: "intent", helperIds: [], helperNames: [], interrupted: false, acknowledged: false };
-    const check = () => { effect.assertActive(); this.checkSource(grant.request); };
+    const check = () => { effect.assertActive(); this.checkSource(grant.request, grant.scope); };
     const operation = (async () => {
       try {
         check(); this.save(row); check();
@@ -121,7 +121,7 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
   private async prepareDeliveryOwned(handle: PublishedSnapshot, scope: LifecycleScope, current: () => OpenShellIdentity | undefined, signal?: AbortSignal): Promise<DeliveryPermit> {
     const captured = this.handles.get(handle), backend = this.options.lifecycle.dataIdentity;
     if (!captured || !backend) throw new OpenShellError("openshell_scope_invalid");
-    this.checkSource(captured.request); this.checkScope(scope, captured.request);
+    this.checkSource(captured.request, scope); this.checkScope(scope, captured.request);
     const row = this.row(handle.id);
     if (row.phase !== "ready" || row.manifest?.digest !== handle.digest) throw new OpenShellError("openshell_scope_invalid");
     const reference = randomUUID();
@@ -134,10 +134,10 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
     const effect = this.options.lifecycle.claimEffect(proof); this.activeEffects.add(effect);
     const scratch = path.join(this.stage(row), `proof-${reference}`);
     try {
-      effect.assertActive(); this.checkReady(row); this.checkSource(captured.request); mkdirSync(scratch, { mode: 0o700, recursive: true });
-      await this.options.driver.verify(row, effect.signal); effect.assertActive(); this.checkSource(captured.request);
-      await this.options.driver.checkSource(captured.request, row.manifest!, path.join(scratch, "source.tar"), effect.signal); effect.assertActive(); this.checkSource(captured.request);
-      const permit = await this.options.lifecycle.prepareLaunch(identity, () => { try { this.checkSource(captured.request); this.checkScope(current()!, captured.request); return asData(current()); } catch { return undefined; } }, signal);
+      effect.assertActive(); this.checkReady(row); this.checkSource(captured.request, scope); mkdirSync(scratch, { mode: 0o700, recursive: true });
+      await this.options.driver.verify(row, effect.signal); effect.assertActive(); this.checkSource(captured.request, scope);
+      await this.options.driver.checkSource(captured.request, row.manifest!, path.join(scratch, "source.tar"), effect.signal); effect.assertActive(); this.checkSource(captured.request, scope);
+      const permit = await this.options.lifecycle.prepareLaunch(identity, () => { try { this.checkSource(captured.request, scope); this.checkScope(current()!, captured.request); return asData(current()); } catch { return undefined; } }, signal);
       try { effect.assertActive(); this.checkReady(row); } catch (error) { permit.release(); throw error; }
       const result = Object.freeze({ expiresAt: permit.expiresAt, release: () => permit.release() });
       this.deliveries.set(result, { permit, publication: row, request: captured.request, identity, consumed: false }); return result;
@@ -155,15 +155,15 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
     const reference = { id: identity.reference, publication: identity.publication, identity, phase: "pending" as const, interrupted: false };
     let worker: OpenShellLease | undefined;
     try {
-      effect.assertActive(); this.checkReady(grant.publication); this.checkSource(grant.request);
+      effect.assertActive(); this.checkReady(grant.publication); this.checkSource(grant.request, grant.identity);
       const scratch = path.join(this.stage(grant.publication), `delivery-${reference.id}`);
       mkdirSync(scratch, { recursive: true, mode: 0o700 });
       try {
         await this.options.driver.checkSource(grant.request, grant.publication.manifest!, path.join(scratch, "source.tar"), effect.signal);
-        effect.assertActive(); this.checkSource(grant.request);
-        await this.options.driver.verify(grant.publication, effect.signal); effect.assertActive(); this.checkSource(grant.request);
+        effect.assertActive(); this.checkSource(grant.request, grant.identity);
+        await this.options.driver.verify(grant.publication, effect.signal); effect.assertActive(); this.checkSource(grant.request, grant.identity);
       } finally { if (lstatExists(scratch)) rmSync(scratch, { recursive: true, force: true }); }
-      effect.assertActive(); this.checkReady(grant.publication); this.checkSource(grant.request);
+      effect.assertActive(); this.checkReady(grant.publication); this.checkSource(grant.request, grant.identity);
       try { this.options.journal.saveSnapshotReference(reference); } catch { this.failure = true; throw new OpenShellError("openshell_journal_failed"); }
       effect.assertActive();
       worker = await this.options.lifecycle.launch(grant.permit);

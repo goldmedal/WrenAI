@@ -228,8 +228,20 @@ explicit caller timeout is preserved, and outer timeout failures are reported di
 OpenShell is opt-in. Structured Ask supports only `answer_query`: the model runs in a fresh
 OpenShell model worker, while read-only Wren query/inspect operations use a separate admitted data worker with its own immutable image and read-only snapshot. The host component broker owns SQL, row and statement-time limits, scope revocation and final persistence. Only a verified host root produces a successful answer; model prose or artifact files
 cannot declare verification. Query rows and SQL are grounded; interpretation is not certified.
-Setup, dashboards, enrichment, native conversations/terminals and hybrid/disclosure modes remain
-unsupported. Container readiness alone does not certify account or query readiness.
+Scoped Native Sessions also use `answer_query` and the same admission, broker, revocation and verified root persistence. Setup, dashboards, enrichment, official Claude TUI and hybrid/disclosure modes remain unsupported. Container readiness alone does not certify account or query readiness.
+
+
+Scoped Native Sessions provide an ordered, bounded event view with follow-up questions,
+query traces and verified answer envelopes. Browser reload/reconnect on the same BFF replays
+saved events and reattaches to the same server-owned sandbox; detaching the browser does
+not cancel execution. Repeated request IDs do not repeat tools or create another answer.
+Follow-up context comes from validated host-persisted answers, not a vendor conversation
+resume. Stop/cancel aborts the root and query leases. Normal step completion requires an
+exact receipt, clean CLI exit, zero owned descendants and removal of that step's private
+state before another step can start. Cancellation, failed cleanup or uncertain identity
+interrupts the session and tears down its exact sandbox. A BFF restart marks prior work
+interrupted and reconciles owned resources; it cannot resume the session. Successful
+synthetic tests do not certify live model/account behavior.
 
 An administrator can select `GENBI_CLAUDE_RUNTIME=openshell` and point
 `GENBI_OPENSHELL_CONFIG` at an absolute, private JSON configuration file. The host configuration
@@ -321,8 +333,7 @@ as the lifecycle backend.
 ### Host-only Claude component transport
 
 An internal OpenShell provider can run one governed Claude component step per fresh
-Linux arm64 model worker. It is separate from Ask and native-session browser routing;
-those routes remain unavailable until their own certification gates pass. There is no
+Linux arm64 model worker. Structured Ask owns an ephemeral worker; scoped Native Sessions hold one admitted sandbox for the lifetime of the session, with a fresh process and private HOME/config/tmp/work directory for each component step. There is no
 local fallback. The host retains the OAuth refresh material in a private locked vault,
 verifies the host-approved account UUID, organization UUID, email and subscription
 with authenticated minimal refresh grants and a same-access profile observation,

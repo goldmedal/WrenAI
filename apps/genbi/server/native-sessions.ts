@@ -36,6 +36,7 @@ import { sealNativeClaudeResumeHandle, sealNativeResumeHandle, unsealNativeResum
 import { RuntimeHost } from "./runtime-host/local.js";
 import { runtimeNotReady } from "./runtime-host/policy.js";
 import type { RuntimeReadiness } from "./runtime-host/types.js";
+import type { OpenShellNativeSessions, ScopedAttachment, ScopedFrame, ScopedReplay } from "./openshell-native-sessions.js";
 
 export const NATIVE_VENDORS = ["claude", "codex"] as const;
 export { NATIVE_PURPOSES };
@@ -413,6 +414,7 @@ export interface NativeLaunchInput {
 }
 
 export interface NativeSessionServiceOptions {
+  readonly openShellNative?: OpenShellNativeSessions;
   /** Certified server composition only; absence keeps direct execution closed. */
   readonly directCodex?: DirectCodexProvisioner;
   readonly store: Store;
@@ -1248,10 +1250,13 @@ export class NativeSessionService {
     const row = this.options.store.getNativeSession(id);
     return row ? this.reconcileMissingTerminal(row) : undefined;
   }
+  scopedHistory(id: string, after = 0): ScopedReplay | undefined { return this.options.openShellNative?.history(id, after); }
+  attachScoped(id: string, capability: string, listener: (frame: ScopedFrame | ScopedReplay) => void, after = 0): ScopedAttachment | undefined { return this.options.openShellNative?.attach(id, capability, listener, after); }
   runtime(id: string): InteractiveTerminalSession | undefined { return this.sessions.get(id); }
   recovery(id: string): NativeSetupRecoveryRow | undefined { return this.options.store.getNativeSetupRecovery(id); }
 
   private reconcileMissingTerminal(row: NativeSessionRow): NativeSessionRow {
+    if (row.transport === "scoped-events") return this.options.openShellNative?.reconcile(row.id) ?? row;
     // `creating` is intentionally not reconciled here: launch awaits can
     // yield while the durable row is still being initialized. It has never
     // owned an attachable capability, so treating it as a missing terminal
@@ -1286,6 +1291,7 @@ export class NativeSessionService {
    * while a bound-purpose session cannot cross a generation or revision.
    */
   async openOrCreate(input: NativeLaunchInput): Promise<NativeSessionLaunch> {
+    if (this.options.openShellNative) return this.options.openShellNative.open(input);
     this.assertRuntimeDispatchable();
     const storedRuntime = this.options.store.getNativeRuntimeBinding();
     // Compatibility seam for existing server-side callers/tests only. Browser
@@ -1311,7 +1317,8 @@ export class NativeSessionService {
   }
 
   /** Opens the exact row selected by the browser after revalidating its scope. */
-  async openExisting(input: { purpose: NativePurpose; id: string; vendor?: NativeVendor }): Promise<NativeSessionLaunch> {
+  async openExisting(input: { purpose: NativePurpose; id: string; vendor?: NativeVendor; capability?: string | undefined }): Promise<NativeSessionLaunch> {
+    if (this.options.openShellNative) return this.options.openShellNative.open(input);
     this.assertRuntimeDispatchable();
     const storedRuntime = this.options.store.getNativeRuntimeBinding();
     const runtime = !storedRuntime.configured && input.vendor
@@ -1333,6 +1340,7 @@ export class NativeSessionService {
    * browser-scoped authority.
    */
   async startSeparate(input: NativeLaunchInput & { readonly idempotencyKey: string }): Promise<NativeSessionLaunch> {
+    if (this.options.openShellNative) return this.options.openShellNative.open({ ...input, requestId: input.idempotencyKey });
     this.assertRuntimeDispatchable();
     const storedRuntime = this.options.store.getNativeRuntimeBinding();
     const runtime = !storedRuntime.configured && input.vendor
@@ -1355,6 +1363,7 @@ export class NativeSessionService {
    * fresh conversation as a resume.
    */
   async resume(input: { id: string; idempotencyKey: string }): Promise<NativeSessionLaunch> {
+    if (this.options.openShellNative) throw new InteractiveLaunchError("Scoped sessions cannot resume across a server restart.");
     this.assertRuntimeDispatchable();
     const source = this.get(input.id);
     if (!source || (source.status !== "exited" && source.status !== "stopped" && source.status !== "interrupted" && source.status !== "failed" && source.status !== "stale")) {
@@ -1382,7 +1391,7 @@ export class NativeSessionService {
 
   /** Browser-visible resume state uses the same current-scope fence as launch, plus *why* when it fails. */
   resumeAvailability(row: NativeSessionRow): NativeSessionResumeAvailability {
-    if (row.transport === "conversation" || (row.vendor === "codex" && this.options.directCodex?.terminal)) return { available: false, cause: "no_resume_handle" };
+    if (row.transport === "scoped-events" || row.transport === "conversation" || (row.vendor === "codex" && this.options.directCodex?.terminal)) return { available: false, cause: "no_resume_handle" };
     if (row.status !== "exited" && row.status !== "stopped" && row.status !== "interrupted" && row.status !== "failed" && row.status !== "stale") {
       return { available: false, cause: "not_terminal" };
     }
@@ -1662,13 +1671,16 @@ export class NativeSessionService {
       : this.vendorExecutables[vendor] !== undefined;
     const runtimeHostReadiness = await this.runtimeHost.probe();
     if (runtimeHostReadiness.selected === "openshell") {
-      const reason = "OpenShell native model sessions are not supported.";
+      const scoped = await this.options.openShellNative?.readiness();
+      const reason = scoped?.state === "ready" ? undefined : scoped?.message ?? "OpenShell scoped analysis is unavailable.";
       const purposes = Object.fromEntries(NATIVE_PURPOSES.map((purpose) => [purpose, {
         scopeKind: NATIVE_DISPATCH_REGISTRY[purpose].scopeKind, profile: NATIVE_DISPATCH_REGISTRY[purpose].profile,
-        available: false, reason, vendors: { codex: { available: false, reason }, claude: { available: false, reason } },
+        target: "claude-code:interactive", targetLabel: "OpenShell scoped analysis",
+        available: purpose === "analysis" && reason === undefined, ...(purpose !== "analysis" ? { reason: "This purpose is unavailable. Official Claude TUI is unavailable." } : reason ? { reason } : {}),
+        vendors: { codex: { available: false }, claude: { available: purpose === "analysis" && reason === undefined } },
       }])) as Record<NativePurpose, NativePurposeReadiness>;
       return { runtime: this.options.store.getNativeRuntimeBinding(), runtimeHost: runtimeHostReadiness, purposes, ...purposes,
-        mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason } };
+        mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason: "Scoped sessions use host-governed analysis tools. Official Claude TUI is unavailable." } };
     }
     if (runtimeHostReadiness.selected === "codex-app-server") {
       const runtime = this.options.store.getNativeRuntimeBinding();
@@ -2107,7 +2119,7 @@ export class NativeSessionService {
   }
 
   private liveCapability(id: string): string | undefined {
-    return this.sessions.get(id)?.capability ?? this.conversations.get(id)?.conversation.capability;
+    return this.options.openShellNative?.capability(id) ?? this.sessions.get(id)?.capability ?? this.conversations.get(id)?.conversation.capability;
   }
 
   private async createDirectCodex(binding: EnrichmentBinding, runtime: NativeRuntimeBinding, entryVerb: string): Promise<NativeSessionLaunch> {
@@ -2213,6 +2225,7 @@ export class NativeSessionService {
   }
 
   async stopAndWait(id: string, capability: string): Promise<boolean> {
+    if (this.options.store.getNativeSession(id)?.transport === "scoped-events") return this.options.openShellNative?.stop(id, capability) ?? false;
     const direct = this.conversations.get(id);
     if (!direct) return this.stop(id, capability);
     if (direct.conversation.capability !== capability) return false;
@@ -2255,6 +2268,7 @@ export class NativeSessionService {
   }
 
   private revokeCapabilities(ids: readonly string[]): void {
+    this.options.openShellNative?.revoke(ids);
     for (const id of ids) {
       const terminal = this.sessions.get(id);
       this.clearLease(id);
@@ -2307,6 +2321,7 @@ export class NativeSessionService {
     this.shuttingDown = true;
     this.shutdownController.abort();
     return this.shutdownPromise ??= (async () => {
+      await this.options.openShellNative?.shutdown();
       const ids = [...new Set([...this.sessions.keys(), ...this.conversations.keys(), ...this.componentAdmissions.keys()])];
       for (const id of ids) this.options.store.stopNativeSessionAndRevokeRecoveryAction(id);
       this.revokeCapabilities(ids);

@@ -6,6 +6,7 @@ import { type NativeSessionReadiness, type NativeSessionPurpose } from '@/bff/cl
 import { isBffEnabled } from '@/bff/env';
 import { useSessionStore } from '@/session/useSessionStore';
 import { relativeActivity, purposeLabels, statusLabels, vendorLabels } from './sessionLabels';
+import { nativeSessionCapability } from './capability';
 import { structuredAskPath } from './structuredAsk';
 import { DEFAULT_CONVERSATION_PROFILE, useNativeSessions } from './useNativeSessions';
 import './sessions.css';
@@ -31,7 +32,8 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
   const purposeMap = readiness?.purposes ?? (readiness as unknown as Record<NativeSessionPurpose, NativeSessionReadiness['purposes'][NativeSessionPurpose]> | undefined);
   const purposeReadiness = purposeMap?.[purpose];
   // The registry's per-profile readiness drives the picker; without it only the default exists.
-  const profileOptions = purpose === 'analysis' && readiness?.profiles ? Object.values(readiness.profiles) : [];
+  const scoped = readiness?.runtimeHost?.selected === 'openshell';
+  const profileOptions = !scoped && purpose === 'analysis' && readiness?.profiles ? Object.values(readiness.profiles) : [];
   const showProfilePicker = profileOptions.length > 0;
   // Never fall back to an arbitrary profile: a choice that vanished from readiness reverts to the
   // default, and if even the default is missing nothing is selected and Start stays disabled.
@@ -46,7 +48,7 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
   // poll; an idle TTL must be able to remove the action immediately.
   const existing = refreshingExisting
     ? []
-    : sessions.filter((session) => session.purpose === purpose && (session.status === 'running' || session.status === 'detached'));
+    : sessions.filter((session) => (session.transport !== 'scoped-events' || !!nativeSessionCapability(session.id)) && session.purpose === purpose && (session.status === 'running' || session.status === 'detached'));
   const create = async () => {
     const reason = !live
       ? 'Native terminal sessions require a local BFF connection.'
@@ -85,15 +87,15 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
     <Typography.Text strong>New session</Typography.Text>
     <section aria-label="Structured Ask session">
       <Typography.Text strong>Structured Ask</Typography.Text>
-      <Typography.Paragraph type="secondary">{structuredReadiness?.backend === 'openshell' ? 'Answer a question with an OpenShell model and host Wren queries. Dashboards are unavailable.' : 'Chart-first answers, dashboards, and follow-up questions.'}</Typography.Paragraph>
+      <Typography.Paragraph type="secondary">{structuredReadiness?.backend === 'openshell' ? 'Answer a question with governed OpenShell model and data workers. Dashboards are unavailable.' : 'Chart-first answers, dashboards, and follow-up questions.'}</Typography.Paragraph>
       <Button type="primary" loading={creating} disabled={live && (!structuredReadiness || !structuredReadiness.ask)} onClick={() => void startStructuredAsk()}>Start Structured Ask</Button>
     </section>
-    <section aria-label="Native terminal session">
-      <Typography.Text strong>Native terminal</Typography.Text>
-      <Typography.Paragraph type="secondary">Open a running terminal or start a separate CLI session for analysis or context enrichment.</Typography.Paragraph>
+    <section aria-label={scoped ? "Scoped analysis session" : "Native terminal session"}>
+      <Typography.Text strong>{scoped ? 'Scoped analysis' : 'Native terminal'}</Typography.Text>
+      <Typography.Paragraph type="secondary">{scoped ? 'Ask follow-up questions in one governed sandbox. Reconnect restores saved events. Official Claude TUI and context enrichment are unavailable.' : 'Open a running terminal or start a separate CLI session for analysis or context enrichment.'}</Typography.Paragraph>
       <Radio.Group name="native-session-purpose" value={purpose} onChange={(event) => setPurpose(event.target.value)} aria-label="Native terminal purpose">
         <Space orientation="vertical">
-          {newSessionPurposes.map((item) => <Radio key={item} value={item}>{purposeLabels[item]}</Radio>)}
+          {newSessionPurposes.map((item) => <Radio key={item} value={item} disabled={scoped && item !== 'analysis'}>{purposeLabels[item]}</Radio>)}
         </Space>
       </Radio.Group>
       {showProfilePicker ? <label className="sessions-new-profile">
@@ -137,7 +139,7 @@ function NewSessionControl({ live, readiness }: { live: boolean; readiness?: Nat
         })}
       </section> : null}
       {error ? <Typography.Text type="danger" role="alert">{error}</Typography.Text> : null}
-      <Button type="primary" disabled={!available} onClick={() => void create()} loading={creating}>Start separate native terminal</Button>
+      <Button type="primary" disabled={!available} onClick={() => void create()} loading={creating}>{scoped ? 'Start scoped analysis session' : 'Start separate native terminal'}</Button>
     </section>
   </div>;
   return <Popover content={content} overlayClassName="sessions-new-popover" trigger="click" open={open} onOpenChange={(next) => {
@@ -200,7 +202,7 @@ export function SessionsSidebar() {
         <span className="sessions-sidebar-id" title={session.id} aria-label={`Session ID ${session.id}`}>{session.id.slice(-8)}</span>
       </span>
       <span className="sessions-sidebar-meta">
-        <span>Native terminal</span>{session.dispatchProfile && session.dispatchProfile !== DEFAULT_CONVERSATION_PROFILE && session.purpose === 'analysis' ? <span title="Conversation profile">{session.dispatchProfile}</span> : null}<span>{vendorLabels[session.vendor]}</span><span>{statusLabels[session.status]}</span><span>{relativeActivity(session.updatedAt)}</span>
+        <span>{session.transport === 'scoped-events' ? 'Scoped analysis' : 'Native terminal'}</span>{session.dispatchProfile && session.dispatchProfile !== DEFAULT_CONVERSATION_PROFILE && session.purpose === 'analysis' ? <span title="Conversation profile">{session.dispatchProfile}</span> : null}<span>{vendorLabels[session.vendor]}</span><span>{statusLabels[session.status]}</span><span>{relativeActivity(session.updatedAt)}</span>
       </span>
     </button>)}
   </section>;

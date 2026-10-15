@@ -1,6 +1,7 @@
 import { observeStructuredAsync, type StructuredDiagnosticObserver } from "./structured-diagnostics.js";
 import { enforceCompliance, type AuthChoice, type RouteOptions, type RouteResult, type SetupStepRunner, type SetupStepRunOptions, type SetupStepRunResult } from "../harness/index.js";
 import type { RuntimeBackendReadiness } from "./runtime-host/types.js";
+import type { OpenShellModelSession } from "./runtime-host/openshell-model-session.js";
 
 export type StructuredVendor = "codex" | "claude";
 export type StructuredBackend = "local" | "codex-app-server" | "claude-sandbox-runtime" | "openshell";
@@ -8,6 +9,8 @@ export interface StructuredScope {
   readonly sessionId: string;
   readonly turnId: string;
   readonly signal?: AbortSignal;
+  /** Opaque server-owned sandbox capability; never decoded from a browser request. */
+  readonly modelSession?: OpenShellModelSession;
   /** Captured host state, rechecked before/after preparation, tools, events and results. */
   assertCurrent(): void;
 }
@@ -19,6 +22,7 @@ export class StructuredRuntimeError extends Error {
 export interface StructuredAdapter {
   readonly vendor: StructuredVendor;
   readonly backend: Exclude<StructuredBackend, "local">;
+  readonly nativeSessions?: boolean;
   probe(): Promise<RuntimeBackendReadiness>;
   ask?(options: RouteOptions, scope: StructuredScope): Promise<RouteResult>;
   setup?(options: SetupStepRunOptions, scope: StructuredScope): Promise<SetupStepRunResult>;
@@ -53,7 +57,7 @@ export class StructuredRuntime {
   assertOperationSupported(auth: AuthChoice, operation: "ask" | "setup" | "native"): void {
     this.assertActive();
     if (auth.mode === "subscription" && this.options.selected[auth.provider] === "openshell"
-      && (operation !== "ask" || !this.adapter(auth.provider)?.ask)) throw new StructuredRuntimeError("unsupported");
+      && (operation === "setup" || operation === "ask" && !this.adapter(auth.provider)?.ask || operation === "native" && !this.adapter(auth.provider)?.nativeSessions)) throw new StructuredRuntimeError("unsupported");
   }
   async readiness(auth?: AuthChoice) {
     const entries = await Promise.all((["codex", "claude"] as const).map(async (vendor) => {
@@ -115,7 +119,7 @@ export class StructuredRuntime {
         if (ready.state !== "ready") throw new StructuredRuntimeError("unavailable");
       } else if (auth.mode === "subscription" && !this.options.allowLocal) throw new StructuredRuntimeError("unavailable");
       let result: T;
-      try { result = await observeStructuredAsync(diagnostics, "adapter_dispatch", () => operation(adapter, { sessionId: scope.sessionId, turnId: scope.turnId, signal, assertCurrent })); }
+      try { result = await observeStructuredAsync(diagnostics, "adapter_dispatch", () => operation(adapter, { sessionId: scope.sessionId, turnId: scope.turnId, signal, assertCurrent, ...(scope.modelSession ? { modelSession: scope.modelSession } : {}) })); }
       catch (error) {
         if (adapter && !(error instanceof StructuredRuntimeError)) throw new StructuredRuntimeError(signal.aborted ? "cancelled" : "failed");
         throw error;

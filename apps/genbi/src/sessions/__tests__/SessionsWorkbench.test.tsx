@@ -36,7 +36,7 @@ const ready = {
   },
 };
 
-vi.mock('@/bff/env', () => ({ isBffEnabled: () => true }));
+vi.mock('@/bff/env', () => ({ isBffEnabled: () => true, bffBaseUrl: () => '' }));
 vi.mock('@/bff/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/bff/client')>()),
   listNativeSessions: client.list,
@@ -902,4 +902,26 @@ describe('Sessions workbench', () => {
     expect(screen.getByRole('button', { name: /new session/i })).toBeEnabled();
     expect(client.create).not.toHaveBeenCalled();
   });
+});
+
+
+it('refreshes the scoped detached listing after replay connects without opening another socket or launching again', async () => {
+  const detached={...native('scoped-reload','detached'),transport:'scoped-events' as const};
+  client.list.mockResolvedValue({sessions:[detached]});client.get.mockResolvedValue({session:{...detached,status:'running'}});
+  sessionStorage.setItem('wren-genbi-native-session-capability:scoped-reload','held-cap');
+  useNativeSessions.setState({sessions:[detached]},false);
+  renderWithProviders(<Surface/>,{route:'/sessions/scoped-reload'});
+  await waitFor(()=>expect(sockets).toHaveLength(1));
+  act(()=>sockets[0]!.onmessage?.({data:JSON.stringify({type:'replay',through:0,floor:0,truncated:false,state:'ready',events:[]})}));
+  await waitFor(()=>expect(useNativeSessions.getState().sessions[0]?.status).toBe('running'));
+  expect(client.get).toHaveBeenCalledWith('scoped-reload');expect(sockets).toHaveLength(1);expect(client.create).not.toHaveBeenCalled();
+  expect(screen.getByRole('button',{name:/Stop$/})).toBeEnabled();
+});
+
+it('keeps scoped history-only Stop disabled without submitting any request', async () => {
+  const row={...native('scoped-history'),transport:'scoped-events' as const};client.list.mockResolvedValue({sessions:[row]});
+  useNativeSessions.setState({sessions:[row]},false);
+  vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>({type:'replay',through:0,floor:0,truncated:false,state:'ready',events:[]})})));
+  renderWithProviders(<Surface/>,{route:'/sessions/scoped-history'});
+  expect(await screen.findByRole('button',{name:/Stop$/})).toBeDisabled();expect(sockets).toHaveLength(0);expect(client.stop).not.toHaveBeenCalled();expect(client.create).not.toHaveBeenCalled();
 });

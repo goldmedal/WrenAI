@@ -158,7 +158,7 @@ export type NativeSessionVendor = 'claude' | 'codex';
 export type NativeSessionStatus = 'creating' | 'running' | 'detached' | 'exited' | 'stopped' | 'interrupted' | 'failed' | 'stale';
 
 export interface NativeSession {
-  transport?: "conversation";
+  transport?: "conversation" | "scoped-events";
   id: string;
   purpose: NativeSessionPurpose;
   vendor: NativeSessionVendor;
@@ -194,7 +194,7 @@ export interface NativePurposeReadiness {
   producer?: { available: boolean; category?: 'native_session_producer_incompatible' };
 }
 
-export type RuntimeBackendId = 'local' | 'codex-app-server' | 'claude-sandbox-runtime';
+export type RuntimeBackendId = 'local' | 'codex-app-server' | 'openshell' | 'claude-sandbox-runtime';
 export type RuntimeBackendReadiness =
   | { state: 'ready'; version: string; capabilities: readonly string[] }
   | { state: 'unavailable' | 'incompatible' | 'unprovisioned'; code: string; message: string };
@@ -263,10 +263,10 @@ export function getNativeSession(id: string): Promise<{ session: NativeSession }
 
 export function createNativeSession(purpose: NativeSessionPurpose, launch: { intent: 'start_separate'; idempotencyKey: string; entryVerb?: 'answer_query' | 'generate_dashboard'; profile?: string }, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
 export function createNativeSession(purpose: NativeSessionPurpose, launch: { intent: 'resume'; sessionId: string; idempotencyKey: string }, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
-export function createNativeSession(purpose: NativeSessionPurpose, launch: { intent: 'open_existing'; sessionId?: string; profile?: string }, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
+export function createNativeSession(purpose: NativeSessionPurpose, launch: { intent: 'open_existing'; sessionId?: string; profile?: string; capability?: string }, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
 export function createNativeSession(purpose: NativeSessionPurpose, vendor: NativeSessionVendor, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
 export function createNativeSession(purpose: NativeSessionPurpose, signal?: AbortSignal): Promise<NativeSessionLaunchResult>;
-export function createNativeSession(purpose: NativeSessionPurpose, launchOrVendorOrSignal?: { intent: NativeSessionLaunchIntent; idempotencyKey?: string; sessionId?: string; entryVerb?: 'answer_query' | 'generate_dashboard'; profile?: string } | NativeSessionVendor | AbortSignal, signal?: AbortSignal): Promise<NativeSessionLaunchResult> {
+export function createNativeSession(purpose: NativeSessionPurpose, launchOrVendorOrSignal?: { intent: NativeSessionLaunchIntent; idempotencyKey?: string; sessionId?: string; entryVerb?: 'answer_query' | 'generate_dashboard'; profile?: string; capability?: string } | NativeSessionVendor | AbortSignal, signal?: AbortSignal): Promise<NativeSessionLaunchResult> {
   const requestSignal = launchOrVendorOrSignal instanceof AbortSignal ? launchOrVendorOrSignal : signal;
   // Legacy vendor arguments are intentionally ignored: Runtime owns the
   // provider/target, and the public request payload must not override it.

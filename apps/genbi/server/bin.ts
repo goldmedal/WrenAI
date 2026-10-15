@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { OpenShellNativeSessions } from "./openshell-native-sessions.js";
+import { effectiveRouteOptions } from "./turn.js";
 import { createCodexRuntimeComposition, readCodexBootConfiguration } from "./codex-runtime-composition.js";
 import { createCodexStructuredAdapter } from "./codex-structured-ask.js";
 import { createOpenShellRuntimeComposition, selectNativeRuntimeBackend } from "./openshell-runtime-composition.js";
@@ -661,7 +663,7 @@ async function main(): Promise<void> {
     getBinding: currentInteractiveBinding, sourceWrenHome: nativeSourceWrenHome, artifacts: nativeArtifacts,
     componentLimits: executionLimits.componentLimits });
   const openshellComposition = await createOpenShellRuntimeComposition({ env: process.env, store, stateRoot: nativeMaterializationState.root, currentProject: getUserProject });
-  const openshellStructured = createOpenShellStructuredAdapter(createOpenShellStructuredProvisioner({
+  const openshellProvisioner = createOpenShellStructuredProvisioner({
     composition: openshellComposition, store, producerBinary: producerExecutable?.executable ?? "", wrenBinary: nativeWrenExecutable?.executable ?? "",
     profileSource, hostHome: nativeHome, sourceWrenHome: nativeSourceWrenHome, getBinding: currentInteractiveBinding,
     assertConfigurationCurrent() { if (!openshellComposition.claudeBoot) throw new Error("OpenShell model configuration unavailable"); openshellComposition.claudeBoot.assertCurrent(); },
@@ -671,7 +673,8 @@ async function main(): Promise<void> {
       boot.assertCurrent();
       return resolveStructuredClaudeModels(settings, (model, driver) => resolveOpenShellClaudeModel(model, driver, boot.descriptor));
     },
-  }));
+  });
+  const openshellStructured = createOpenShellStructuredAdapter(openshellProvisioner);
   const nativeRuntimeHost = new RuntimeHost({
     selected: (vendor) => selectNativeRuntimeBackend({ vendor: vendor ?? store.getNativeRuntimeBinding().provider,
       codexBackend: codexConfiguration.selected, claudeOpenShell: openshellComposition.selected }),
@@ -679,7 +682,9 @@ async function main(): Promise<void> {
     localAvailable: () => codexConfiguration.allowLocal ? nativeTerminalHostAvailable() : false,
     vendorProbes: { "codex-app-server": codexComposition.probe, openshell: openshellComposition.probe },
   });
+  const openShellNative = openshellComposition.selected ? new OpenShellNativeSessions({ store, provisioner: openshellProvisioner, runtime: () => structuredRuntime, getBinding: currentInteractiveBinding, routeOptions: () => effectiveRouteOptions(deps) }) : undefined;
   const nativeSessions = new NativeSessionService({
+    ...(openShellNative ? { openShellNative } : {}),
     store,
     terminalManager,
     componentLimits: executionLimits.componentLimits,

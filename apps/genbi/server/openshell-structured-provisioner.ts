@@ -21,6 +21,7 @@ import type { RuntimeSettings } from "./wire-types.js";
 import { StructuredRuntimeError } from "./structured-runtime.js";
 import { createStructuredQueryFailureTracker, observeStructuredQueryAccess } from "./structured-error-feedback.js";
 import { isClaudeQueryAbort } from "./runtime-host/claude-component-step.js";
+import { launchOpenShellModelSession } from "./runtime-host/openshell-model-session.js";
 
 type Composition = Pick<Awaited<ReturnType<typeof createOpenShellRuntimeComposition>>, "lifecycle" | "claudeVault" | "claudeProvider" | "probe" | "bindDataContext" | "dataWorkerAvailable">;
 type ModelScope = Parameters<Composition["claudeProvider"]>[0]["scope"];
@@ -53,7 +54,13 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
     if (!options.getBinding() || !composition.dataWorkerAvailable) throw unavailable();
     return status;
   };
-  return {
+  const provisioner: OpenShellStructuredProvisioner = {
+    assertSessionCleaned(sessionId) {
+      const intents = options.store.listOpenShellIntents().filter(row => row.identity.session === sessionId);
+      const publications = options.store.listSnapshotPublications().filter(row => row.identity.session === sessionId);
+      const references = options.store.listSnapshotReferences().filter(row => row.identity.session === sessionId);
+      if (intents.some(row => row.phase !== "cleaned") || publications.some(row => row.phase !== "cleaned") || references.some(row => row.phase !== "released")) throw new StructuredRuntimeError("cleanup");
+    },
     async probe() {
       try {
         return await observeStructuredAsync(options.diagnostics, "runtime_readiness", async () => {
@@ -113,7 +120,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         check(); parent.throwIfAborted();
         if (!modelScope) throw unavailable();
         const captured = modelScope;
-        const provider = observeStructured(options.diagnostics, "provider_setup", () => composition.claudeProvider({ ...(timing ? { timing } : {}), scope: captured, currentScope: () => { try { check(); return captured; } catch { return undefined; } }, models, assertCurrent: check, assertExecutableCurrent }));
+        const provider = observeStructured(options.diagnostics, "provider_setup", () => composition.claudeProvider({ ...(timing ? { timing } : {}), ...(input.modelSession ? { modelSession: input.modelSession } : {}), scope: captured, currentScope: () => { try { check(); return captured; } catch { return undefined; } }, models, assertCurrent: check, assertExecutableCurrent }));
         return observeStructuredAsync(options.diagnostics, "provider_open", () => provider.openStep!(model, tier, parent));
       };
       const vendor: NativeComponentVendor = { vendor: "claude", authIdentity: status.fingerprint!, generation: status.generation!,
@@ -145,6 +152,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       return {
         assertCurrent: check,
         assertExecutableCurrent,
+        sessionIdentity() { check(); if (!modelScope) throw unavailable(); const { turn: _turn, ...scope } = modelScope; return { ...scope, purpose: "model_session", operation: "session", snapshot: "none" }; },
         async run(request) {
           assertExecutableCurrent(); if (started || closing) throw new StructuredRuntimeError("failed"); started = true;
           const host = await observeStructuredAsync(options.diagnostics, "broker_host", () => prepared.host(root, plan, signal));
@@ -159,6 +167,32 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       };
     },
   };
+  provisioner.reserveSession = async input => {
+    const signal = input.scope.signal;
+    if (!signal || !composition.lifecycle?.modelIdentity) throw unavailable();
+    const status = structuredClone(checkConfiguration()), binding = structuredClone(options.getBinding()!), settings = structuredClone(options.store.getRuntimeSettings());
+    const generation = options.store.getNativeRuntimeBinding().generation, home = options.sourceWrenHome();
+    const check = () => { signal.throwIfAborted(); input.scope.assertCurrent(); options.assertConfigurationCurrent();
+      if (!isDeepStrictEqual(status, composition.claudeVault?.status()) || !isDeepStrictEqual(binding, options.getBinding())
+        || !isDeepStrictEqual(settings, options.store.getRuntimeSettings()) || generation !== options.store.getNativeRuntimeBinding().generation || home !== options.sourceWrenHome()) throw new StructuredRuntimeError("stale"); };
+    check();
+    const preparationScope = { backend: "openshell" as const, account: status.fingerprint!, generation: status.generation!, session: input.scope.sessionId, turn: input.scope.turnId,
+      binding: binding.identity, bindingGeneration: String(binding.generation), bindingRevision: binding.revision,
+      context: planDigest({ binding: binding.revision }), plan: planDigest({ purpose: "analysis", entry: "answer_query", profile: options.profileSource }),
+      ...composition.lifecycle.identity, purpose: "lifecycle" as const, operation: "worker" as const, snapshot: "none" as const };
+    // Authorize ephemeral context/plan materialization before mkdir or producer execution.
+    const permission = await composition.lifecycle.prepareLaunch(preparationScope, () => { try { check(); return preparationScope; } catch { return undefined; } }, signal);
+    const effect = composition.lifecycle.claimEffect(permission);
+    let captured: Awaited<ReturnType<OpenShellStructuredProvisioner["prepare"]>> | undefined;
+    try {
+      effect.assertActive(); check();
+      captured = await provisioner.prepare({ ...input, scope: { ...input.scope, signal: AbortSignal.any([signal, effect.signal]), assertCurrent() { effect.assertActive(); check(); } }, persistRoot: async () => { throw new StructuredRuntimeError("failed"); }, onEvent() {} });
+      const identity = captured.sessionIdentity!(); captured.assertCurrent(); check();
+      const permit = await composition.lifecycle.prepareLaunch(identity, () => { try { check(); return identity; } catch { return undefined; } }, signal);
+      try { check(); return await launchOpenShellModelSession(composition.lifecycle, permit, identity); } catch (error) { permit.release(); throw error; }
+    } finally { await captured?.dispose(); effect.release(); }
+  };
+  return provisioner;
 }
 
 /** Only Anthropic subscription tiers enter the isolated Claude component provider. */

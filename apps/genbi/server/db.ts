@@ -70,7 +70,7 @@ export type NativeSetupRecoveryState = "working" | "needs_input" | "needs_decisi
 export type NativeSetupRecoveryCode = "in_progress" | "user_action_required" | "continue_or_stop" | "retryable" | "completion_reported";
 
 export interface NativeSessionRow {
-  readonly transport?: "conversation";
+  readonly transport?: "conversation" | "scoped-events";
   readonly id: string;
   readonly purpose: NativeSessionPurpose;
   readonly vendor: NativeSessionVendor;
@@ -447,6 +447,18 @@ CREATE TABLE IF NOT EXISTS native_sessions (
   started_at TEXT, ended_at TEXT, exit_code INTEGER, failure TEXT
 );
 CREATE INDEX IF NOT EXISTS native_sessions_updated_at ON native_sessions(updated_at DESC);
+CREATE TABLE IF NOT EXISTS native_scoped_events (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES native_sessions(id),
+  request_id TEXT, kind TEXT NOT NULL, payload TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS native_scoped_events_session ON native_scoped_events(session_id, sequence);
+CREATE TABLE IF NOT EXISTS native_scoped_retention (
+  session_id TEXT PRIMARY KEY REFERENCES native_sessions(id), pruned_through INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS native_scoped_requests (
+  session_id TEXT NOT NULL REFERENCES native_sessions(id), request_id TEXT NOT NULL, question_hash TEXT NOT NULL,
+  turn_id TEXT NOT NULL, status TEXT NOT NULL, PRIMARY KEY(session_id,request_id)
+);
 -- Provider conversation identity is an opaque, sealed server-side value. It
 -- deliberately has no foreign-key cascade: historical session rows remain a
 -- truthful record even after their one-shot resume authority is consumed.
@@ -800,7 +812,7 @@ export class Store {
     this.db.prepare("INSERT INTO openshell_snapshot_references (id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(row.id, JSON.stringify(row));
   }
   interruptOpenShellWork(intent: OpenShellIntent): void {
-    this.db.prepare("UPDATE turns SET result_kind = 'error', backend = NULL, answer_summary = NULL, error_message = ? WHERE id = ? AND session_id = ? AND result_kind IS NULL")
+    if ("turn" in intent.identity) this.db.prepare("UPDATE turns SET result_kind = 'error', backend = NULL, answer_summary = NULL, error_message = ? WHERE id = ? AND session_id = ? AND result_kind IS NULL")
       .run("OpenShell work interrupted by host restart.", intent.identity.turn, intent.identity.session);
     const now = this.now().toISOString();
     this.db.prepare("UPDATE sessions SET status = 'active', pending_question = NULL, updated_at = ? WHERE id = ? AND status = 'streaming'").run(now, intent.identity.session);
@@ -880,6 +892,7 @@ export class Store {
       `UPDATE native_sessions SET status = 'interrupted', failure = ?, ended_at = ?, updated_at = ?
        WHERE status IN ('creating', 'running', 'detached')`,
     ).run("native session interrupted by BFF restart", now, now);
+    this.db.prepare("UPDATE native_scoped_requests SET status='interrupted' WHERE status='running'").run();
   }
 
   /**
@@ -980,7 +993,7 @@ export class Store {
   // ---------------------------------------------------------------------
 
   createNativeSession(params: {
-    transport?: "conversation";
+    transport?: "conversation" | "scoped-events";
     id: string; purpose: NativeSessionPurpose; vendor: NativeSessionVendor; agent: string; entryVerb?: string | undefined;
     scopeKind: NativeSessionScopeKind; scopeId: string; projectIdentity?: string;
     bindingGeneration?: number; projectRevision?: string;
@@ -1099,6 +1112,58 @@ export class Store {
   getNativeSession(id: string): NativeSessionRow | undefined {
     const row = this.db.prepare(`SELECT * FROM native_sessions WHERE id = ?`).get(id);
     return row ? rowToNativeSession(row) : undefined;
+  }
+
+  appendNativeScopedEvent(sessionId: string, requestId: string | null, kind: string, payload: unknown): { sequence: number; requestId: string | null; kind: string; payload: unknown } {
+    const serialized = JSON.stringify(payload);
+    if (!serialized || Buffer.byteLength(serialized) > 1_048_576 || !this.getNativeSession(sessionId)) throw new Error("Scoped event is unavailable");
+    this.db.exec("SAVEPOINT native_scoped_append");
+    try {
+      const row = this.db.prepare("INSERT INTO native_scoped_events(session_id,request_id,kind,payload) VALUES(?,?,?,?) RETURNING sequence").get(sessionId, requestId, kind, serialized)!;
+      // Global cursor gaps can belong to another session. Record actual deletion atomically.
+      const removed = this.db.prepare(`DELETE FROM native_scoped_events WHERE session_id = ? AND sequence IN (
+        SELECT sequence FROM (SELECT sequence, ROW_NUMBER() OVER (ORDER BY sequence DESC) AS n,
+        SUM(LENGTH(CAST(payload AS BLOB))) OVER (ORDER BY sequence DESC) AS bytes FROM native_scoped_events WHERE session_id = ?) WHERE n > 512 OR bytes > 4194304
+      ) RETURNING sequence`).all(sessionId, sessionId);
+      if (removed.length) this.db.prepare("INSERT INTO native_scoped_retention VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET pruned_through=MAX(pruned_through,excluded.pruned_through)")
+        .run(sessionId, Math.max(...removed.map(value => num(value, "sequence"))));
+      this.db.exec("RELEASE native_scoped_append");
+      return { sequence: num(row, "sequence"), requestId, kind, payload: JSON.parse(serialized) };
+    } catch (error) { this.db.exec("ROLLBACK TO native_scoped_append"); this.db.exec("RELEASE native_scoped_append"); throw error; }
+  }
+
+  nativeScopedPrunedThrough(sessionId: string): number {
+    const row = this.db.prepare("SELECT pruned_through FROM native_scoped_retention WHERE session_id=?").get(sessionId);
+    return row ? num(row, "pruned_through") : 0;
+  }
+
+  listNativeScopedEvents(sessionId: string, after = 0): { sequence: number; requestId: string | null; kind: string; payload: unknown }[] {
+    return this.db.prepare("SELECT sequence,request_id,kind,payload FROM native_scoped_events WHERE session_id=? AND sequence>? ORDER BY sequence").all(sessionId, after)
+      .map(row => ({ sequence: num(row, "sequence"), requestId: strOrNull(row, "request_id"), kind: str(row, "kind"), payload: JSON.parse(str(row, "payload")) }));
+  }
+
+  getNativeScopedRequest(sessionId: string, requestId: string): { questionHash: string; turnId: string; status: string } | undefined {
+    const row = this.db.prepare("SELECT * FROM native_scoped_requests WHERE session_id=? AND request_id=?").get(sessionId, requestId);
+    return row ? { questionHash: str(row, "question_hash"), turnId: str(row, "turn_id"), status: str(row, "status") } : undefined;
+  }
+
+  reserveNativeScopedRequest(sessionId: string, requestId: string, questionHash: string, turnId: string): void {
+    const count = this.db.prepare("SELECT COUNT(*) AS n FROM native_scoped_requests WHERE session_id=?").get(sessionId)!;
+    if (num(count, "n") >= 128) throw new Error("Scoped session request capacity reached");
+    this.db.prepare("INSERT INTO native_scoped_requests VALUES(?,?,?,?, 'running')").run(sessionId, requestId, questionHash, turnId);
+  }
+
+  finishNativeScopedRequest(sessionId: string, requestId: string, status: string, kind: string, payload: unknown,
+    answer?: { envelopeJson: string; digest: string }): ReturnType<Store["appendNativeScopedEvent"]> | undefined {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const claimed = this.db.prepare("UPDATE native_scoped_requests SET status=? WHERE session_id=? AND request_id=? AND status='running'").run(status, sessionId, requestId);
+      if (!claimed.changes) { this.db.exec("COMMIT"); return undefined; }
+      if (answer) this.db.prepare("INSERT INTO native_structured_answers(id,native_session_id,idempotency_key,envelope_json,digest,created_at,grounded) VALUES(?,?,?,?,?,?,1)")
+        .run(newId("native-answer"), sessionId, requestId, answer.envelopeJson, answer.digest, this.now().toISOString());
+      const event = this.appendNativeScopedEvent(sessionId, requestId, kind, payload);
+      this.db.exec("COMMIT"); return event;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   createNativeStructuredAnswer(params: {
@@ -2533,7 +2598,7 @@ function rowToSession(row: Record<string, unknown>): SessionRow {
 
 function rowToNativeSession(row: Record<string, unknown>): NativeSessionRow {
   return {
-    ...(row["transport"] === "conversation" ? { transport: "conversation" as const } : {}),
+    ...(row["transport"] === "conversation" || row["transport"] === "scoped-events" ? { transport: row["transport"] as "conversation" | "scoped-events" } : {}),
     id: str(row, "id"), purpose: str(row, "purpose") as NativeSessionPurpose,
     vendor: str(row, "vendor") as NativeSessionVendor, agent: str(row, "agent"), entryVerb: strOrNull(row, "entry_verb"),
     scopeKind: str(row, "scope_kind") as NativeSessionScopeKind, scopeId: str(row, "scope_id"),
