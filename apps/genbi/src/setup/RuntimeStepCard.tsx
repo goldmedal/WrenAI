@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Alert, AutoComplete, Button, Input, Segmented, Space } from 'antd';
+import { Alert, AutoComplete, Button, Collapse, Input, Segmented, Space } from 'antd';
+import { ExecutionLimitsEditor } from '@/harness/ExecutionLimitsEditor';
 import { Panel } from '@/ui';
 import { t } from '@/i18n/strings';
 import { getGatewayModelCatalog } from '@/bff/client';
@@ -264,6 +265,13 @@ export function RuntimeStepCard() {
             })}
           </Space>
         </div>
+
+        <Collapse
+          items={[{ key: 'limits', label: t('setup.advancedLimitsTitle'), children: <>
+            <div style={{ marginBottom: 8, color: 'rgba(0,0,0,0.45)' }}>{t('setup.advancedLimitsNote')}</div>
+            <ExecutionLimitsEditor />
+          </> }]}
+        />
 
         {runtimeSettingsError && <Alert type="error" showIcon message={t('setup.runtimeSaveErrorTitle')} description={runtimeSettingsError} />}
         <Button type="primary" disabled={saveDisabled} onClick={saveRuntimeSettings}>{runtimeSettingsSaving ? t('setup.savingRuntime') : t('setup.saveRuntime')}</Button>

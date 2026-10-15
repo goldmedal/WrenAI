@@ -695,4 +695,10 @@ describe("buildHarnessDto — runtime.limits", () => {
     });
     expect(dto.runtime.limits).toEqual({ componentTimeoutMs: 300_000, componentTimeoutSource: "env" });
   });
+
+  it("prefers the live value the limits resolver supplies, including an operator override", () => {
+    const dto = buildHarnessDto(bundle, new Store(":memory:"), BASE_ROUTE_OPTIONS, "analysis", undefined, undefined, undefined,
+      { componentTimeoutMs: 480_000, componentTimeoutSource: "operator" });
+    expect(dto.runtime.limits).toEqual({ componentTimeoutMs: 480_000, componentTimeoutSource: "operator" });
+  });
 });

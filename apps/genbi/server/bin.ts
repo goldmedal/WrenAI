@@ -91,6 +91,14 @@ import { shutdownNativeResources } from "./native-shutdown.js";
  *                               its source are reported on GET /api/harness (runtime.limits) and in
  *                               the boot log. Raise it for hosted reasoning models, whose sequential
  *                               calls do not fit in 120 s (see server/execution-limits.ts).
+ *                               An operator may raise it further from the Harness page
+ *                               (PUT /api/config/limits), up to the ceiling below; that override
+ *                               is stored under its own config key and revokes no session.
+ *   WREN_HARNESS_MAX_COMPONENT_TIMEOUT_MS
+ *                               the ceiling for an operator override, same range and validation as
+ *                               above; default 1800000. Must not be below
+ *                               WREN_HARNESS_COMPONENT_TIMEOUT_MS. On a `hosted` deployment,
+ *                               operator overrides stay disabled until this is set explicitly.
  *   WREN_HARNESS_SETUP_MAX_TURNS  agentic setup only: caps the agent loop per setup turn,
  *                               forwarded as "warble-agent-sdk chat --max-turns". Defaults to
  *                               DEFAULT_SETUP_MAX_TURNS (120) — well above the dispatcher's own
@@ -153,8 +161,9 @@ import {
   resolveDeployment,
 } from "../harness/cli-args.js";
 import type { CliFlags } from "../harness/cli-args.js";
-import { describeExecutionLimits, resolveExecutionLimits } from "./execution-limits.js";
-import type { ExecutionLimits } from "./execution-limits.js";
+import { describeExecutionLimitsConfig, effectiveExecutionLimits, resolveExecutionLimitsConfig } from "./execution-limits.js";
+import type { ExecutionLimitsConfig } from "./execution-limits.js";
+import type { Deployment } from "../harness/compliance/index.js";
 import { createApp } from "./app.js";
 import { recoverBootstrapProjectBinding } from "./bootstrap-project-binding.js";
 import { createHarnessProfileSources } from "./harness-profile-sources.js";
@@ -219,10 +228,12 @@ function isLoopbackHost(host: string): boolean {
 
 async function main(): Promise<void> {
   let flags: CliFlags;
-  let executionLimits: ExecutionLimits;
+  let deployment: Deployment;
+  let executionLimits: ExecutionLimitsConfig;
   try {
     flags = envFlags();
-    executionLimits = resolveExecutionLimits(process.env);
+    deployment = resolveDeployment(flags);
+    executionLimits = resolveExecutionLimitsConfig(process.env, deployment);
   } catch (error) {
     // A misconfigured env var is a deployer mistake: name it and stop, instead of a stack trace.
     if (!(error instanceof CliUsageError)) throw error;
@@ -230,7 +241,7 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  process.stdout.write(`${describeExecutionLimits(executionLimits)}\n`);
+  process.stdout.write(`${describeExecutionLimitsConfig(executionLimits)}\n`);
   const port = Number.parseInt(process.env["PORT"] ?? "4787", 10);
   const host = process.env["GENBI_HOST"]?.trim() || "127.0.0.1";
   const workspaceRoot = process.env["WREN_HARNESS_WORKSPACE_ROOT"];
@@ -308,7 +319,6 @@ async function main(): Promise<void> {
   const harnessProfileSources = createHarnessProfileSources(profileSource);
   const loginProbe = createDefaultLoginProbe();
   const authChoice = await resolveAuthChoice(flags, loginProbe);
-  const deployment = resolveDeployment(flags);
 
   const { warnings } = enforceCompliance(authChoice, { deployment });
   for (const warning of warnings) process.stderr.write(`warning: ${warning}\n`);
@@ -357,8 +367,8 @@ async function main(): Promise<void> {
     ...(tierBinding !== undefined ? { tierBinding } : {}),
     ...(flags.modelsConfig !== undefined ? { modelsConfig: flags.modelsConfig } : {}),
     ...(flags.chatTimeoutMs !== undefined ? { chatTimeoutMs: flags.chatTimeoutMs } : {}),
-    // Only set when the deployer overrode it; `buildRuntime` reads absence as "built-in default".
-    ...(executionLimits.componentTimeoutSource === "env" ? { componentLimits: executionLimits.componentLimits } : {}),
+    // The deployer's value; `effectiveRouteOptions` layers the operator override on top per turn.
+    ...(executionLimits.deployer.componentTimeoutSource === "env" ? { componentLimits: executionLimits.deployer.componentLimits } : {}),
     codexModels: getCodexModels,
     ...(process.env["WREN_HARNESS_CODEX_HOME"] !== undefined
       ? { codexHome: process.env["WREN_HARNESS_CODEX_HOME"] }
@@ -657,16 +667,18 @@ async function main(): Promise<void> {
   };
   // This is the sole production composition of the Phase-1 policy. Browser
   // requests never reach this selection or its executable/policy inputs.
+  // Read at admission time so an operator override from the Harness page applies to the next session.
+  const getComponentLimits = () => effectiveExecutionLimits(executionLimits, store.getExecutionLimitSettings()).componentLimits;
   const codexConfiguration = readCodexBootConfiguration(process.env);
   const codexComposition = createCodexRuntimeComposition({ configuration: codexConfiguration, packageRoot,
     producerBinary: producerExecutable?.executable ?? "", profileSource: harnessProfileSources.analysis, store,
     getBinding: currentInteractiveBinding, sourceWrenHome: nativeSourceWrenHome, artifacts: nativeArtifacts,
-    componentLimits: executionLimits.componentLimits });
+    getComponentLimits });
   const openshellComposition = await createOpenShellRuntimeComposition({ env: process.env, store, stateRoot: nativeMaterializationState.root, currentProject: getUserProject });
   const openshellProvisioner = createOpenShellStructuredProvisioner({
     composition: openshellComposition, store, producerBinary: producerExecutable?.executable ?? "", wrenBinary: nativeWrenExecutable?.executable ?? "",
     profileSource, hostHome: nativeHome, sourceWrenHome: nativeSourceWrenHome, getBinding: currentInteractiveBinding,
-    componentLimits: executionLimits.componentLimits,
+    getComponentLimits,
     assertConfigurationCurrent() { if (!openshellComposition.claudeBoot) throw new Error("OpenShell model configuration unavailable"); openshellComposition.claudeBoot.assertCurrent(); },
     modelsFor(settings) {
       const boot = openshellComposition.claudeBoot;
@@ -688,7 +700,7 @@ async function main(): Promise<void> {
     ...(openShellNative ? { openShellNative } : {}),
     store,
     terminalManager,
-    componentLimits: executionLimits.componentLimits,
+    getComponentLimits,
     getBinding: currentInteractiveBinding,
     workspaceRoot,
     materializationState: nativeMaterializationState,
@@ -786,6 +798,7 @@ async function main(): Promise<void> {
     unbindProject,
     getAuthChoice,
     setAuthChoice,
+    executionLimits,
     loginProbe,
     listSubscriptionModels,
     ...(setupRunner !== undefined ? { setupRunner } : {}),

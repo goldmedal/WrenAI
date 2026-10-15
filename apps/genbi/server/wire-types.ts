@@ -707,8 +707,38 @@ export type HarnessRuntimeBackend = "subscription" | "api-key" | "local" | "gate
  */
 export type HarnessRuntimeDispatcher = "claude-agent-sdk" | "codex-local" | "in-process";
 
-/** Where an execution limit's effective value came from. An operator-editable layer is a later ticket. */
-export type HarnessLimitSource = "default" | "env";
+/** Where an execution limit's effective value came from: built-in, the deployer's env, or an operator override. */
+export type HarnessLimitSource = "default" | "env" | "operator";
+
+/** The operator's saved override, stored under its own config key (`execution.limits`), never inside `RuntimeSettings`. */
+export interface OperatorExecutionLimits {
+  readonly componentTimeoutMs: number;
+}
+
+/**
+ * `GET/PUT /api/config/limits`. Saving here never touches `runtime.settings`, so it bumps no
+ * runtime generation and revokes no native session, structured runtime or interactive terminal.
+ */
+export interface ExecutionLimitsDto {
+  /** The budget in force for the next component run, in milliseconds. */
+  readonly componentTimeoutMs: number;
+  readonly componentTimeoutSource: HarnessLimitSource;
+  /** The deployer's value (env or built-in), which clearing the override returns to. */
+  readonly deployerTimeoutMs: number;
+  /** Inclusive bounds an operator value must satisfy; the ceiling may be lowered by the deployer. */
+  readonly ceilingMs: number;
+  readonly minMs: number;
+  /** False on a hosted deployment without an explicit ceiling; `editableReason` says why. */
+  readonly editable: boolean;
+  readonly editableReason?: string;
+  /** The saved override, even when it is not in force (stale after the ceiling moved). */
+  readonly operatorTimeoutMs?: number;
+}
+
+/** `PUT /api/config/limits` body: a value to save, or `null` to clear the override. */
+export interface ExecutionLimitsPutRequest {
+  readonly componentTimeoutMs: number | null;
+}
 
 /** The execution budget the BFF enforces, read-only, so a timeout is diagnosable from the Harness page. */
 export interface HarnessRuntimeLimits {

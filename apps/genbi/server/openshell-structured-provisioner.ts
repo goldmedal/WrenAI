@@ -27,6 +27,8 @@ type Composition = Pick<Awaited<ReturnType<typeof createOpenShellRuntimeComposit
 type ModelScope = Parameters<Composition["claudeProvider"]>[0]["scope"];
 interface Options {
   readonly componentLimits?: ComponentLimits;
+  /** Live resolver (deployer env plus operator override), read per provisioning; wins over `componentLimits`. */
+  readonly getComponentLimits?: () => ComponentLimits;
   readonly diagnostics?: StructuredDiagnosticObserver;
   readonly composition: Composition;
   readonly store: Store;
@@ -45,7 +47,10 @@ const unavailable = () => new StructuredRuntimeError("unavailable");
 /** The same governed native component host, without an outer vendor orchestration session. */
 export function createOpenShellStructuredProvisioner(options: Options): OpenShellStructuredProvisioner {
   const composition = options.composition;
-  const componentLimits = options.componentLimits ? Object.freeze({ ...options.componentLimits }) : undefined;
+  const resolveComponentLimits = () => {
+    const limits = options.getComponentLimits?.() ?? options.componentLimits;
+    return limits ? Object.freeze({ ...limits }) : undefined;
+  };
   const checkConfiguration = () => {
     options.assertConfigurationCurrent();
     const status = composition.claudeVault?.status();
@@ -128,6 +133,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       const vendor: NativeComponentVendor = { vendor: "claude", authIdentity: status.fingerprint!, generation: status.generation!,
         accountEmail: observeStructured(options.diagnostics, "vendor_identity", () => composition.claudeVault!.verifiedIdentity().email), models, assertCurrent: check, openStep,
         open(model, parent, tier) { const selected = tier ?? Object.keys(models).find(key => models[key] === model); if (!selected) throw unavailable(); return openStep(model, selected, parent); } };
+      const componentLimits = resolveComponentLimits();
       const prepared = await observeStructuredAsync(options.diagnostics, "context_capture", () => { assertExecutableCurrent(); return prepareCapturedStructuredAskHost(irDocument, { binding: identity.binding, entry: { kind: "agent", verb: "answer_query", prompt: input.options.question } }, {
         identity, currentIdentity: () => { check(); return identity; }, assertCurrent: check,
         verifierBinary: producer.executable, contextLoaderBinary: loader.executable, wrenBinary: wren.executable, project: binding.path, signal, assertExecutableCurrent,

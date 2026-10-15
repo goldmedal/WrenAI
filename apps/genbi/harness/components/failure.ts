@@ -15,9 +15,13 @@ const FAILURE_MESSAGES: Readonly<Record<ComponentFailureCode, string>> = {
 export function componentFailureMessage(code: ComponentFailureCode): string {
   return `${FAILURE_MESSAGES[code]} (${code}).`;
 }
-/** The code a message built by {@link componentFailureMessage} names, else undefined. */
+/**
+ * The code a message built by {@link componentFailureMessage} names, else undefined. The host may
+ * append detail between the generic text and the `(code).` suffix (a cancelled run's budget), so
+ * the match is on the generic prefix and the suffix, not the whole string.
+ */
 export function componentFailureCodeOf(message: string): ComponentFailureCode | undefined {
   const found = /\((\w+)\)\.$/.exec(message)?.[1];
   const code = COMPONENT_FAILURE_CODES.find((candidate) => candidate === found);
-  return code !== undefined && componentFailureMessage(code) === message ? code : undefined;
+  return code !== undefined && message.startsWith(FAILURE_MESSAGES[code]) ? code : undefined;
 }

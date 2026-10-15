@@ -426,6 +426,8 @@ export interface NativeSessionServiceOptions {
   readonly irPaths: Readonly<Record<NativePurpose, string | undefined>>;
   /** The host's component run budget for native component admissions; unset means the built-in default. */
   readonly componentLimits?: ComponentLimits;
+  /** Live resolver (deployer env plus operator override), read when a session's admission is created; wins over `componentLimits`. */
+  readonly getComponentLimits?: () => ComponentLimits;
   /**
    * The IR a session actually dispatches from, compiled for the binding it is
    * about to run against.
@@ -2007,7 +2009,7 @@ export class NativeSessionService {
         };
         this.assertRuntimeDispatchable();
         this.componentAdmissions.set(id, new NativeComponentAdmission(plans, current, (root, plan, signal) => preparedComponents.host(root, plan, signal),
-          preparedComponents.componentLimits ?? this.options.componentLimits));
+          preparedComponents.componentLimits ?? this.options.getComponentLimits?.() ?? this.options.componentLimits));
       }
       let codexWrenHome: CodexWrenHome | undefined;
       // Hosted v5 entries route work through fixed MCP roots. Their outer Codex

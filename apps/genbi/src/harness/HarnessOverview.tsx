@@ -7,7 +7,9 @@ import { AgentProfilesTable } from './AgentProfilesTable';
 import { CapabilityResolutionTable } from './CapabilityResolutionTable';
 import { ComponentsTable } from './ComponentsTable';
 import { ConnectionHealthTag } from './ConnectionHealthTag';
+import { ExecutionLimitsEditor, limitSourceLabel } from './ExecutionLimitsEditor';
 import { GuardrailList } from './GuardrailList';
+import { useHarnessStore } from './useHarnessStore';
 import type { HarnessView, RuntimeDispatcherKind, TierModelBinding } from './types';
 import './harness.css';
 
@@ -28,6 +30,7 @@ const DISPATCHER_LABELS: Record<RuntimeDispatcherKind, string> = {
  */
 export function HarnessOverview({ harness }: HarnessOverviewProps) {
   const { purpose, profile, runtime, connection, components, agentProfiles, nativeSessions } = harness;
+  const loadHarness = useHarnessStore((s) => s.loadHarness);
   const executionTarget = purpose.targetLabel ?? t('harness.targetNotConfigured');
   const executionTargetLabel = purpose.executionKind === 'setup_runner'
     ? t('harness.setupRunnerTarget')
@@ -94,9 +97,10 @@ export function HarnessOverview({ harness }: HarnessOverviewProps) {
                 {runtime.limits !== undefined && (
                   <KVRow
                     label={t('harness.componentTimeout')}
-                    value={`${runtime.limits.componentTimeoutMs / 1000} s · ${runtime.limits.componentTimeoutSource === 'env' ? t('harness.limitSourceEnv') : t('harness.limitSourceDefault')}`}
+                    value={`${runtime.limits.componentTimeoutMs / 1000} s · ${limitSourceLabel(runtime.limits.componentTimeoutSource)}`}
                   />
                 )}
+                <ExecutionLimitsEditor onSaved={loadHarness} />
                 <DataTable<TierModelBinding>
                   rowKey="tier"
                   dataSource={runtime.tierModels}

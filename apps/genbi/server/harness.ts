@@ -421,14 +421,15 @@ export function assertHarnessBundlePurpose(bundle: Bundle, purpose: NativePurpos
   assertHarnessPurposeProfile(purpose, bundle.profile);
 }
 
-function buildRuntime(bundle: Bundle, baseRouteOptions: BaseRouteOptions, resolver: RealTierResolver): HarnessRuntime {
+function buildRuntime(bundle: Bundle, baseRouteOptions: BaseRouteOptions, resolver: RealTierResolver, liveLimits?: HarnessRuntimeLimits): HarnessRuntime {
   const { backend, label } = runtimeBackendAndLabel(baseRouteOptions.authChoice);
   const dispatcher = runtimeDispatcher(baseRouteOptions.authChoice);
   const tierModels: TierModelBinding[] = collectBundleTierNames(bundle).map((tier) => ({ tier, model: resolver.resolve(tier) }));
-  // `bin.ts` sets `componentLimits` only when the deployer overrode it, so absence means the default.
-  const limits: HarnessRuntimeLimits = baseRouteOptions.componentLimits
+  // The live value (deployer env plus any operator override) comes from `GET /api/config/limits`'s
+  // resolver; without it, `componentLimits` on the fixed route options means the deployer set it.
+  const limits: HarnessRuntimeLimits = liveLimits ?? (baseRouteOptions.componentLimits
     ? { componentTimeoutMs: baseRouteOptions.componentLimits.timeoutMs, componentTimeoutSource: "env" }
-    : { componentTimeoutMs: DEFAULT_COMPONENT_LIMITS.timeoutMs, componentTimeoutSource: "default" };
+    : { componentTimeoutMs: DEFAULT_COMPONENT_LIMITS.timeoutMs, componentTimeoutSource: "default" });
   return { backend, label, dispatcher, tierModels, limits };
 }
 
@@ -508,13 +509,13 @@ function buildHarnessPurpose(purpose: NativePurpose, baseRouteOptions: BaseRoute
   };
 }
 
-export function buildHarnessDto(bundle: Bundle, store: Store, baseRouteOptions: BaseRouteOptions, purpose: NativePurpose = "analysis", nativeReadiness?: NativeSessionReadiness, setupReadiness?: HarnessSetupReadiness, selectedProfile?: string): HarnessDto {
+export function buildHarnessDto(bundle: Bundle, store: Store, baseRouteOptions: BaseRouteOptions, purpose: NativePurpose = "analysis", nativeReadiness?: NativeSessionReadiness, setupReadiness?: HarnessSetupReadiness, selectedProfile?: string, limits?: HarnessRuntimeLimits): HarnessDto {
   const resolver = buildRealTierResolver(baseRouteOptions, store);
   const purposeInfo = buildHarnessPurpose(purpose, baseRouteOptions, nativeReadiness, setupReadiness, selectedProfile);
   return {
     purpose: purposeInfo,
     profile: buildProfile(bundle, baseRouteOptions, store, purpose),
-    runtime: buildRuntime(bundle, baseRouteOptions, resolver),
+    runtime: buildRuntime(bundle, baseRouteOptions, resolver, limits),
     connection: buildConnection(baseRouteOptions, store, purpose),
     components: bundle.agents.map((agent) => buildComponent(agent, resolver, bundle.target, purposeInfo)),
     nativeSessions: {
