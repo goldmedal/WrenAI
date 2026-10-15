@@ -3,6 +3,7 @@ export async function installedClaudeTransportFixture(packageRoot) {
   const assert = (await import('node:assert/strict')).default;
   const fs = await import('node:fs'); const os = await import('node:os'); const path = await import('node:path');
   const { pathToFileURL } = await import('node:url');
+  packageRoot = fs.realpathSync(packageRoot);
   const module = name => import(pathToFileURL(path.join(packageRoot, 'dist-server/server', name + '.js')).href);
   const { ClaudeAccountVault } = await module('runtime-host/claude-account-vault');
   const { attestOpenShellSdk } = await module('runtime-host/openshell-sdk-assets');
@@ -11,7 +12,7 @@ export async function installedClaudeTransportFixture(packageRoot) {
   const { runClaudeComponentStep } = await module('runtime-host/claude-component-step');
   const { createOpenShellRuntimeCompositionForTesting } = await module('openshell-runtime-composition');
   const { Store } = await module('db');
-  const sdkRoot = attestOpenShellSdk(); assert.ok(sdkRoot.startsWith(packageRoot));
+  const sdkRoot = attestOpenShellSdk(); assert.equal(fs.realpathSync(sdkRoot), path.join(fs.realpathSync(packageRoot), 'dist-server/runtime-assets/openshell-sdk'));
   const require = (await import('node:module')).createRequire(path.join(packageRoot, 'package.json'));
   const direct = require.resolve('@anthropic-ai/claude-agent-sdk'); assert.ok(direct.includes('claude-agent-sdk'));
   const expected = { accountUuid:'11111111-1111-4111-8111-111111111111', organizationUuid:'22222222-2222-4222-8222-222222222222', email:'approved@example.test', subscription:'pro' };
