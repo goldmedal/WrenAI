@@ -15,7 +15,7 @@ export interface PiProviderConfig {
   readonly provider: string;
   /** Fixed non-secret label surfaced as the account label. */
   readonly displayLabel: string;
-  /** `sha256:` digest of the provider-profile file the operator imported. */
+  /** `sha256:` digest identifying the imported provider profile: the canonical form of the gateway's exported profile (see `canonicalGatewayProfileDigest`). */
   readonly profileDigest: string;
   /** Operator-owned credential generation token; bump it when the key is rotated. */
   readonly generation: string;

@@ -10,14 +10,25 @@ import type { RuntimeBackendId, RuntimeBackendProbeResult } from "./runtime-host
 import { DockerSnapshotDriver } from "./runtime-host/openshell-snapshot-driver.js";
 import { OpenShellProjectSnapshots, snapshotSourceAuthority } from "./runtime-host/openshell-project-snapshots.js";
 import { readOpenShellClaudeBoot, verifyRetainedOpenShellClaudeBoot } from "./runtime-host/openshell-claude-boot.js";
+import { readOpenShellPiBoot, piProviderConfig, type OpenShellModelVendor, type OpenShellPiBoot } from "./runtime-host/openshell-pi-boot.js";
+import { createPiGatewayVerifier, type PiGatewayVerifier } from "./runtime-host/openshell-pi-gateway.js";
+import { createOpenShellPiProvider, type PiProviderOptions } from "./runtime-host/openshell-pi-provider.js";
 import { snapshotHash } from "./runtime-host/openshell-snapshot-driver.js";
 import { openOpenShellWrenAccess } from "./runtime-host/openshell-wren-access.js";
 import { OpenShellError } from "./runtime-host/openshell-types.js";
-import type { RuntimeSelection } from "./runtime-selection.js";
+import { isBackendOffered, type RuntimeSelection } from "./runtime-selection.js";
 
-/** BFF-owned lifecycle seam. Deliberately supplies no model operation or browser command API. */
-export async function createOpenShellRuntimeComposition(options: { env: NodeJS.ProcessEnv; selection: RuntimeSelection; store: Store; stateRoot: string; driver?: OpenShellDriver; currentProject?: () => string | undefined; currentContext?: () => string | undefined; claude?: { vaultRoot: string; duplex(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex> } }) {
+/** Outcome of the boot-time gateway proof; only a pi boot has one. */
+export type PiBootVerification = { readonly ok: boolean; readonly code?: string } | undefined;
+/** A pi boot's protected descriptor and the read-only gateway verification bound to it. */
+export interface OpenShellPiRuntime { readonly boot: OpenShellPiBoot; readonly verifyGateway: PiGatewayVerifier }
+
+/** BFF-owned lifecycle seam. Deliberately supplies no model operation or browser command API. The selection names the one model backend this boot serves. */
+export async function createOpenShellRuntimeComposition(options: { env: NodeJS.ProcessEnv; selection: RuntimeSelection; store: Store; stateRoot: string; driver?: OpenShellDriver; currentProject?: () => string | undefined; currentContext?: () => string | undefined; claude?: { vaultRoot: string; duplex(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex> };
+  /** Trusted host test seam; no environment, browser or API chooses it. */
+  pi?: OpenShellPiRuntime }) {
   const config = readOpenShellConfiguration(options.env, options.selection);
+  if (options.selection.runtime === "openshell" && isBackendOffered(options.selection, "pi")) return composePi(options, config);
   const boot = !options.claude && config.configuration && config.selected ? readOpenShellClaudeBoot(options.env, options.selection) : undefined;
   const claude = options.claude ?? (boot ? { vaultRoot: boot.descriptor.vaultRoot, duplex: boot.duplex } : undefined);
   const vault = claude ? new ClaudeAccountVault({ root: claude.vaultRoot }) : undefined;
@@ -26,7 +37,29 @@ export async function createOpenShellRuntimeComposition(options: { env: NodeJS.P
     try { await verifyRetainedOpenShellClaudeBoot(vault, boot); }
     catch { /* Exact opt-in failure remains fenced/unready; never report private diagnostics. */ }
   }
-  return { ...composition, claudeBoot: boot };
+  return { ...composition, claudeBoot: boot, bootVerification: undefined as PiBootVerification };
+}
+
+/** A pi boot reads only the pi descriptor; no Claude descriptor, vault or SDK session is opened. */
+async function composePi(options: CompositionOptions, config: ReturnType<typeof readOpenShellConfiguration>) {
+  const driverConfiguration = config.configuration;
+  // The driver is single-vendor: a pi boot needs the pi block and no Claude model block, or `modelIdentity` would name the wrong image.
+  const usable = !!driverConfiguration?.pi && !driverConfiguration.model;
+  const runtime: OpenShellPiRuntime | undefined = !usable ? undefined : options.pi ?? (() => {
+    const boot = readOpenShellPiBoot(options.env, options.selection);
+    if (!boot || boot.descriptor.provider !== driverConfiguration!.pi!.provider) return undefined;
+    return { boot, verifyGateway: createPiGatewayVerifier({ configuration: driverConfiguration!, descriptor: boot.descriptor }) };
+  })();
+  const composition = await compose({ ...options, env: usable ? options.env : { ...options.env, GENBI_OPENSHELL_CONFIG: "" } }, undefined, undefined, { vendor: "pi", ...(runtime ? { pi: runtime } : {}) });
+  let bootVerification: PiBootVerification = { ok: false, code: "openshell_configuration_invalid" };
+  if (runtime) {
+    try { await runtime.verifyGateway(); bootVerification = { ok: true }; }
+    catch (error) {
+      bootVerification = { ok: false, code: error instanceof OpenShellError ? error.code : "openshell_configuration_invalid" };
+      process.stderr.write(`warning: pi OpenShell gateway verification failed at boot (${bootVerification.code})\n`);
+    }
+  }
+  return { ...composition, claudeBoot: undefined, bootVerification };
 }
 
 type CompositionOptions = Parameters<typeof createOpenShellRuntimeComposition>[0];
@@ -34,8 +67,11 @@ type CompositionOptions = Parameters<typeof createOpenShellRuntimeComposition>[0
 export async function createOpenShellRuntimeCompositionForTesting(options: Omit<CompositionOptions, "claude"> & { claude: { vault: ClaudeAccountVault; sdkQueryForTesting?: import("./runtime-host/claude-component-step.js").ClaudeComponentRuntime["query"]; duplex: NonNullable<CompositionOptions["claude"]>["duplex"] } }) {
   return compose(options, options.claude.vault, options.claude.sdkQueryForTesting);
 }
-async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: { duplex: NonNullable<CompositionOptions["claude"]>["duplex"] } }, vault: ClaudeAccountVault | undefined, sdkQueryForTesting?: import("./runtime-host/claude-component-step.js").ClaudeComponentRuntime["query"]) {
+async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: { duplex: NonNullable<CompositionOptions["claude"]>["duplex"] } }, vault: ClaudeAccountVault | undefined, sdkQueryForTesting?: import("./runtime-host/claude-component-step.js").ClaudeComponentRuntime["query"],
+  model: { readonly vendor: OpenShellModelVendor; readonly pi?: OpenShellPiRuntime } = { vendor: "claude" }) {
   const configuration = readOpenShellConfiguration(options.env, options.selection);
+  const pi = model.pi;
+  const duplex = options.claude?.duplex ?? pi?.boot.duplex;
   let lifecycle: OpenShellLifecycle | undefined;
   let snapshots: OpenShellProjectSnapshots | undefined;
   let runtimeEpoch = 0;
@@ -43,7 +79,7 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
   const approvalKey = (scope: import("./runtime-host/openshell-types.js").OpenShellIdentity) => JSON.stringify([scope.session, "turn" in scope ? scope.turn : null, scope.binding, scope.bindingGeneration, scope.bindingRevision, scope.context, scope.plan]);
   if (configuration.configuration) {
     const config = configuration.configuration;
-    const driver = options.driver ?? new OpenShellCliDriver(config, (intent) => { if (!snapshots) throw new Error("Snapshot authority unavailable"); return snapshots.mount(intent); }, options.claude?.duplex);
+    const driver = options.driver ?? new OpenShellCliDriver(config, (intent) => { if (!snapshots) throw new Error("Snapshot authority unavailable"); return snapshots.mount(intent); }, duplex);
     lifecycle = new OpenShellLifecycle({ driver, journal: options.store,
       stateRoot: options.stateRoot, exclusive: configuration.configuration.exclusive });
     if (config.snapshotCapture && config.dataPolicy && config.dataPolicyDigest) {
@@ -53,12 +89,12 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
     }
     try { await lifecycle.initialize(); } catch { /* startup ownership uncertainty remains unavailable */ }
   }
-  const probe = (): Promise<RuntimeBackendProbeResult<"openshell">> => lifecycle?.probe() ?? Promise.resolve({
+  const probe = (): Promise<RuntimeBackendProbeResult<"openshell">> => (model.vendor === "claude" || pi) && lifecycle ? lifecycle.probe() : Promise.resolve({
     readiness: runtimeNotReady("openshell", "unprovisioned", "openshell_configuration_invalid"), diagnostic: { phase: "provisioning" },
   });
-  const adapter: StructuredAdapter = { vendor: "claude", backend: "openshell", probe: async () => (await probe()).readiness };
-  return { selected: configuration.selected, lifecycle, snapshots, adapter, probe,
-    dataWorkerAvailable: !!(configuration.configuration?.dataWorker && snapshots && options.claude),
+  const adapter: StructuredAdapter = { vendor: model.vendor, backend: "openshell", probe: async () => (await probe()).readiness };
+  return { selected: configuration.selected, modelVendor: model.vendor, piBoot: pi?.boot, verifyPiGateway: pi?.verifyGateway, lifecycle, snapshots, adapter, probe,
+    dataWorkerAvailable: !!(configuration.configuration?.dataWorker && snapshots && (options.claude || pi)),
     /** Explicit protected operator call, never an HTTP/browser enrollment route. */
     claudeVault: vault,
     /** Host-captured component preparation alone calls this; no browser tool exposes it. */
@@ -99,6 +135,13 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
       const assertCurrent = () => { if (epoch !== runtimeEpoch) throw new OpenShellError("openshell_scope_invalid"); input.assertCurrent(); };
       const guarded = { ...input, assertCurrent, lifecycle, vault: vault! };
       return sdkQueryForTesting ? createOpenShellClaudeProviderForTesting(guarded, sdkQueryForTesting) : createOpenShellClaudeProvider(guarded);
+    },
+    /** Host-captured pi step provider; the operator-provisioned provider and profile are only named here, never created. */
+    piProvider: (input: Omit<PiProviderOptions, "lifecycle" | "config">) => {
+      if (!lifecycle || !pi) throw new Error("OpenShell pi unavailable");
+      const epoch = runtimeEpoch;
+      const assertCurrent = () => { if (epoch !== runtimeEpoch) throw new OpenShellError("openshell_scope_invalid"); input.assertCurrent(); };
+      return createOpenShellPiProvider({ ...input, assertCurrent, lifecycle, config: piProviderConfig(pi.boot.descriptor) });
     },
     /** Ordinary runtime/binding changes fence owned work without deleting retained login. */
     revokeRuntime: () => { runtimeEpoch++; lifecycle?.revoke(); },

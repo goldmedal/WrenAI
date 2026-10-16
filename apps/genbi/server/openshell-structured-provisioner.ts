@@ -14,7 +14,7 @@ import { prepareCapturedStructuredAskHost } from "./native-component-context.js"
 import type { createOpenShellRuntimeComposition } from "./openshell-runtime-composition.js";
 import type { OpenShellStructuredProvisioner } from "./openshell-structured-ask.js";
 import { assertNativeExecutableIdentity, attestNativeExecutable } from "./native-runtime-spec.js";
-import { assertRuntimeSettingsDispatchable, collectIrTierNames, effectiveTierModel, validateRuntimeTierBindings, writeClaudeModelsConfig } from "./runtime-binding.js";
+import { assertRuntimeSettingsDispatchable, collectIrTierNames, effectiveTierModel, PI_BOOT_AUTH_MODE, resolvePiTierModels, RuntimeBindingError, validatePiRuntimeBindings, validateRuntimeTierBindings, writeClaudeModelsConfig } from "./runtime-binding.js";
 import { produceComponentHostPlan } from "./runtime-host/component-host-plan.js";
 import { runtimeNotReady } from "./runtime-host/policy.js";
 import type { RuntimeSettings } from "./wire-types.js";
@@ -22,9 +22,17 @@ import { StructuredRuntimeError } from "./structured-runtime.js";
 import { createStructuredQueryFailureTracker, observeStructuredQueryAccess } from "./structured-error-feedback.js";
 import { isClaudeQueryAbort } from "./runtime-host/claude-component-step.js";
 import { launchOpenShellModelSession } from "./runtime-host/openshell-model-session.js";
+import { isPiQueryAbort, type PiComponentRuntime } from "./runtime-host/pi-component-step.js";
+import { piAccountLabel } from "./runtime-host/openshell-pi-provider.js";
+import { piProviderConfig, type OpenShellModelVendor } from "./runtime-host/openshell-pi-boot.js";
+import { OpenShellError } from "./runtime-host/openshell-types.js";
 
-type Composition = Pick<Awaited<ReturnType<typeof createOpenShellRuntimeComposition>>, "lifecycle" | "claudeVault" | "claudeProvider" | "probe" | "bindDataContext" | "dataWorkerAvailable">;
+type FullComposition = Awaited<ReturnType<typeof createOpenShellRuntimeComposition>>;
+type Composition = Pick<FullComposition, "lifecycle" | "claudeVault" | "claudeProvider" | "probe" | "bindDataContext" | "dataWorkerAvailable">
+  & Partial<Pick<FullComposition, "piProvider" | "piBoot" | "verifyPiGateway">> & { readonly modelVendor?: OpenShellModelVendor };
 type ModelScope = Parameters<Composition["claudeProvider"]>[0]["scope"];
+/** Gateway objects are re-verified on this cadence while a pi run is active; a change cancels the run as stale. */
+const PI_GATEWAY_POLL_MS = 2000;
 interface Options {
   readonly componentLimits?: ComponentLimits;
   /** Live resolver (deployer env plus operator override), read per provisioning; wins over `componentLimits`. */
@@ -41,6 +49,8 @@ interface Options {
   /** Captured server runtime aliases resolve through explicit protected host pins. */
   modelsFor(settings: RuntimeSettings): Readonly<Record<string, string>>;
   assertConfigurationCurrent(): void;
+  /** Cadence of the read-only gateway proof while a pi run is active; production uses the default. */
+  readonly gatewayPollMs?: number;
 }
 const unavailable = () => new StructuredRuntimeError("unavailable");
 
@@ -51,15 +61,56 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
     const limits = options.getComponentLimits?.() ?? options.componentLimits;
     return limits ? Object.freeze({ ...limits }) : undefined;
   };
+  const pi = composition.modelVendor === "pi";
+  /** The single model vendor this boot serves: its identity, as the provider and the scope see it. */
+  const currentStatus = (): { readonly state?: string; readonly fingerprint?: string; readonly generation?: string } | undefined =>
+    pi ? (composition.piBoot ? { state: "verified", fingerprint: composition.piBoot.account, generation: composition.piBoot.descriptor.generation } : undefined) : composition.claudeVault?.status();
+  /** Host-pinned model id per tier; a mismatch is `unsupported` before any sandbox exists. */
+  const piModels = (settings: RuntimeSettings) => {
+    try { return resolvePiTierModels(settings, composition.piBoot!.descriptor.models); }
+    catch (error) { throw error instanceof RuntimeBindingError ? new StructuredRuntimeError("unsupported") : error; }
+  };
+  const modelsFor = (settings: RuntimeSettings) => pi ? piModels(settings) : options.modelsFor(settings);
+  const checkPiConfiguration = () => {
+    const boot = composition.piBoot;
+    if (!boot || !composition.piProvider || !composition.lifecycle?.modelIdentity) throw unavailable();
+    const settings = options.store.getRuntimeSettings();
+    if (!options.store.hasExplicitRuntimeSettings() || settings.hybrid || settings.authMode !== PI_BOOT_AUTH_MODE[boot.descriptor.auth]) throw unavailable();
+    modelsFor(settings);
+    if (!options.getBinding() || !composition.dataWorkerAvailable) throw unavailable();
+    return { state: "verified", fingerprint: boot.account, generation: boot.descriptor.generation };
+  };
+  /** Read-only gateway proof (provider, profile, endpoint, binary, credential name); a mismatch is stale, never a fallback. */
+  const verifyGateway = async (signal?: AbortSignal) => {
+    if (!composition.verifyPiGateway) throw unavailable();
+    try { await composition.verifyPiGateway(signal); }
+    catch (error) { if (signal?.aborted) throw new StructuredRuntimeError("cancelled"); throw error instanceof OpenShellError ? error : unavailable(); }
+  };
+  /** The same proof at a run boundary: a mismatch revokes the Ask as stale, a cancellation stays a cancellation. */
+  const assertGatewayCurrent = async (signal: AbortSignal) => {
+    try { await verifyGateway(signal); }
+    catch (error) { throw error instanceof StructuredRuntimeError ? error : new StructuredRuntimeError("stale"); }
+  };
   const checkConfiguration = () => {
     options.assertConfigurationCurrent();
+    if (pi) return checkPiConfiguration();
     const status = composition.claudeVault?.status();
     if (status?.state !== "verified" || !status.fingerprint || !status.generation || !composition.lifecycle?.modelIdentity) throw unavailable();
     const settings = options.store.getRuntimeSettings();
     if (!options.store.hasExplicitRuntimeSettings() || settings.authMode !== "subscription" || settings.subscriptionProvider !== "claude" || settings.hybrid) throw unavailable();
-    assertRuntimeSettingsDispatchable(settings); options.modelsFor(settings);
+    assertRuntimeSettingsDispatchable(settings); modelsFor(settings);
     if (!options.getBinding() || !composition.dataWorkerAvailable) throw unavailable();
     return status;
+  };
+  /** Poll the read-only gateway proof while a run is active; a failure that is not a cancellation revokes it at once. */
+  const watchGateway = (signal: AbortSignal, onFault: () => void) => {
+    let stopped = false, running = false;
+    const timer = setInterval(() => {
+      if (running || stopped || signal.aborted) return;
+      running = true;
+      verifyGateway(signal).catch(() => { if (!stopped && !signal.aborted) onFault(); }).finally(() => { running = false; });
+    }, options.gatewayPollMs ?? PI_GATEWAY_POLL_MS);
+    return { stop() { stopped = true; clearInterval(timer); } };
   };
   const provisioner: OpenShellStructuredProvisioner = {
     assertSessionCleaned(sessionId) {
@@ -73,22 +124,26 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         return await observeStructuredAsync(options.diagnostics, "runtime_readiness", async () => {
           observeStructured(options.diagnostics, "configuration", checkConfiguration);
           observeStructured(options.diagnostics, "executable_capture", () => { attestNativeExecutable("producer", options.producerBinary); attestNativeExecutable("wren", options.wrenBinary); resolveContextLoaderBinary(); });
+          if (pi) await verifyGateway();
           return (await composition.probe()).readiness;
         });
-      } catch { return runtimeNotReady("openshell", "unprovisioned", "openshell_configuration_invalid"); }
+      } catch (error) { return runtimeNotReady("openshell", "unprovisioned", pi && error instanceof OpenShellError ? error.code : "openshell_configuration_invalid"); }
     },
     async prepare(input) {
       if (!input.scope.signal || input.options.profileSource !== options.profileSource) throw unavailable();
       const signal = input.scope.signal;
       signal.throwIfAborted(); input.scope.assertCurrent();
       const status = observeStructured(options.diagnostics, "configuration", checkConfiguration);
+      if (pi) await assertGatewayCurrent(signal);
       const binding = structuredClone(options.getBinding()!);
       const settings = structuredClone(options.store.getRuntimeSettings());
       const runtimeGeneration = options.store.getNativeRuntimeBinding().generation;
-      const models = Object.freeze({ ...options.modelsFor(settings) });
+      const models = Object.freeze({ ...modelsFor(settings) });
       const sourceHome = options.sourceWrenHome();
       if (path.resolve(input.options.userProject) !== binding.path
-        || input.options.model !== undefined || input.options.modelsConfig !== writeClaudeModelsConfig(settings, settings.tierModels.map(tier => tier.tier))) throw new StructuredRuntimeError("unsupported");
+        || input.options.model !== undefined
+        || (pi ? input.options.modelsConfig !== undefined || input.options.tierBinding !== undefined || input.options.authChoice.mode !== composition.piBoot!.descriptor.auth
+          : input.options.modelsConfig !== writeClaudeModelsConfig(settings, settings.tierModels.map(tier => tier.tier)))) throw new StructuredRuntimeError("unsupported");
       const { producer, loader, wren, node } = observeStructured(options.diagnostics, "executable_capture", () => {
       const producer = attestNativeExecutable("producer", options.producerBinary);
       const loader = attestNativeExecutable("producer", resolveContextLoaderBinary());
@@ -96,7 +151,8 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       const node = attestNativeExecutable("node", process.execPath);
       return { producer, loader, wren, node };
       });
-      const identity = { session_id: input.scope.sessionId, vendor: "claude" as const, auth_identity: status.fingerprint!, runtime_generation: status.generation!,
+      let gatewayFault = false;
+      const identity = { session_id: input.scope.sessionId, vendor: (pi ? "pi" : "claude") as "claude" | "pi", auth_identity: status.fingerprint!, runtime_generation: status.generation!,
         binding: { project_identity: binding.identity, generation: String(binding.generation), revision: binding.revision } };
       const timing = structuredTimingForObserver(options.diagnostics);
       const check = () => {
@@ -104,9 +160,9 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         return measureStructuredTiming(timing, "currentness", () => observeStructured(options.diagnostics, "currentness", () => {
         signalAbortedAtCheck = signal.aborted;
         signal.throwIfAborted(); input.scope.assertCurrent(); options.assertConfigurationCurrent();
-        if (!isDeepStrictEqual(options.getBinding(), binding) || !isDeepStrictEqual(options.store.getRuntimeSettings(), settings)
+        if (gatewayFault || !isDeepStrictEqual(options.getBinding(), binding) || !isDeepStrictEqual(options.store.getRuntimeSettings(), settings)
           || options.store.getNativeRuntimeBinding().generation !== runtimeGeneration || sourceHome !== options.sourceWrenHome()
-          || !isDeepStrictEqual(composition.claudeVault?.status(), status) || !isDeepStrictEqual(options.modelsFor(settings), models)) throw new StructuredRuntimeError("stale");
+          || !isDeepStrictEqual(currentStatus(), status) || !isDeepStrictEqual(modelsFor(settings), models)) throw new StructuredRuntimeError("stale");
         }, () => signalAbortedAtCheck ? "scope_signal_aborted" : undefined));
       };
       /** Progress checks stay cheap; full executable hashes run only at execution/effect boundaries. */
@@ -116,13 +172,27 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       check();
       const irDocument = await observeStructuredAsync(options.diagnostics, "ir_tiers", async () => {
         const document = await readFile(compiled.irPath, "utf8");
-        validateRuntimeTierBindings(settings, collectIrTierNames(JSON.parse(document)));
+        const tiers = collectIrTierNames(JSON.parse(document));
+        if (!pi) validateRuntimeTierBindings(settings, tiers);
+        else {
+          try { validatePiRuntimeBindings(settings, tiers, composition.piBoot!.descriptor.models, composition.piBoot!.descriptor.auth); }
+          catch (error) { throw error instanceof RuntimeBindingError ? new StructuredRuntimeError("unsupported") : error; }
+        }
         return document;
       });
       check();
       let modelScope: ModelScope | undefined;
       let dataAccess: ReturnType<Composition["bindDataContext"]> | undefined;
       const queryFailure = createStructuredQueryFailureTracker();
+      const openPiStep = async (model: string, tier: string, parent: AbortSignal): Promise<PiComponentRuntime> => {
+        check(); parent.throwIfAborted();
+        if (!modelScope) throw unavailable();
+        const captured = modelScope;
+        // Every step sandbox is preceded by the read-only gateway proof; a changed provider or profile never reaches a launch.
+        await assertGatewayCurrent(parent); check();
+        const provider = observeStructured(options.diagnostics, "provider_setup", () => composition.piProvider!({ scope: captured, currentScope: () => { try { check(); return captured; } catch { return undefined; } }, models, assertCurrent: check, assertExecutableCurrent }));
+        return observeStructuredAsync(options.diagnostics, "provider_open", () => provider.openStep!(model, tier, parent));
+      };
       const openStep = async (model: string, tier: string, parent: AbortSignal) => {
         check(); parent.throwIfAborted();
         if (!modelScope) throw unavailable();
@@ -130,7 +200,11 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         const provider = observeStructured(options.diagnostics, "provider_setup", () => composition.claudeProvider({ ...(timing ? { timing } : {}), ...(input.modelSession ? { modelSession: input.modelSession } : {}), scope: captured, currentScope: () => { try { check(); return captured; } catch { return undefined; } }, models, assertCurrent: check, assertExecutableCurrent }));
         return observeStructuredAsync(options.diagnostics, "provider_open", () => provider.openStep!(model, tier, parent));
       };
-      const vendor: NativeComponentVendor = { vendor: "claude", authIdentity: status.fingerprint!, generation: status.generation!,
+      const vendor: NativeComponentVendor = pi
+        ? { vendor: "pi", authIdentity: status.fingerprint!, generation: status.generation!,
+          accountEmail: observeStructured(options.diagnostics, "vendor_identity", () => piAccountLabel(piProviderConfig(composition.piBoot!.descriptor))), models, assertCurrent: check, openStep: openPiStep,
+          open(model, parent, tier) { const selected = tier ?? Object.keys(models).find(key => models[key] === model); if (!selected) throw unavailable(); return openPiStep(model, selected, parent); } }
+        : { vendor: "claude", authIdentity: status.fingerprint!, generation: status.generation!,
         accountEmail: observeStructured(options.diagnostics, "vendor_identity", () => composition.claudeVault!.verifiedIdentity().email), models, assertCurrent: check, openStep,
         open(model, parent, tier) { const selected = tier ?? Object.keys(models).find(key => models[key] === model); if (!selected) throw unavailable(); return openStep(model, selected, parent); } };
       const componentLimits = resolveComponentLimits();
@@ -167,16 +241,23 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
           const host = await observeStructuredAsync(options.diagnostics, "broker_host", () => prepared.host(root, plan, signal));
           check(); runner = new ComponentRunner(plan, { ...host, async runStep(...args) {
             try { const response = await host.runStep(...args); queryFailure.providerReturned(response.failed === true); return response; }
-            catch (error) { if (isClaudeQueryAbort(error)) queryFailure.providerQueryAborted(); else queryFailure.providerRejected(); throw error; }
+            catch (error) { if ((pi ? isPiQueryAbort : isClaudeQueryAbort)(error)) queryFailure.providerQueryAborted(); else queryFailure.providerRejected(); throw error; }
           } }, componentLimits);
           const pending = runner.run(root, { request }, signal); active = pending;
-          try { const result = await pending; check(); const failure = queryFailure.terminalFailure(); if (result.status === "error" && result.code === "callee_failed" && failure && !runner.cleanupFailed) throw failure; return result; } finally { active = undefined; }
+          const watch = pi ? watchGateway(signal, () => { gatewayFault = true; runner?.cancel(); }) : undefined;
+          try {
+            let result: Awaited<typeof pending>;
+            try { result = await pending; } catch (error) { if (gatewayFault) throw new StructuredRuntimeError("stale"); throw error; }
+            check();
+            if (pi) { watch?.stop(); await assertGatewayCurrent(signal); check(); }
+            const failure = queryFailure.terminalFailure(); if (result.status === "error" && result.code === "callee_failed" && failure && !runner.cleanupFailed) throw failure; return result;
+          } finally { watch?.stop(); active = undefined; }
         },
         dispose() { return closing ??= (async () => { if (active) runner?.cancel(); await active?.catch(() => {}); if (runner?.cleanupFailed) throw new StructuredRuntimeError("cleanup"); })(); },
       };
     },
   };
-  provisioner.reserveSession = async input => {
+  if (!pi) provisioner.reserveSession = async input => {
     const signal = input.scope.signal;
     if (!signal || !composition.lifecycle?.modelIdentity) throw unavailable();
     const status = structuredClone(checkConfiguration()), binding = structuredClone(options.getBinding()!), settings = structuredClone(options.store.getRuntimeSettings());

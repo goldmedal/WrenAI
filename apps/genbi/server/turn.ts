@@ -18,7 +18,7 @@ import { storedStructuredFailure, structuredDataRefusal, structuredFailureFeedba
 import { effectiveExecutionLimits, withRunBudget } from "./execution-limits.js";
 import type { ExecutionLimitsConfig } from "./execution-limits.js";
 import type { AgentEvent, AuthChoice, Bundle, LoginProbe, RouteOptions, RouteResult, SetupStepRunner, SetupTerminalResult } from "../harness/index.js";
-import type { SubscriptionModelCatalog, SubscriptionProvider } from "./wire-types.js";
+import type { RuntimeSettings, SubscriptionModelCatalog, SubscriptionProvider } from "./wire-types.js";
 import {
   BUILD_CONTEXT_AGENT_ID,
   contextLifecycleIdentityFingerprint,
@@ -100,6 +100,8 @@ export class ArtifactNotFoundError extends Error {
 export interface TurnDeps {
   readonly store: Store;
   readonly structuredRuntime?: StructuredRuntime;
+  /** Present only for a pi OpenShell boot: validates a saved runtime against the protected descriptor instead of the in-process requirements. */
+  readonly piRuntime?: { validate(settings: RuntimeSettings, bundleTiers: readonly string[]): void };
   readonly route: (options: RouteOptions) => Promise<RouteResult>;
   /** A native vendor TUI host, deliberately independent from Ask/SSE. */
   readonly startInteractiveTerminal?: (input: { readonly target: InteractiveTarget; readonly binding: EnrichmentBinding }) => Promise<InteractiveTerminalSession>;
@@ -311,6 +313,9 @@ export function effectiveRouteOptions(
   const userProject = resolveUserProject(deps);
   if (userProject === undefined && !options?.allowUnbound) throw new ProjectNotBoundError();
   const authChoice = resolveAuthChoice(deps);
+  // A pi OpenShell boot keeps every vendor key out of this process: no key is read and no in-process
+  // tier binding is materialised, so the only route left for the Ask is the OpenShell adapter.
+  const keyIsolated = deps.structuredRuntime?.keyIsolated() === true && authChoice.mode !== "subscription";
   // The run budget is resolved live so an operator override applies to the next turn without a
   // restart; it is independent of the auth/runtime settings below.
   const limits = deps.executionLimits
@@ -338,7 +343,7 @@ export function effectiveRouteOptions(
     ...stableBaseRouteOptions,
     userProject: userProject ?? "",
     authChoice,
-    ...materializeRuntimeRouteOptions(settings, authChoice),
+    ...(keyIsolated ? {} : materializeRuntimeRouteOptions(settings, authChoice)),
     ...limits,
   };
 }

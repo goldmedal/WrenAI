@@ -4,7 +4,7 @@ import { effectiveRouteOptions } from "./turn.js";
 import { createCodexRuntimeComposition, readCodexBootConfiguration } from "./codex-runtime-composition.js";
 import { createCodexStructuredAdapter } from "./codex-structured-ask.js";
 import { createOpenShellRuntimeComposition, selectNativeRuntimeBackend } from "./openshell-runtime-composition.js";
-import { isBackendOffered, localTerminalAvailable, resolveRuntimeSelection, RuntimeSelectionError, type RuntimeSelection } from "./runtime-selection.js";
+import { inProcessAuthViaBackend, isBackendOffered, localTerminalAvailable, resolveRuntimeSelection, RuntimeSelectionError, type RuntimeSelection } from "./runtime-selection.js";
 import { createOpenShellStructuredAdapter } from "./openshell-structured-ask.js";
 import { createOpenShellStructuredProvisioner, resolveStructuredClaudeModels } from "./openshell-structured-provisioner.js";
 import { resolveOpenShellClaudeModel } from "./runtime-host/openshell-claude-boot.js";
@@ -195,6 +195,8 @@ import {
   compileUnboundProfileTierNames,
   effectiveTierModel,
   materializeRuntimeRouteOptions,
+  RuntimeBindingError,
+  validatePiRuntimeBindings,
 } from "./runtime-binding.js";
 import { invalidateBundleAgentIdsCache } from "./turn.js";
 import type { TurnDeps } from "./turn.js";
@@ -459,8 +461,11 @@ async function main(): Promise<void> {
   // Mutable auth-choice binding — the auth-choice mirror of boundProject above. Starts at the
   // boot-resolved `authChoice` and can be rebound later by PUT /api/config/runtime
   // (server/app.ts) once a candidate AuthChoice has passed the compliance gate there.
+  // Whether api-key and gateway Ask runs through pi on OpenShell is a pure function of the boot selection, so it is known
+  // before the composition exists: the process then never reads a vendor key for a non-subscription runtime.
+  const piKeyIsolated = inProcessAuthViaBackend(runtimeSelection) === "pi";
   let boundAuthChoice: AuthChoice = store.hasExplicitRuntimeSettings()
-    ? toAuthChoiceFromRuntimeSettings(store.getRuntimeSettings())
+    ? toAuthChoiceFromRuntimeSettings(store.getRuntimeSettings(), { readKeys: !(piKeyIsolated && store.getRuntimeSettings().authMode !== "subscription") })
     : authChoice;
   function getAuthChoice(): AuthChoice {
     return boundAuthChoice;
@@ -690,7 +695,7 @@ async function main(): Promise<void> {
     composition: openshellComposition, store, producerBinary: producerExecutable?.executable ?? "", wrenBinary: nativeWrenExecutable?.executable ?? "",
     profileSource, hostHome: nativeHome, sourceWrenHome: nativeSourceWrenHome, getBinding: currentInteractiveBinding,
     getComponentLimits,
-    assertConfigurationCurrent() { if (!openshellComposition.claudeBoot) throw new Error("OpenShell model configuration unavailable"); openshellComposition.claudeBoot.assertCurrent(); },
+    assertConfigurationCurrent() { const boot = openshellComposition.claudeBoot ?? openshellComposition.piBoot; if (!boot) throw new Error("OpenShell model configuration unavailable"); boot.assertCurrent(); },
     modelsFor(settings) {
       const boot = openshellComposition.claudeBoot;
       if (!boot) throw new Error("OpenShell model configuration unavailable");
@@ -698,7 +703,8 @@ async function main(): Promise<void> {
       return resolveStructuredClaudeModels(settings, (model, driver) => resolveOpenShellClaudeModel(model, driver, boot.descriptor));
     },
   });
-  const openshellStructured = createOpenShellStructuredAdapter(openshellProvisioner);
+  const piOnOpenShell = runtimeSelection.runtime === "openshell" && isBackendOffered(runtimeSelection, "pi");
+  const openshellStructured = createOpenShellStructuredAdapter(openshellProvisioner, undefined, piOnOpenShell ? "pi" : "claude");
   const claudeOnOpenShell = runtimeSelection.runtime === "openshell" && isBackendOffered(runtimeSelection, "claude");
   const nativeRuntimeHost = new RuntimeHost({
     selected: () => selectNativeRuntimeBackend({ selection: runtimeSelection, codexBackend: codexConfiguration.selected }),
@@ -768,13 +774,19 @@ async function main(): Promise<void> {
   // Explicit opt-in remains behind the packaged exact-version certification gate.
   const structuredRuntime = new StructuredRuntime({
     selection: runtimeSelection, deployment,
-    adapters: { codex: createCodexStructuredAdapter(codexComposition.structured), ...(claudeOnOpenShell ? { claude: openshellStructured } : {}) },
+    adapters: { codex: createCodexStructuredAdapter(codexComposition.structured), ...(claudeOnOpenShell ? { claude: openshellStructured } : {}), ...(piOnOpenShell ? { pi: openshellStructured } : {}) },
     onRevoke: openshellComposition.revokeRuntime,
     localRoute: route, localSetupFor: (choice) => setupRunnerFor?.(choice) ?? setupRunner,
   });
   deps = {
     store,
     structuredRuntime,
+    ...(piOnOpenShell ? { piRuntime: { validate(settings, bundleTiers) {
+      const boot = openshellComposition.piBoot;
+      if (!boot) throw new RuntimeBindingError("The server's pi runtime is not configured.");
+      boot.assertCurrent();
+      validatePiRuntimeBindings(settings, bundleTiers, boot.descriptor.models, boot.descriptor.auth);
+    } } } : {}),
     nativeSessions,
     nativeArtifacts,
     profileRegistry,

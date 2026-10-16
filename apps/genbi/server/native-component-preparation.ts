@@ -53,9 +53,9 @@ export function prepareDirectCodexComponentHost(irDocument: string, scope: Reado
   return prepared;
 }
 
-/** Structured Claude Ask pins the analytical root, including an uncomposed leaf. */
+/** Structured Ask on OpenShell (Claude or pi) pins the analytical root, including an uncomposed leaf. */
 export function prepareStructuredAskComponentHost(irDocument: string, scope: Readonly<Record<string, unknown>>, bindings: NativeComponentBindings): NativeComponentPreparation {
-  if (bindings.identity.vendor !== "claude") throw new Error("Structured OpenShell Ask requires Claude");
+  if (bindings.identity.vendor !== "claude" && bindings.identity.vendor !== "pi") throw new Error("Structured OpenShell Ask requires Claude or pi");
   const entry = z.object({ kind: z.literal("agent"), verb: z.literal("answer_query"), prompt: z.string() }).strict().parse(scope.entry);
   const prepared = prepareHost(irDocument, { ...scope, entry }, bindings, true);
   if (!prepared || Object.keys(prepared.hostRoots).length !== 1) throw new Error("Structured Ask requires one entry");

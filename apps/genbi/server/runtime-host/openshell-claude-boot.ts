@@ -35,7 +35,7 @@ function secureFile(file: string): void {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.uid !== process.getuid?.()
     || (stat.mode & 0o777) !== 0o600 || realpathSync(file) !== file) throw new Error("Protected OpenShell configuration unavailable");
 }
-function secureRead(file: string, maximum = 32_768): Buffer {
+export function secureRead(file: string, maximum = 32_768): Buffer {
   secureFile(file);
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -46,7 +46,7 @@ function secureRead(file: string, maximum = 32_768): Buffer {
     secureFile(file); return bytes;
   } finally { closeSync(fd); }
 }
-const hash = (bytes: Buffer) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+export const hash = (bytes: Buffer) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 
 /** Host-only opt-in. Invalid input never selects credentials, endpoints or a verifier. */
 export function readOpenShellClaudeBoot(env: NodeJS.ProcessEnv, selection: RuntimeSelection) {

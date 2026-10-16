@@ -13,9 +13,34 @@ host broker's step tools, reached over the single duplex the host opens with the
 | `pi-proc-check.mjs` | Reads `/proc` and reports how many step processes are alive; the host runs it after a cancellation. |
 | `policy.template.yaml`, `profile.template.yaml` | Deny-all policy plus one model endpoint, and the provider profile for it. Render with `renderPiEndpointAssets` (endpoint host and port are parameters). |
 
-Operator steps: build the image, render and import the profile, create the provider with the credential (`openshell provider create --credential NAME`, the value comes from the
-operator's environment and never from a file), render the policy, then configure the driver's `pi` block with the image id, the policy and profile paths and their digests.
-The sandbox only ever holds the OpenShell placeholder for the credential.
+## Operator steps (the operator provisions, the server only verifies)
+
+The BFF process never holds the model vendor key and never creates or changes a gateway object. Everything below is done by the operator; at boot and again before every Ask and every step sandbox the server
+re-checks, read-only, that the gateway still holds exactly what the descriptor names.
+
+1. Build the image and render the assets with `renderPiEndpointAssets` (endpoint host and port, profile id, display name and the credential variable name are the parameters).
+2. Import the rendered profile: `openshell provider profile import --file <profile.yaml>`.
+3. Create the provider with the credential taken from your own environment, never from a file: `NAME=<value> openshell provider create --name <provider> --type <profile-id> --credential NAME`.
+4. Compute the profile digest from the gateway's own export, right after the import:
+   `openshell provider profile export <profile-id> --output json | node --input-type=module -e "import { canonicalGatewayProfileDigest } from '<app>/dist-server/server/runtime-host/openshell-pi-gateway.js'; let text = ''; for await (const chunk of process.stdin) text += chunk; console.log(canonicalGatewayProfileDigest(JSON.parse(text)));"`
+   The digest is of the export with the gateway-assigned fields (`resource_version`, `source`, `scope`) removed and the keys sorted.
+5. Configure the driver's `pi` block (image id, policy and profile paths and their digests, `provider`) and no `model` block: one boot serves one model vendor.
+6. Write the pi boot descriptor as a 0600 file inside a 0700 directory you own, then start the server with `GENBI_RUNTIME=openshell`, `GENBI_BACKEND=pi` and `GENBI_OPENSHELL_PI_BOOT=<absolute path>`.
+   The Claude descriptor is not read in this mode. `GENBI_OPENSHELL_PI_BOOT` under `GENBI_RUNTIME=local` refuses boot, and `GENBI_BACKEND` may not name both `claude` and `pi` under OpenShell.
+
+```json
+{ "version": 1,
+  "gatewayUrl": "https://127.0.0.1:<port>/", "caCert": "<abs path>", "clientCert": "<abs path>", "clientKey": "<abs path>",
+  "auth": "api-key",
+  "provider": "<openshell provider name>", "profileId": "<profile id>", "displayLabel": "<non-secret label>",
+  "profileDigest": "sha256:<step 4>", "generation": "<opaque, bump on key rotation>",
+  "endpoint": { "providerId": "<name pi uses>", "api": "openai-completions", "baseUrl": "https://<host>/v1", "credentialEnv": "<credential variable>" },
+  "thinking": "off",
+  "models": { "<tier>": "<exact model id>" } }
+```
+
+`auth` is the only Ask authentication mode the boot serves (`api-key` is the `byo` setting, `gateway` the gateway setting). `models` pins the one allowed model id per tier: the saved runtime must name exactly those ids,
+with no alias, no `inherit` and no base URL. Key rotation: update the provider, then bump `generation`; the descriptor hash changes, the current scope is stale and in-flight steps are revoked.
 
 The driver and lifecycle compare model grants with one `modelIdentity`, so a driver instance serves one model vendor at a time.
 
