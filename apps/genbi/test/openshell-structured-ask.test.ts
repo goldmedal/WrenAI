@@ -8,6 +8,8 @@ import { runtimeReady } from "../server/runtime-host/policy.js";
 import { toAnswerOrRefusalEvent } from "../server/fold.js";
 import { GovernedWrenError } from "../harness/components/wren-access.js";
 import { observeStructuredQueryAccess, structuredFailureFeedback } from "../server/structured-error-feedback.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 
 const request: RouteOptions = { authChoice: { mode: "subscription", provider: "claude" }, profileSource: "fixture", userProject: "/fixture", question: "count" };
 const root = (): ComponentInvocationResult => ({ status: "ok", output: { kind: "value", value: { columns: ["n"], rows: [{ n: 7 }] } }, provenance: { verified: true, definition: { sql: "SELECT COUNT(*) AS n FROM orders" } } });
@@ -26,7 +28,7 @@ function fixture() {
   const prepare = vi.fn(async (input: Parameters<OpenShellStructuredProvisioner["prepare"]>[0]) => { preparedInput = input; return prepared; });
   const adapter = createOpenShellStructuredAdapter({ probe: async () => runtimeReady("synthetic", []), prepare });
   const local = vi.fn(async () => { throw Error("local fallback forbidden"); });
-  const runtime = new StructuredRuntime({ selected: { codex: "local", claude: "openshell" }, allowLocal: true, localRoute: local, localSetupFor: () => undefined, adapters: { claude: adapter } });
+  const runtime = new StructuredRuntime({ selection: openshellClaude, localRoute: local, localSetupFor: () => undefined, adapters: { claude: adapter } });
   return { adapter, runtime, scope, controller, run, dispose, prepare, local, preparedInput: () => preparedInput, revoke() { current = false; } };
 }
 
@@ -114,7 +116,7 @@ describe("OpenShell structured root authority", () => {
     for (const operation of ["setup", "native"] as const) expect(() => f.runtime.assertOperationSupported(request.authChoice, operation)).toThrow();
     await expect(f.runtime.setup({ prompt: "setup", workspaceRoot: "/fixture", authChoice: request.authChoice }, f.scope)).rejects.toMatchObject({ code: "unsupported" });
     expect(f.prepare).not.toHaveBeenCalled();
-    const empty = new StructuredRuntime({ selected: { codex: "local", claude: "openshell" }, allowLocal: true, localRoute: f.local, localSetupFor: () => undefined });
+    const empty = new StructuredRuntime({ selection: openshellClaude, localRoute: f.local, localSetupFor: () => undefined });
     expect(() => empty.assertOperationSupported(request.authChoice, "ask")).toThrow(); await expect(empty.route(request, f.scope)).rejects.toMatchObject({ code: "unavailable" });
   });
   it("aborts active work synchronously on runtime revocation and cannot emit a late root", async () => {

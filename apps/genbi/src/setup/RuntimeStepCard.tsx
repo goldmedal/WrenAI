@@ -3,7 +3,7 @@ import { Alert, AutoComplete, Button, Collapse, Input, Segmented, Space } from '
 import { ExecutionLimitsEditor } from '@/harness/ExecutionLimitsEditor';
 import { Panel } from '@/ui';
 import { t } from '@/i18n/strings';
-import { getGatewayModelCatalog } from '@/bff/client';
+import { getGatewayModelCatalog, getStructuredAskReadiness } from '@/bff/client';
 import { isBffEnabled } from '@/bff/env';
 import { useSetupStore } from './useSetupStore';
 import { CLAUDE_TIER_MODELS } from './claude-tier-models';
@@ -121,6 +121,27 @@ function ModelInput({ label, value, placeholder, catalog, allowedModels, onChang
   );
 }
 
+/** Which subscription providers this boot offers; absent until known, so nothing is disabled on a guess. */
+function useOfferedProviders(): Partial<Record<SubscriptionProvider, boolean>> | undefined {
+  const [offered, setOffered] = useState<Partial<Record<SubscriptionProvider, boolean>>>();
+  useEffect(() => {
+    if (!isBffEnabled()) return;
+    let cancelled = false;
+    // A failed or absent readiness answer leaves every provider selectable; the server still refuses at admission.
+    try {
+      getStructuredAskReadiness().then(
+        (value) => {
+          const backends = value.backends;
+          if (!cancelled && backends) setOffered({ claude: backends.claude?.offered, codex: backends.codex?.offered });
+        },
+        () => {},
+      );
+    } catch { /* readiness unavailable */ }
+    return () => { cancelled = true; };
+  }, []);
+  return offered;
+}
+
 /** pi-ai's offline catalog for the gateway option; absent in fixture mode or while loading. */
 function useGatewayCatalog(provider: string, enabled: boolean): GatewayModelCatalog | undefined {
   const [catalog, setCatalog] = useState<GatewayModelCatalog>();
@@ -152,6 +173,7 @@ export function RuntimeStepCard() {
   const runtimeSettingsSaving = useSetupStore((s) => s.runtimeSettingsSaving);
   const runtimeSettingsError = useSetupStore((s) => s.runtimeSettingsError);
   const adapterEnvStatus = useSetupStore((s) => s.adapterEnvStatus);
+  const offeredProviders = useOfferedProviders();
 
   // Setup offers subscription and the org gateway. Any other hydrated mode is
   // projected onto the subscription form without overwriting it until a save.
@@ -233,7 +255,7 @@ export function RuntimeStepCard() {
         ) : <>
           <div>
             <div style={{ marginBottom: 8, fontWeight: 500 }}>Interactive CLI target</div>
-            <Segmented aria-label="Interactive CLI target" value={subscriptionProvider} options={subscriptionProviderOptions} onChange={(value) => selectSubscriptionProvider(value as SubscriptionProvider)} />
+            <Segmented aria-label="Interactive CLI target" value={subscriptionProvider} options={subscriptionProviderOptions.map((option) => ({ ...option, disabled: offeredProviders?.[option.value] === false }))} onChange={(value) => selectSubscriptionProvider(value as SubscriptionProvider)} />
             <Alert style={{ marginTop: 8 }} type={subscriptionLoggedIn ? 'warning' : 'error'} showIcon message={subscriptionLoggedIn ? subscriptionProvider === 'codex' ? t('setup.authCodexSubscriptionWarning') : t('setup.authSubscriptionWarning') : t('setup.authSubscriptionLoggedOut')} />
           </div>
           <div>

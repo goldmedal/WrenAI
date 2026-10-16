@@ -523,7 +523,16 @@ export function getRuntimeSettingsReadiness(): Promise<RuntimeSettingsReadiness>
   return request<RuntimeSettingsReadiness>('/api/config/runtime/readiness');
 }
 
+export interface StructuredBackendReadiness {
+  readonly offered: boolean;
+  readonly state: 'ready' | 'unavailable' | 'not_offered';
+  readonly ask: boolean;
+  readonly setup: boolean;
+  readonly reason: string;
+}
 export interface StructuredAskReadiness {
+  readonly runtime?: 'local' | 'openshell';
+  readonly backends?: Readonly<Record<'claude' | 'codex' | 'pi', StructuredBackendReadiness>>;
   readonly active: { readonly backend: string; readonly state: string; readonly ask: boolean; readonly reason: string;
     readonly modelExecution?: 'openshell'; readonly queryExecution?: 'openshell'; readonly supportedAgents?: readonly string[] };
 }

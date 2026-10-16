@@ -109,8 +109,9 @@ try {
 
   markPhase("explicit-codex-composition");
   const codexEnvironment = controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint });
-  codexEnvironment.GENBI_CODEX_RUNTIME = "app-server";
-  codexEnvironment.GENBI_ALLOW_LOCAL_RUNTIME = "0";
+  codexEnvironment.GENBI_RUNTIME = "local";
+  codexEnvironment.GENBI_BACKEND = "codex";
+  codexEnvironment.GENBI_CODEX_MODE = "app-server";
   serverProcess = spawnProcessGroup("npx", ["--no-install", "genbi"], { cwd: installRoot, env: codexEnvironment, stdio: ["ignore", "pipe", "pipe"] });
   await waitForServer(port, collectOutput(serverProcess));
   const structured = await (await fetch(`http://127.0.0.1:${port}/api/structured-runtime/readiness`)).json();
@@ -152,7 +153,8 @@ function controlledEnvironment({ installRoot, workspaceRoot, port: selectedPort,
   const environment = { ...process.env };
   const developmentEscapes = [
     "NODE_PATH",
-    "GENBI_CODEX_RUNTIME", "GENBI_ALLOW_LOCAL_RUNTIME", "GENBI_CODEX_EXECUTABLE", "GENBI_CODEX_SOURCE", "GENBI_CODEX_ACCOUNT_EMAIL",
+    "GENBI_CLAUDE_RUNTIME", "GENBI_CODEX_RUNTIME", "GENBI_ALLOW_LOCAL_RUNTIME", "GENBI_RUNTIME", "GENBI_BACKEND", "GENBI_CODEX_MODE",
+    "GENBI_OPENSHELL_CONFIG", "GENBI_OPENSHELL_CLAUDE_BOOT", "GENBI_CODEX_EXECUTABLE", "GENBI_CODEX_SOURCE", "GENBI_CODEX_ACCOUNT_EMAIL",
     "WREN_HOME",
     "WREN_PROJECT_HOME",
     "WREN_HARNESS_PROJECT",

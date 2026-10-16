@@ -223,6 +223,47 @@ Structured Ask allows up to five minutes for the outer conversation (including t
 component call and explanation). Individual component/step deadlines remain unchanged. An
 explicit caller timeout is preserved, and outer timeout failures are reported distinctly.
 
+### Runtime and backend selection
+
+Two independent settings choose where agents run and which agent backends a boot offers.
+Boot reads them once and refuses to start, naming the cause, when they are invalid.
+
+| Variable | Values | Default |
+| --- | --- | --- |
+| `GENBI_RUNTIME` | `local` or `openshell` | `local` |
+| `GENBI_BACKEND` | comma-separated list of `claude`, `codex`, `pi` (whitespace trimmed; unknown, duplicate or empty entries refuse boot) | `claude,codex` under `local`; **required** under `openshell` |
+| `GENBI_CODEX_MODE` | `exec` or `app-server` | `exec` |
+
+`GENBI_CODEX_MODE` applies only with `GENBI_RUNTIME=local` and `codex` in the list; setting it
+anywhere else refuses boot. `GENBI_OPENSHELL_*` variables apply only with `GENBI_RUNTIME=openshell`;
+setting one under `local` refuses boot. They, and the Codex executable, source and login-home
+variables, remain backend configuration, not selectors.
+
+What each runtime supports:
+
+| | `claude` | `codex` | `pi` | In-process api-key and gateway | Local-mode auth |
+| --- | --- | --- | --- | --- | --- |
+| `local` | yes | yes (`exec` or `app-server`) | no | yes | yes |
+| `openshell` | yes | no | not yet available | no | no |
+
+A runtime never offers a backend it does not support and never falls back to another runtime.
+A listed backend the runtime cannot offer does not stop boot: boot prints one warning, readiness
+reports it with `offered: false` and the state `not_offered`, and the operation is refused at
+admission. Under `openshell` a boot names one model backend, so a list with both `claude` and `pi`
+refuses boot. `GET /api/structured-runtime/readiness` reports `runtime` and, for `claude`, `codex`
+and `pi`, `offered`, `state` (`ready`, `unavailable` or `not_offered`), `ask`, `setup` and a
+`reason`; native readiness reports the same block as `runtimeSelection`.
+
+The old per-vendor variables are removed, and setting any of them refuses boot:
+
+| Removed | Replacement |
+| --- | --- |
+| `GENBI_CLAUDE_RUNTIME=openshell` | `GENBI_RUNTIME=openshell` and `GENBI_BACKEND=claude`; that boot no longer offers Codex or in-process api-key, gateway and local-mode auth |
+| `GENBI_CLAUDE_RUNTIME=local` | unset (`local` is the default) |
+| `GENBI_CODEX_RUNTIME=app-server` | `GENBI_BACKEND` including `codex`, and `GENBI_CODEX_MODE=app-server` |
+| `GENBI_CODEX_RUNTIME=local` | unset (`GENBI_CODEX_MODE` defaults to `exec`) |
+| `GENBI_ALLOW_LOCAL_RUNTIME=0` | omit the vendor from `GENBI_BACKEND`, or use `GENBI_RUNTIME=openshell`; with `GENBI_CODEX_RUNTIME=app-server` it becomes `GENBI_RUNTIME=local`, `GENBI_BACKEND=codex`, `GENBI_CODEX_MODE=app-server` |
+
 ### OpenShell lifecycle backend
 
 OpenShell is opt-in. Structured Ask supports only `answer_query`: the model runs in a fresh
@@ -243,7 +284,7 @@ interrupts the session and tears down its exact sandbox. A BFF restart marks pri
 interrupted and reconciles owned resources; it cannot resume the session. Successful
 synthetic tests do not certify live model/account behavior.
 
-An administrator can select `GENBI_CLAUDE_RUNTIME=openshell` and point
+An administrator can select `GENBI_RUNTIME=openshell` with `GENBI_BACKEND=claude` and point
 `GENBI_OPENSHELL_CONFIG` at an absolute, private JSON configuration file. The host configuration
 contains `executable`, `executableDigest`, `version`, `gateway`, `workspace`, `image`,
 `supervisorImage`, `policy`, `policyDigest`, `home`, `configHome`, `stateHome`,

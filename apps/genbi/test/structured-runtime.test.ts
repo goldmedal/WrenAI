@@ -12,6 +12,8 @@ import { Store } from "../server/db.js";
 import { createApp } from "../server/app.js";
 import { streamTurn, type TurnDeps } from "../server/turn.js";
 import { type RouteOptions } from "../harness/index.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const codexAppServerOnly = resolveRuntimeSelection({ GENBI_BACKEND: "codex", GENBI_CODEX_MODE: "app-server" });
 
 const stores: Store[] = [];
 const directories: string[] = [];
@@ -21,7 +23,7 @@ const scope = (): StructuredScope => ({ sessionId: "session", turnId: "turn", as
 function host(adapter?: StructuredAdapter) {
   const localRoute = vi.fn(async () => ({ backend: "codex-local" as const, warnings: [], finalText: "local" }));
   const localSetup = { run: vi.fn(async () => ({ finalText: "local setup", sessionId: "legacy-anchor" })) };
-  const runtime = new StructuredRuntime({ selected: { codex: "codex-app-server", claude: "claude-sandbox-runtime" }, allowLocal: true,
+  const runtime = new StructuredRuntime({ selection: codexAppServerOnly,
     localRoute, localSetupFor: () => localSetup, ...(adapter ? { adapters: { codex: adapter } } : {}) });
   return { runtime, localRoute, localSetup };
 }

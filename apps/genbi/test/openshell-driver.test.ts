@@ -7,6 +7,8 @@ import { OpenShellCliDriver, readOpenShellConfiguration, runOpenShellCommand, ty
 import type { OpenShellIntent } from "../server/runtime-host/openshell-types.js";
 import { createOpenShellRuntimeComposition } from "../server/openshell-runtime-composition.js";
 import { Store } from "../server/db.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 
 const directories: string[] = [];
 afterEach(() => { for (const root of directories.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -29,22 +31,22 @@ function fixture() {
 
 describe("OpenShell bounded CLI contract", () => {
   it("defaults off and does not create host state or advertise model operations", async () => {
-    expect(readOpenShellConfiguration({})).toEqual({ selected: false });
+    expect(readOpenShellConfiguration({}, resolveRuntimeSelection({}))).toEqual({ selected: false });
     const store = new Store(":memory:"); const f = fixture();
-    const composition = await createOpenShellRuntimeComposition({ env: { GENBI_CLAUDE_RUNTIME: "openshell" }, store, stateRoot: f.root });
+    const composition = await createOpenShellRuntimeComposition({ env: {}, selection: openshellClaude, store, stateRoot: f.root });
     expect(composition.selected).toBe(true); expect(composition.lifecycle).toBeUndefined(); expect(composition.adapter.ask).toBeUndefined(); expect(composition.adapter.setup).toBeUndefined();
     expect((await composition.probe()).readiness).toMatchObject({ code: "openshell_configuration_invalid" }); expect(store.listOpenShellIntents()).toEqual([]); await composition.shutdown(); store.close();
   });
   it("rejects missing exclusivity and invalid host configuration safely", () => {
     const f = fixture(); const config = path.join(f.root, "config.json"); writeFileSync(config, JSON.stringify({ ...f.configuration, exclusive: false }));
-    expect(readOpenShellConfiguration({ GENBI_CLAUDE_RUNTIME: "openshell", GENBI_OPENSHELL_CONFIG: config })).toEqual({ selected: true });
-    expect(() => readOpenShellConfiguration({ GENBI_CLAUDE_RUNTIME: "unknown" })).toThrow("The OpenShell host configuration is unavailable or invalid.");
+    expect(readOpenShellConfiguration({ GENBI_OPENSHELL_CONFIG: config }, openshellClaude)).toEqual({ selected: true });
+    expect(() => resolveRuntimeSelection({ GENBI_RUNTIME: "unknown" })).toThrow("GENBI_RUNTIME");
   });
   it("fails closed on partially configured snapshot capabilities", () => {
     const f = fixture(); const file = path.join(f.root, "snapshot-config.json");
     for (const extra of [{ dataPolicy: f.configuration.policy }, { dataPolicyDigest: digest }, { dataPolicy: f.configuration.policy, dataPolicyDigest: digest }]) {
       writeFileSync(file, JSON.stringify({ ...f.configuration, ...extra }));
-      expect(readOpenShellConfiguration({ GENBI_CLAUDE_RUNTIME: "openshell", GENBI_OPENSHELL_CONFIG: file })).toEqual({ selected: true });
+      expect(readOpenShellConfiguration({ GENBI_OPENSHELL_CONFIG: file }, openshellClaude)).toEqual({ selected: true });
     }
   });
   it("probes pinned version, gateway, image and policy without provisioning", async () => {

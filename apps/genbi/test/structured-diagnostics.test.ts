@@ -6,6 +6,8 @@ import { runtimeReady } from "../server/runtime-host/policy.js";
 import { Store } from "../server/db.js";
 import { createApp } from "../server/app.js";
 import { streamTurn } from "../server/turn.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 
 const request = { authChoice: { mode: "subscription", provider: "claude" } as const, profileSource: "fixture", userProject: "/fixture", question: "count" };
 const scope = { sessionId: "session", turnId: "turn", signal: new AbortController().signal, assertCurrent() {} };
@@ -44,7 +46,7 @@ describe("host-only structured diagnostics", () => {
     const prepare = vi.fn(async () => { throw Error(secret); });
     const adapter = createOpenShellStructuredAdapter({ probe: async () => { if (stage === "before_adapter") throw Error(secret); return runtimeReady("synthetic", []); }, prepare }, diagnostics);
     const local = vi.fn(async () => { throw Error(secret); });
-    const runtime = new StructuredRuntime({ selected: { claude: "openshell", codex: "local" }, allowLocal: false, adapters: { claude: adapter }, localRoute: local, localSetupFor: () => undefined, diagnostics });
+    const runtime = new StructuredRuntime({ selection: openshellClaude, adapters: { claude: adapter }, localRoute: local, localSetupFor: () => undefined, diagnostics });
     const app = createApp({ store, structuredRuntime: runtime, route: local, baseRouteOptions: request });
     try {
       const session = store.createSession("analysis");
@@ -61,7 +63,7 @@ describe("host-only structured diagnostics", () => {
   it("observer failure cannot suppress cancellation/currentness or start preparation", async () => {
     const prepare = vi.fn(async () => { throw Error(); });
     const adapter = createOpenShellStructuredAdapter({ probe: async () => runtimeReady("synthetic", []), prepare }, () => { throw secret; });
-    const runtime = new StructuredRuntime({ selected: { claude: "openshell", codex: "local" }, allowLocal: false, localRoute: async () => { throw Error(); }, localSetupFor: () => undefined, adapters: { claude: adapter }, diagnostics: () => { throw secret; } });
+    const runtime = new StructuredRuntime({ selection: openshellClaude, localRoute: async () => { throw Error(); }, localSetupFor: () => undefined, adapters: { claude: adapter }, diagnostics: () => { throw secret; } });
     await expect(runtime.route(request, { ...scope, assertCurrent() { throw Error(secret); } })).rejects.toMatchObject({ code: "stale" });
     const controller = new AbortController(); controller.abort();
     await expect(runtime.route(request, { ...scope, signal: controller.signal })).rejects.toMatchObject({ code: "cancelled" });

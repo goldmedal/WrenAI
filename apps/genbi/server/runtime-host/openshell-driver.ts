@@ -5,6 +5,7 @@ import path from "node:path";
 import { z } from "zod";
 import { OpenShellError, OPEN_SHELL_OWNER_LABEL, type OpenShellDriver, type OpenShellIntent, type OpenShellResource, type OpenShellDuplex } from "./openshell-types.js";
 import type { SnapshotMount } from "./openshell-snapshot-types.js";
+import type { RuntimeSelection } from "../runtime-selection.js";
 
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const token = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/);
@@ -202,9 +203,8 @@ export class OpenShellCliDriver implements OpenShellDriver {
 }
 
 /** Disabled by default. Only the host administrator supplies this private configuration. */
-export function readOpenShellConfiguration(env: NodeJS.ProcessEnv): { selected: boolean; configuration?: OpenShellConfiguration } {
-  if (env.GENBI_CLAUDE_RUNTIME !== undefined && !["local", "openshell"].includes(env.GENBI_CLAUDE_RUNTIME)) throw new OpenShellError("openshell_configuration_invalid");
-  if (env.GENBI_CLAUDE_RUNTIME !== "openshell") return { selected: false };
+export function readOpenShellConfiguration(env: NodeJS.ProcessEnv, selection: RuntimeSelection): { selected: boolean; configuration?: OpenShellConfiguration } {
+  if (selection.runtime !== "openshell") return { selected: false };
   try {
     const file = env.GENBI_OPENSHELL_CONFIG;
     if (!file || !path.isAbsolute(file)) return { selected: true };

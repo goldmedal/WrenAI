@@ -296,12 +296,14 @@ runtime-selection fields. Harness types expose no server imports.
 ## Explicit application composition
 
 The application composes the same certified Codex backend into Native Analysis
-and Structured Ask. `GENBI_CODEX_RUNTIME=app-server` selects it explicitly;
-`local` remains the default. `GENBI_ALLOW_LOCAL_RUNTIME=0` disables the legacy
-local paths. Unknown values reject startup. Native Sessions currently use one
-selected backend, so selecting app-server limits that surface to Codex Analysis;
-Setup and Claude do not fall back. Structured Ask retains independent vendor
-selection.
+and Structured Ask. `GENBI_CODEX_MODE=app-server` selects it explicitly, with
+`GENBI_RUNTIME=local` and `codex` in `GENBI_BACKEND`; `exec` remains the default.
+A boot that does not list `codex` does not offer it, and invalid or inapplicable
+values refuse startup (see the README's runtime and backend selection section).
+Native Sessions currently use one selected backend, so selecting app-server
+limits that surface to Codex Analysis; Setup and Claude do not fall back, and
+Claude is offered only if the list names it. Structured Ask reports each backend's
+`offered` state independently.
 
 The direct provisioner requires server-owned configuration:
 
