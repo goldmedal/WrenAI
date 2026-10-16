@@ -72,7 +72,7 @@ describe("owned Wren access", () => {
     const readline = require('node:readline');
     readline.createInterface({input:process.stdin}).on('line',line => {
       const request=JSON.parse(line);
-      const cls = request.sql.includes('revenue') ? 'model_not_found' : request.sql.includes('cube_total') ? 'cube_not_queryable' : request.sql.includes('spoof') ? 'transport' : 'policy_rejected';
+      const cls = request.sql.includes('revenue') ? 'model_not_found' : request.sql.includes('cube_total') ? 'cube_not_queryable' : request.sql.includes('typed_literal') ? 'ungrounded_literal' : request.sql.includes('spoof') ? 'transport' : 'policy_rejected';
       console.log(JSON.stringify({id:request.id,error:{class:cls,message:"Table revenue missing in /private/manifest for user secret-token"}}));
     });`, async (project, executable) => {
     const signal = new AbortController().signal;
@@ -89,6 +89,12 @@ describe("owned Wren access", () => {
       expect((cube as Error).message).toContain("A cube is a semantic definition");
       expect((cube as Error).message).toContain("query the cube's base model");
       expect((cube as Error).message).not.toMatch(/private|secret|manifest|sales_cube|cube_total/);
+      const literal = await access.query({ sql: "SELECT 9900 AS typed_literal", limit: 1 }, signal).catch((error: unknown) => error);
+      expect(literal).toBeInstanceOf(GovernedWrenError);
+      expect((literal as GovernedWrenError).errorClass).toBe("ungrounded_literal");
+      expect((literal as Error).message).toContain("cite the earlier query that already produced it by its query_id");
+      expect((literal as Error).message).toContain("compute it in one SELECT over the models");
+      expect((literal as Error).message).not.toMatch(/private|secret|manifest|9900|typed_literal/);
       const second = await access.query({ sql: "SELECT 1 AND 2", limit: 1 }, signal).catch((error: unknown) => error);
       expect((second as GovernedWrenError).errorClass).toBe("policy_rejected");
       // A wire frame cannot claim the host-only channel class; unknown classes collapse to internal.

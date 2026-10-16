@@ -16,7 +16,7 @@ from wren.model.data_source import DataSource
 from wren.model.error import ErrorCode, ErrorPhase, WrenError
 from wren.profile import expand_profile_secrets, resolve_profile_for_project
 from wren.query_semantics import cubes_read_as_tables, query_semantics
-from wren.read_only import require_source_tables
+from wren.read_only import NoSourceTablesError, require_source_tables
 
 MAX_REQUEST = 65_536
 MAX_RESULT = 1_048_576
@@ -37,6 +37,12 @@ ERROR_MESSAGES: dict[str, str] = {
         "a SQL table; query the cube's base model instead and compute the "
         "measure from the cube definition's expression over the base model's "
         "columns."
+    ),
+    "ungrounded_literal": (
+        "The query reads no bound model, so the values it returns are literals "
+        "typed into the query, not data. A value must come from an executed query "
+        "over the bound models: cite the earlier query that already produced it by "
+        "its query_id, or compute it in one SELECT over the models."
     ),
     "policy_rejected": (
         "The read-only analytical policy rejected the query: use one SELECT over "
@@ -87,6 +93,8 @@ def classify_error(error: BaseException) -> str:
         return "invalid_request"
     if isinstance(error, _ResultTooLarge):
         return "result_too_large"
+    if isinstance(error, NoSourceTablesError):
+        return "ungrounded_literal"
     if isinstance(error, WrenError):
         code, phase = error.error_code, error.phase
         if code is ErrorCode.MODEL_NOT_FOUND:

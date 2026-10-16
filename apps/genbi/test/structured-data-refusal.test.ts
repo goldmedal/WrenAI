@@ -28,7 +28,7 @@ function fixture(error: unknown, change?: (store: Store) => void) {
 }
 
 describe("normal host data-query refusal", () => {
-  it.each(["execution_failed", "invalid_sql", "model_not_found", "cube_not_queryable"] as const)("persists %s as an explanatory refusal and replays it without another route", async code => {
+  it.each(["execution_failed", "invalid_sql", "model_not_found", "cube_not_queryable", "ungrounded_literal"] as const)("persists %s as an explanatory refusal and replays it without another route", async code => {
     const f = fixture(await queryFailure(code)); const frames: any[] = [];
     await streamTurn(f.deps, f.session.id, f.turn.id, async frame => { frames.push(frame); });
     expect(f.store.getTurn(f.turn.id)).toMatchObject({ resultKind: "refusal", errorCode: `query.${code}`, backend: null });
