@@ -25,25 +25,23 @@ import type { RuntimeBackendProbeResult } from "./runtime-host/types.js";
 import type { DirectCodexProvisioner } from "./codex-native-session.js";
 import type { CodexStructuredProvisioner } from "./codex-structured-ask.js";
 import type { NativeComponentBindings } from "./native-component-preparation.js";
+import { isBackendOffered, type RuntimeSelection } from "./runtime-selection.js";
 
 export interface CodexBootConfiguration {
   readonly selected: "local" | "codex-app-server";
-  readonly allowLocal: boolean;
   readonly executable?: string;
   readonly source?: string;
   readonly loginHome?: string;
   readonly accountEmail?: string;
 }
 /** Read once at composition. No browser values, PATH discovery or credential copying. */
-export function readCodexBootConfiguration(env: NodeJS.ProcessEnv): CodexBootConfiguration {
-  const selected = env.GENBI_CODEX_RUNTIME ?? "local";
-  const local = env.GENBI_ALLOW_LOCAL_RUNTIME ?? "1";
-  if (!["local", "app-server"].includes(selected) || !["0", "1"].includes(local)) throw new Error("Invalid server runtime selection.");
-  return Object.freeze({ selected: selected === "app-server" ? "codex-app-server" : "local", allowLocal: local === "1",
-    ...(env.GENBI_CODEX_EXECUTABLE ? { executable: env.GENBI_CODEX_EXECUTABLE } : {}),
-    ...(env.GENBI_CODEX_SOURCE ? { source: env.GENBI_CODEX_SOURCE } : {}),
-    ...(env.WREN_HARNESS_CODEX_HOME ? { loginHome: env.WREN_HARNESS_CODEX_HOME } : {}),
-    ...(env.GENBI_CODEX_ACCOUNT_EMAIL ? { accountEmail: env.GENBI_CODEX_ACCOUNT_EMAIL } : {}) });
+export function readCodexBootConfiguration(env: NodeJS.ProcessEnv, selection: RuntimeSelection): CodexBootConfiguration {
+  const needed = isBackendOffered(selection, "codex");
+  return Object.freeze({ selected: selection.codexMode === "app-server" ? "codex-app-server" : "local",
+    ...(needed && env.GENBI_CODEX_EXECUTABLE ? { executable: env.GENBI_CODEX_EXECUTABLE } : {}),
+    ...(needed && env.GENBI_CODEX_SOURCE ? { source: env.GENBI_CODEX_SOURCE } : {}),
+    ...(needed && env.WREN_HARNESS_CODEX_HOME ? { loginHome: env.WREN_HARNESS_CODEX_HOME } : {}),
+    ...(needed && env.GENBI_CODEX_ACCOUNT_EMAIL ? { accountEmail: env.GENBI_CODEX_ACCOUNT_EMAIL } : {}) });
 }
 interface Options {
   readonly configuration: CodexBootConfiguration;

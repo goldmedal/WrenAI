@@ -13,6 +13,8 @@ import { createApp } from "../server/app.js";
 import { postTurn } from "../server/turn.js";
 import type { TurnDeps } from "../server/turn.js";
 import { NativeSessionService } from "../server/native-sessions.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 
 const digest = `sha256:${"a".repeat(64)}`;
 const otherDigest = `sha256:${"b".repeat(64)}`;
@@ -223,7 +225,7 @@ describe("OpenShell product operation fences", () => {
   });
   it("uses independent safe readiness and refuses Ask/Setup/native before durable operation writes", async () => {
     const store = new Store(":memory:"); stores.push(store); const local = vi.fn();
-    const runtime = new StructuredRuntime({ selected: { codex: "local", claude: "openshell" }, allowLocal: true, localRoute: local, localSetupFor: () => undefined,
+    const runtime = new StructuredRuntime({ selection: openshellClaude, localRoute: local, localSetupFor: () => undefined,
       adapters: { claude: { vendor: "claude", backend: "openshell", probe: async () => runtimeReady("1.0", []) } } });
     const session = store.createSession("empty");
     const deps: TurnDeps = { store, route: local, structuredRuntime: runtime, baseRouteOptions: { authChoice: { mode: "subscription", provider: "claude" }, userProject: "fixture", profileSource: "fixture" } };

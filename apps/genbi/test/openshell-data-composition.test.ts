@@ -10,6 +10,8 @@ import { readOpenShellConfiguration } from "../server/runtime-host/openshell-dri
 import { DockerSnapshotDriver, snapshotCanonical, snapshotHash } from "../server/runtime-host/openshell-snapshot-driver.js";
 import type { OpenShellDriver, OpenShellDuplex, OpenShellResource } from "../server/runtime-host/openshell-types.js";
 import type { SnapshotManifest } from "../server/runtime-host/openshell-snapshot-types.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 const digest = `sha256:${"a".repeat(64)}`;
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
@@ -26,8 +28,8 @@ async function fixture(available = true) {
     dataWorker: { image: digest, script: digest, wheel: digest, toolchain: digest, architecture: "linux-arm64", protocol: "wren-governed/2" },
     snapshotCapture: { executable: file, realpath: file, digest, helperDigest: digest, approvedFiles: ["wren_project.yml", "target/mdl.json"] } }));
   if (!available) { const descriptor = JSON.parse(readFileSync(file, "utf8")); delete descriptor.dataWorker; writeFileSync(file, JSON.stringify(descriptor)); }
-  const env = { GENBI_CLAUDE_RUNTIME: "openshell", GENBI_OPENSHELL_CONFIG: file };
-  const config = readOpenShellConfiguration(env).configuration!;
+  const env = { GENBI_OPENSHELL_CONFIG: file };
+  const config = readOpenShellConfiguration(env, openshellClaude).configuration!;
   const identity = { image: digest, policy: digest, gateway: "fixture", workspace: "default", configuration: snapshotHash(JSON.stringify(config)) };
   // Use the real lifecycle permits and snapshot references. Only external I/O is synthetic.
   const manifests = new Map<string, SnapshotManifest>(); const resources = new Map<string, OpenShellResource>();
@@ -53,7 +55,7 @@ async function fixture(available = true) {
   vi.spyOn(DockerSnapshotDriver.prototype, "verify").mockImplementation(async row => manifests.get(row.manifest!.digest)!);
   vi.spyOn(DockerSnapshotDriver.prototype, "remove").mockResolvedValue();
   const vault = ClaudeAccountVault.forTesting({ root: path.join(root, "vault"), transport: async () => { throw Error("no account calls"); } });
-  const composition = await createOpenShellRuntimeCompositionForTesting({ env, store, stateRoot: path.join(root, "state"), driver, currentProject: () => project, claude: { vault, duplex: driver.duplex! } });
+  const composition = await createOpenShellRuntimeCompositionForTesting({ env, selection: openshellClaude, store, stateRoot: path.join(root, "state"), driver, currentProject: () => project, claude: { vault, duplex: driver.duplex! } });
   cleanup.push(async () => { await composition.shutdown(); store.close(); });
   const scope = { backend: "openshell" as const, account: digest, generation: "1", session: "session", turn: "turn", binding: binding.identity, bindingGeneration: String(binding.generation), bindingRevision: binding.revision, context: digest, plan: digest };
   return { composition, store, scope, resources, publications, deliveries, binding, project, writes: () => writes };

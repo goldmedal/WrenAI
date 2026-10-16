@@ -13,11 +13,12 @@ import { readOpenShellClaudeBoot, verifyRetainedOpenShellClaudeBoot } from "./ru
 import { snapshotHash } from "./runtime-host/openshell-snapshot-driver.js";
 import { openOpenShellWrenAccess } from "./runtime-host/openshell-wren-access.js";
 import { OpenShellError } from "./runtime-host/openshell-types.js";
+import type { RuntimeSelection } from "./runtime-selection.js";
 
 /** BFF-owned lifecycle seam. Deliberately supplies no model operation or browser command API. */
-export async function createOpenShellRuntimeComposition(options: { env: NodeJS.ProcessEnv; store: Store; stateRoot: string; driver?: OpenShellDriver; currentProject?: () => string | undefined; currentContext?: () => string | undefined; claude?: { vaultRoot: string; duplex(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex> } }) {
-  const config = readOpenShellConfiguration(options.env);
-  const boot = !options.claude && config.configuration && config.selected ? readOpenShellClaudeBoot(options.env) : undefined;
+export async function createOpenShellRuntimeComposition(options: { env: NodeJS.ProcessEnv; selection: RuntimeSelection; store: Store; stateRoot: string; driver?: OpenShellDriver; currentProject?: () => string | undefined; currentContext?: () => string | undefined; claude?: { vaultRoot: string; duplex(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex> } }) {
+  const config = readOpenShellConfiguration(options.env, options.selection);
+  const boot = !options.claude && config.configuration && config.selected ? readOpenShellClaudeBoot(options.env, options.selection) : undefined;
   const claude = options.claude ?? (boot ? { vaultRoot: boot.descriptor.vaultRoot, duplex: boot.duplex } : undefined);
   const vault = claude ? new ClaudeAccountVault({ root: claude.vaultRoot }) : undefined;
   const composition = await compose({ ...options, ...(claude ? { claude } : {}) }, vault);
@@ -34,7 +35,7 @@ export async function createOpenShellRuntimeCompositionForTesting(options: Omit<
   return compose(options, options.claude.vault, options.claude.sdkQueryForTesting);
 }
 async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: { duplex: NonNullable<CompositionOptions["claude"]>["duplex"] } }, vault: ClaudeAccountVault | undefined, sdkQueryForTesting?: import("./runtime-host/claude-component-step.js").ClaudeComponentRuntime["query"]) {
-  const configuration = readOpenShellConfiguration(options.env);
+  const configuration = readOpenShellConfiguration(options.env, options.selection);
   let lifecycle: OpenShellLifecycle | undefined;
   let snapshots: OpenShellProjectSnapshots | undefined;
   let runtimeEpoch = 0;
@@ -105,7 +106,7 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
     revoke: () => { runtimeEpoch++; try { vault?.disconnect(); } finally { lifecycle?.revoke(); } }, shutdown: async () => { runtimeEpoch++; try { await lifecycle?.shutdown(); } finally { vault?.close(); } } };
 }
 
-/** Resolve server-owned native selection against the active vendor binding. */
-export function selectNativeRuntimeBackend(options: { vendor: "codex" | "claude" | undefined; codexBackend: "local" | "codex-app-server"; claudeOpenShell: boolean }): RuntimeBackendId {
-  return options.claudeOpenShell && options.vendor !== "codex" ? "openshell" : options.codexBackend;
+/** Resolve server-owned native selection: the runtime decides, and an OpenShell boot never falls back to a host backend. */
+export function selectNativeRuntimeBackend(options: { selection: RuntimeSelection; codexBackend: "local" | "codex-app-server" }): RuntimeBackendId {
+  return options.selection.runtime === "openshell" ? "openshell" : options.codexBackend;
 }

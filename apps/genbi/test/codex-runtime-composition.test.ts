@@ -13,6 +13,7 @@ import { isCodexExecutionCertified } from "../server/runtime-host/codex-compatib
 import { Store } from "../server/db.js";
 import type { NativeArtifactService } from "../server/native-artifacts.js";
 import type { NativeSessionRow } from "../server/db.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
 vi.mock("../server/runtime-host/codex-compatibility.js", async (original) => ({
   ...(await original<typeof import("../server/runtime-host/codex-compatibility.js")>()), isCodexExecutionCertified: vi.fn(() => true), isCodexTerminalCertified: vi.fn(() => true),
 }));
@@ -50,8 +51,8 @@ function fixture() {
   store.setRuntimeSettings({ ...store.getRuntimeSettings(), authMode: "subscription", subscriptionProvider: "codex", subscriptionDriverModel: "driver", apiKeyModel: "step" });
   let binding = { identity: "project", path: project, generation: 1, revision: "v1" };
   const artifacts = { issue: vi.fn(() => ({ credential: "host-only" })), revoke: vi.fn(), save: vi.fn(), persistAnswer: vi.fn(), saveGrounded: vi.fn(), persistGroundedAnswer: vi.fn() };
-  const composition = createCodexRuntimeComposition({ configuration: readCodexBootConfiguration({ GENBI_CODEX_RUNTIME: "app-server", GENBI_CODEX_EXECUTABLE: executable,
-    GENBI_CODEX_SOURCE: "https://example.invalid/codex", WREN_HARNESS_CODEX_HOME: login, GENBI_CODEX_ACCOUNT_EMAIL: "fixture@example.invalid" }),
+  const composition = createCodexRuntimeComposition({ configuration: readCodexBootConfiguration({ GENBI_CODEX_EXECUTABLE: executable,
+    GENBI_CODEX_SOURCE: "https://example.invalid/codex", WREN_HARNESS_CODEX_HOME: login, GENBI_CODEX_ACCOUNT_EMAIL: "fixture@example.invalid" }, resolveRuntimeSelection({ GENBI_BACKEND: "codex", GENBI_CODEX_MODE: "app-server" })),
     packageRoot: root, producerBinary: executable, profileSource: "fixture", store, getBinding: () => binding, sourceWrenHome: () => path.join(root, "wren-home"), artifacts: artifacts as unknown as NativeArtifactService });
   const controller = new AbortController();
   const input = { options: { authChoice: { mode: "subscription" as const, provider: "codex" as const }, profileSource: "fixture", userProject: project, question: "count" },
@@ -59,11 +60,15 @@ function fixture() {
   return { root, store, tools, composition, input, permit, backend, controller, artifacts, transport, binding, changeBinding() { binding = { ...binding, revision: "v2" }; } };
 }
 describe("Codex application composition", () => {
-  it("defaults local and rejects invalid selection without coercing it to local", () => {
-    expect(readCodexBootConfiguration({})).toEqual({ selected: "local", allowLocal: true });
-    expect(readCodexBootConfiguration({ GENBI_CODEX_RUNTIME: "app-server", GENBI_ALLOW_LOCAL_RUNTIME: "0" })).toMatchObject({ selected: "codex-app-server", allowLocal: false });
-    expect(() => readCodexBootConfiguration({ GENBI_CODEX_RUNTIME: "auto" })).toThrow();
-    expect(() => readCodexBootConfiguration({ GENBI_ALLOW_LOCAL_RUNTIME: "false" })).toThrow();
+  it("defaults local and takes the app-server mode only from the resolved selection", () => {
+    expect(readCodexBootConfiguration({}, resolveRuntimeSelection({}))).toEqual({ selected: "local" });
+    expect(readCodexBootConfiguration({}, resolveRuntimeSelection({ GENBI_BACKEND: "codex", GENBI_CODEX_MODE: "app-server" }))).toEqual({ selected: "codex-app-server" });
+    expect(() => resolveRuntimeSelection({ GENBI_CODEX_MODE: "auto" })).toThrow("GENBI_CODEX_MODE");
+  });
+  it("reads the Codex executable and login variables only when the selection offers codex", () => {
+    const env = { GENBI_CODEX_EXECUTABLE: "/synthetic/codex", GENBI_CODEX_SOURCE: "https://example.invalid/codex" };
+    expect(readCodexBootConfiguration(env, resolveRuntimeSelection({ GENBI_BACKEND: "claude" }))).toEqual({ selected: "local" });
+    expect(readCodexBootConfiguration(env, resolveRuntimeSelection({}))).toMatchObject({ executable: "/synthetic/codex" });
   });
   it.each(["codex_identity_uncertified", "codex_dependencies_drifted"] as const)("projects the backend certification failure %s without allocating or compiling", async (code) => {
     const f = fixture(); f.backend.probe.mockResolvedValue({ readiness: runtimeNotReady("codex-app-server", "incompatible", code), diagnostic: { phase: "identity" } } as never);

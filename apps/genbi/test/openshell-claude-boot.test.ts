@@ -8,6 +8,8 @@ import { HOST_ENDPOINTS } from "../server/runtime-host/claude-host-verification.
 import { createOpenShellRuntimeComposition } from "../server/openshell-runtime-composition.js";
 import { Store } from "../server/db.js";
 import type { OpenShellDriver } from "../server/runtime-host/openshell-types.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 
 const expected = { accountUuid: "11111111-1111-4111-8111-111111111111", organizationUuid: "22222222-2222-4222-8222-222222222222", email: "synthetic@example.test", subscription: "pro" as const };
 const roots: string[] = [];
@@ -21,7 +23,7 @@ function fixture() {
     models: { haiku: "claude-haiku-4-5-20251001", sonnet: "claude-sonnet-4-6", opus: "claude-opus-4-6" } };
   const file = path.join(root, "boot.json");
   const save = (value: unknown = descriptor) => writeFileSync(file, JSON.stringify(value), { mode: 0o600 }); save();
-  const env = { GENBI_CLAUDE_RUNTIME: "openshell", GENBI_OPENSHELL_CLAUDE_BOOT: file };
+  const env = { GENBI_OPENSHELL_CLAUDE_BOOT: file };
   return { root, file, descriptor, env, save };
 }
 describe("protected OpenShell Claude boot", () => {
@@ -38,8 +40,8 @@ describe("protected OpenShell Claude boot", () => {
     const verify = vi.spyOn(ClaudeAccountVault.prototype, "verify").mockRejectedValue(Error("synthetic verifier refusal"));
     const driver = { version: "synthetic", identity, modelIdentity: identity, probe: async () => {}, list: async () => [] } as unknown as OpenShellDriver;
     const store = new Store(":memory:");
-    const composition = await createOpenShellRuntimeComposition({ env: { GENBI_CLAUDE_RUNTIME: "openshell", GENBI_OPENSHELL_CONFIG: config,
-      ...(kind !== "absent" ? { GENBI_OPENSHELL_CLAUDE_BOOT: f.file } : {}) }, store, stateRoot: path.join(f.root, "lifecycle"), driver });
+    const composition = await createOpenShellRuntimeComposition({ env: { GENBI_OPENSHELL_CONFIG: config,
+      ...(kind !== "absent" ? { GENBI_OPENSHELL_CLAUDE_BOOT: f.file } : {}) }, selection: openshellClaude, store, stateRoot: path.join(f.root, "lifecycle"), driver });
     try {
       if (kind === "valid") { expect(verify).toHaveBeenCalledExactlyOnceWith(expected); expect(verify.mock.instances[0]).toBe(composition.claudeVault); expect(composition.claudeVault?.status().state).toBe("unverified"); }
       else { expect(verify).not.toHaveBeenCalled(); expect(composition.claudeVault).toBeUndefined(); }
@@ -47,8 +49,9 @@ describe("protected OpenShell Claude boot", () => {
     } finally { await composition.shutdown(); store.close(); }
   });
   it("is absent unless server selected OpenShell and explicit descriptor", () => {
-    const f = fixture(); expect(readOpenShellClaudeBoot({})).toBeUndefined(); expect(readOpenShellClaudeBoot({ GENBI_CLAUDE_RUNTIME: "openshell" })).toBeUndefined();
-    expect(readOpenShellClaudeBoot({ ...f.env, GENBI_CLAUDE_RUNTIME: "local" })).toBeUndefined();
+    const f = fixture(); expect(readOpenShellClaudeBoot({}, openshellClaude)).toBeUndefined(); expect(readOpenShellClaudeBoot({}, resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" }))).toBeUndefined();
+    expect(readOpenShellClaudeBoot(f.env, resolveRuntimeSelection({}))).toBeUndefined();
+    expect(readOpenShellClaudeBoot(f.env, resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "pi" }))).toBeUndefined();
   });
   it.each(["flag", "version", "unknown", "credential", "endpoint", "tuple", "relative", "alias", "unknown-alias", "missing-pki", "missing-account"])("fails closed on %s", kind => {
     const f = fixture(); const value = structuredClone(f.descriptor) as Record<string, unknown>;
@@ -63,7 +66,7 @@ describe("protected OpenShell Claude boot", () => {
     if (kind === "unknown-alias") value.models = { fast: "claude-haiku-4-5-20251001" };
     if (kind === "missing-pki") rmSync(f.descriptor.clientKey);
     if (kind === "missing-account") rmSync(path.join(f.descriptor.vaultRoot, "account.json"));
-    f.save(value); expect(readOpenShellClaudeBoot(f.env)).toBeUndefined();
+    f.save(value); expect(readOpenShellClaudeBoot(f.env, openshellClaude)).toBeUndefined();
   });
   it.each(["file-mode", "parent-mode", "symlink", "pki-mode"])("rejects unsafe %s", kind => {
     const f = fixture();
@@ -71,16 +74,16 @@ describe("protected OpenShell Claude boot", () => {
     if (kind === "parent-mode") chmodSync(f.root, 0o755);
     if (kind === "symlink") { const saved = f.file + ".saved"; writeFileSync(saved, readFileSync(f.file), { mode: 0o600 }); rmSync(f.file); symlinkSync(saved, f.file); }
     if (kind === "pki-mode") chmodSync(f.descriptor.clientKey, 0o644);
-    expect(readOpenShellClaudeBoot(f.env)).toBeUndefined();
+    expect(readOpenShellClaudeBoot(f.env, openshellClaude)).toBeUndefined();
   });
   it("binds descriptor and PKI currentness without opening a connection", () => {
-    const f = fixture(); const boot = readOpenShellClaudeBoot(f.env)!;
+    const f = fixture(); const boot = readOpenShellClaudeBoot(f.env, openshellClaude)!;
     expect(() => boot.assertCurrent()).not.toThrow(); expect(() => { boot.descriptor.models.haiku = "forged"; }).toThrow();
     f.save({ ...f.descriptor, models: { haiku: "claude-other-pinned" } }); expect(() => boot.assertCurrent()).toThrow("changed");
     f.save(); writeFileSync(f.descriptor.clientKey, "replacement"); expect(() => boot.assertCurrent()).toThrow("changed");
   });
   it("resolves only explicit aliases and rejects recursive inherit/missing map", () => {
-    const f = fixture(); const boot = readOpenShellClaudeBoot(f.env)!;
+    const f = fixture(); const boot = readOpenShellClaudeBoot(f.env, openshellClaude)!;
     expect(resolveOpenShellClaudeModel("haiku", "", boot.descriptor)).toBe(f.descriptor.models.haiku);
     expect(resolveOpenShellClaudeModel("inherit", "haiku", boot.descriptor)).toBe(f.descriptor.models.haiku);
     expect(resolveOpenShellClaudeModel("inherit", "claude-fixed-driver", boot.descriptor)).toBe("claude-fixed-driver");
@@ -97,12 +100,12 @@ describe("protected OpenShell Claude boot", () => {
     const vault = ClaudeAccountVault.forTesting({ root: f.descriptor.vaultRoot, transport });
     try {
       vault.enroll({ accessToken: "synthetic-imported-access", refreshToken: "synthetic-retained-refresh", expiresAt: Date.now() + 3600_000 });
-      const boot = readOpenShellClaudeBoot(f.env)!;
+      const boot = readOpenShellClaudeBoot(f.env, openshellClaude)!;
       expect(vault.status().state).toBe("unverified"); await verifyRetainedOpenShellClaudeBoot(vault, boot);
       expect(vault.status().state).toBe("verified"); expect(transport.mock.calls.map(([url]) => url)).toEqual([HOST_ENDPOINTS.refresh, HOST_ENDPOINTS.profile]);
       const calls = transport.mock.calls.length;
       f.save({ ...f.descriptor, expected: { ...expected, email: "different@example.test" } });
-      await expect(verifyRetainedOpenShellClaudeBoot(vault, readOpenShellClaudeBoot(f.env)!)).rejects.toThrow("identity");
+      await expect(verifyRetainedOpenShellClaudeBoot(vault, readOpenShellClaudeBoot(f.env, openshellClaude)!)).rejects.toThrow("identity");
       expect(transport).toHaveBeenCalledTimes(calls);
       vault.close();
       const restarted = new ClaudeAccountVault({ root: f.descriptor.vaultRoot });

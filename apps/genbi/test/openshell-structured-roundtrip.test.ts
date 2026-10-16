@@ -27,6 +27,8 @@ import { NativeSessionService } from "../server/native-sessions.js";
 import { RuntimeHost } from "../server/runtime-host/local.js";
 import { streamTurn, effectiveRouteOptions, type TurnDeps } from "../server/turn.js";
 import { createApp } from "../server/app.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
@@ -137,7 +139,7 @@ async function fixture(change?: (store: Store) => void, failureMode?: "query" | 
   const queryStarted = new Promise<void>(resolve => { queryStartedResolve = resolve; });
   const identity = { image: digest, policy: digest, gateway: "synthetic", workspace: "default", configuration: digest };
   const driver: OpenShellDriver = { version: "synthetic", identity, modelIdentity: identity, probe: async () => {}, create: async intent => { const resource = { id: intent.id, name: intent.name, workspace: "default", labels: { "genbi-lifecycle-owner": intent.owner } }; resources.set(intent.name, resource); return resource; }, list: async intent => [...resources.values()].filter(resource => resource.name === intent.name), inspect: async intent => resources.get(intent.name)!, remove: async intent => { resources.delete(intent.name); }, assertAbsent: async intent => { expect(resources.has(intent.name)).toBe(false); }, exec: async (_intent, argv) => { if (argv[1] !== "/opt/genbi/claude-step-control.mjs") throw Error("no live runtime"); if (argv[2] === "--baseline") return JSON.stringify({ type: "genbi.session.baseline", version: 1, processes: [] }); if (argv[2] === "--check") return JSON.stringify({ type: "genbi.session.checked", version: 1, remaining: 0 }); if (controls.helperFailure && observedQuery) throw Error("synthetic uncertain model cleanup"); return JSON.stringify({ ...JSON.parse(argv[2]!).receipt, type: "genbi.step.cleaned", remaining: 0 }); }, duplex: async intent => { if (intent.identity.purpose !== "model" && intent.identity.purpose !== "model_session") throw Error("not a model step"); const stream = peer(intent.identity.purpose === "model" ? intent.identity.model : "synthetic-model", receipt, () => expectedTools, change ? () => change(store) : undefined, intent.identity.purpose === "model_session"); streams.push(stream); return stream; } };
-  const composition = await createOpenShellRuntimeCompositionForTesting({ env: { GENBI_CLAUDE_RUNTIME: "openshell", GENBI_OPENSHELL_CONFIG: config }, store, stateRoot: path.join(root, "lifecycle"), driver, claude: { vault, duplex: driver.duplex! } });
+  const composition = await createOpenShellRuntimeCompositionForTesting({ env: { GENBI_OPENSHELL_CONFIG: config }, selection: openshellClaude, store, stateRoot: path.join(root, "lifecycle"), driver, claude: { vault, duplex: driver.duplex! } });
   Object.defineProperty(composition, "dataWorkerAvailable", { value: true });
   // Credential-free synthetic data peer exercises the production bounded adapter.
   // Actual Linux/OpenShell execution is a separate container acceptance gate.
@@ -170,7 +172,7 @@ async function fixture(change?: (store: Store) => void, failureMode?: "query" | 
     catch (error) { phases.push("prepare:" + String(error)); throw error; }
   };
   const local = vi.fn(async () => { throw Error("local fallback forbidden"); });
-  const runtime = new StructuredRuntime({ diagnostics, selected: { claude: "openshell", codex: "local" }, allowLocal: false, localRoute: local, localSetupFor: () => undefined, adapters: { claude: createOpenShellStructuredAdapter(provisioner,diagnostics) }, onRevoke: composition.revokeRuntime });
+  const runtime = new StructuredRuntime({ diagnostics, selection: openshellClaude, localRoute: local, localSetupFor: () => undefined, adapters: { claude: createOpenShellStructuredAdapter(provisioner,diagnostics) }, onRevoke: composition.revokeRuntime });
   const deps = { store, structuredRuntime: runtime, route: local, baseRouteOptions: { ...(controls.componentLimits ? { componentLimits: controls.componentLimits } : {}), authChoice: { mode: "subscription", provider: "claude" }, profileSource, userProject: project, question: "count orders" } } as TurnDeps;
   const native = new OpenShellNativeSessions({ store, provisioner, runtime: () => runtime, getBinding: () => store.getEnrichmentBinding(), routeOptions: () => effectiveRouteOptions(deps) });
   const nativeService = new NativeSessionService({ store, openShellNative: native, workspaceRoot: root, terminalManager: async () => { throw Error("no terminal"); }, getBinding: () => store.getEnrichmentBinding(), warbleBin: producer, irPaths: { analysis: path.join(profileSource, "ir.golden.json"), setup: undefined, context_enrichment: undefined }, nativeHome: root, sourceWrenHome: () => home, runtimeHost: new RuntimeHost({ selected: "openshell", deployment: "development", localAvailable: () => false, vendorProbes: { openshell: composition.probe } }) });

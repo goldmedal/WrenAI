@@ -6,6 +6,7 @@ export async function installedClaudeTransportFixture(packageRoot) {
   packageRoot = fs.realpathSync(packageRoot);
   const module = name => import(pathToFileURL(path.join(packageRoot, 'dist-server/server', name + '.js')).href);
   const { ClaudeAccountVault } = await module('runtime-host/claude-account-vault');
+  const { resolveRuntimeSelection } = await module('runtime-selection');
   const { attestOpenShellSdk } = await module('runtime-host/openshell-sdk-assets');
   const { claimClaudeHostRuntime, deriveClaudeNativeRuntime } = await module('runtime-host/openshell-claude-provider');
   const { observeClaudeHostNoModel } = await module('runtime-host/claude-identity-verifier');
@@ -51,7 +52,7 @@ export async function installedClaudeTransportFixture(packageRoot) {
   const configFile=path.join(root,'config.json');fs.writeFileSync(configFile,JSON.stringify({executable:'/synthetic/openshell',executableDigest:digest,version:'0.0.1',gateway:'synthetic',workspace:'default',image:digest,supervisorImage:digest,policy:'/synthetic/policy',policyDigest:digest,home:root,configHome:root,stateHome:root,dockerExecutable:'/synthetic/docker',dockerRealpath:'/synthetic/docker',dockerDigest:digest,dockerSocket:'/synthetic/socket',dockerNamespace:'synthetic',exclusive:true}));
   const store = new Store(':memory:');let composition;
   try {
-    composition=await createOpenShellRuntimeCompositionForTesting({env:{GENBI_CLAUDE_RUNTIME:'openshell',GENBI_OPENSHELL_CONFIG:configFile},store,stateRoot:path.join(root,'lifecycle'),driver,claude:{vault,sdkQueryForTesting:args=>{notificationServer=args.options.mcpServers?.component?.instance;return directQuery(args);},duplex:async()=>{throw Error('driver seam only')}}});
+    composition=await createOpenShellRuntimeCompositionForTesting({env:{GENBI_OPENSHELL_CONFIG:configFile},selection:resolveRuntimeSelection({GENBI_RUNTIME:'openshell',GENBI_BACKEND:'claude'}),store,stateRoot:path.join(root,'lifecycle'),driver,claude:{vault,sdkQueryForTesting:args=>{notificationServer=args.options.mcpServers?.component?.instance;return directQuery(args);},duplex:async()=>{throw Error('driver seam only')}}});
     const scope={backend:'openshell',account:status.fingerprint,generation:status.generation,session:'first-session',turn:'turn',binding:'binding',bindingGeneration:'1',bindingRevision:digest,context:digest,plan:digest,...driverIdentity};
     const run={tier:'cheap',request:'synthetic',input:{},consumes:{},children:[],prompt:'only this step',signal:new AbortController().signal,tools:{echo:async input=>{calls++;assert.deepEqual(input,{text:'合成'});return {echo:'合成'}}},toolDescriptions:{},toolSchemas:{echo:{type:'object',properties:{text:{type:'string'}},required:['text'],additionalProperties:false}}};
     const observation=composition.claudeProvider({scope,currentScope:()=>scope,models:{cheap:'synthetic-model'},assertCurrent(){}});
@@ -103,7 +104,7 @@ export async function installedClaudeTransportFixture(packageRoot) {
     let workerSignal,finishWorker;const blockedWorker=owned.effect(async signal=>{workerSignal=signal;return new Promise(resolve=>finishWorker=resolve)});
     const workerRejected=assert.rejects(blockedWorker);
     const {StructuredRuntime}=await module('structured-runtime');const signals=[],releases=[];
-    const structured=new StructuredRuntime({selected:{codex:'local',claude:'local'},allowLocal:true,onRevoke:()=>composition.revoke(),localSetupFor:()=>undefined,
+    const structured=new StructuredRuntime({selection:resolveRuntimeSelection({}),onRevoke:()=>composition.revoke(),localSetupFor:()=>undefined,
       localRoute:async options=>{signals.push(options.signal);return new Promise(resolve=>releases.push(()=>resolve({backend:'codex-local',warnings:[],finalText:'late completion'})))} });
     const requests=[0,1].map(index=>structured.route({authChoice:{mode:'subscription',provider:'claude'},profileSource:'synthetic',userProject:'/synthetic',question:'blocked'},
       {sessionId:'blocked-'+index,turnId:'turn',assertCurrent(){}}));

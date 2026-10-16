@@ -11,6 +11,8 @@ import type { TurnDeps } from "../server/turn.js";
 import type { Bundle, RouteOptions, RouteResult } from "../harness/index.js";
 import type { ArtifactDto, SavedEvent } from "../server/wire-types.js";
 import { parseSse } from "./bff-sse-helpers.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const codexAppServerOnly = resolveRuntimeSelection({ GENBI_BACKEND: "codex", GENBI_CODEX_MODE: "app-server" });
 
 /**
  * Root cause: on dispatched (`backend: "agent-sdk"`), a successful
@@ -318,7 +320,7 @@ describe("dispatched dashboard/report turns persist an artifact from the recover
   it.each([false, true])("direct structured dashboard fences asynchronous artifact lookup (stale: %s)", async (stale) => {
     const envelope = { blocks: [{ type: "kpi_card", label: "Orders", value: 99 }], summary: "Orders", verified: true };
     const deps = buildDeps(async () => { throw Error("local fallback"); });
-    const runtime = new StructuredRuntime({ selected: { codex: "codex-app-server", claude: "claude-sandbox-runtime" }, allowLocal: false,
+    const runtime = new StructuredRuntime({ selection: codexAppServerOnly,
       localRoute: deps.route, localSetupFor: () => undefined,
       adapters: { codex: { vendor: "codex", backend: "codex-app-server", probe: async () => runtimeReady("0.156.1", []),
         ask: async () => ({ backend: "codex-app-server", warnings: [], envelope, finalText: "Orders" }) } } });

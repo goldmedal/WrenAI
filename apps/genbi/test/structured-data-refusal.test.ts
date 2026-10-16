@@ -5,6 +5,8 @@ import { observeStructuredQueryAccess, structuredDataRefusal } from "../server/s
 import { StructuredRuntime, StructuredRuntimeError } from "../server/structured-runtime.js";
 import { runtimeReady } from "../server/runtime-host/policy.js";
 import { getAskSessionData, streamTurn, type TurnDeps } from "../server/turn.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 
 const stores: Store[] = [];
 afterEach(() => { for (const store of stores.splice(0)) store.close(); });
@@ -21,7 +23,7 @@ function fixture(error: unknown, change?: (store: Store) => void) {
   const turn = store.createTurn({ id: "test-turn", sessionId: session.id, question: "synthetic question", composedInput: null });
   const ask = vi.fn(async () => { change?.(store); throw error; });
   const local = vi.fn(async () => { throw Error("local forbidden"); });
-  const runtime = new StructuredRuntime({ selected: { claude: "openshell", codex: "local" }, allowLocal: false, localRoute: local, localSetupFor: () => undefined,
+  const runtime = new StructuredRuntime({ selection: openshellClaude, localRoute: local, localSetupFor: () => undefined,
     adapters: { claude: { vendor: "claude", backend: "openshell", probe: async () => runtimeReady("synthetic", []), ask } } });
   const deps: TurnDeps = { store, route: local, structuredRuntime: runtime, baseRouteOptions };
   return { store, session, turn, ask, deps };

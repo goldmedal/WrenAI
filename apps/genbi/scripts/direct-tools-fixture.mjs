@@ -110,6 +110,7 @@ export async function installedDirectToolsFixture(packageRoot) {
   } finally { await service.shutdown(); store.close(); }
 
   const { StructuredRuntime } = await import(moduleAt("dist-server/server/structured-runtime.js"));
+  const { resolveRuntimeSelection } = await import(moduleAt("dist-server/server/runtime-selection.js"));
   const { createCodexStructuredAdapter } = await import(moduleAt("dist-server/server/codex-structured-ask.js"));
   const adapter = createCodexStructuredAdapter({
     backend: {
@@ -123,7 +124,7 @@ export async function installedDirectToolsFixture(packageRoot) {
       return { input: { spec: {}, wrenHome: {}, tools, assertScopeActive: scope.assertCurrent }, async dispose() {} };
     },
   });
-  const structured = new StructuredRuntime({ selected: { codex: "codex-app-server", claude: "claude-sandbox-runtime" }, allowLocal: false,
+  const structured = new StructuredRuntime({ selection: resolveRuntimeSelection({ GENBI_BACKEND: "codex", GENBI_CODEX_MODE: "app-server" }),
     localRoute: async () => { throw Error("Local fallback"); }, localSetupFor: () => { throw Error("Setup fallback"); }, adapters: { codex: adapter } });
   try {
     const before = queries;

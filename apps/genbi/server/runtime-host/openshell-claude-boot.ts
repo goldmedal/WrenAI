@@ -6,6 +6,7 @@ import { hostIdentitySchema } from "./claude-host-verification.js";
 import { connectOpenShellSdk } from "./openshell-sdk-assets.js";
 import type { OpenShellDuplex, OpenShellIntent } from "./openshell-types.js";
 import { assertActualVault, type ClaudeAccountVault } from "./claude-account-vault.js";
+import { isBackendOffered, type RuntimeSelection } from "../runtime-selection.js";
 
 const absolute = z.string().max(4096).refine(value => path.isAbsolute(value) && !value.includes("\0"));
 const model = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/)
@@ -48,8 +49,8 @@ function secureRead(file: string, maximum = 32_768): Buffer {
 const hash = (bytes: Buffer) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 
 /** Host-only opt-in. Invalid input never selects credentials, endpoints or a verifier. */
-export function readOpenShellClaudeBoot(env: NodeJS.ProcessEnv) {
-  if (env.GENBI_CLAUDE_RUNTIME !== "openshell") return undefined;
+export function readOpenShellClaudeBoot(env: NodeJS.ProcessEnv, selection: RuntimeSelection) {
+  if (selection.runtime !== "openshell" || !isBackendOffered(selection, "claude")) return undefined;
   try {
     const file = absolute.parse(env.GENBI_OPENSHELL_CLAUDE_BOOT);
     const bytes = secureRead(file);

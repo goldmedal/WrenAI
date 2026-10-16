@@ -4,6 +4,7 @@ import { effectiveRouteOptions } from "./turn.js";
 import { createCodexRuntimeComposition, readCodexBootConfiguration } from "./codex-runtime-composition.js";
 import { createCodexStructuredAdapter } from "./codex-structured-ask.js";
 import { createOpenShellRuntimeComposition, selectNativeRuntimeBackend } from "./openshell-runtime-composition.js";
+import { isBackendOffered, localTerminalAvailable, resolveRuntimeSelection, RuntimeSelectionError, type RuntimeSelection } from "./runtime-selection.js";
 import { createOpenShellStructuredAdapter } from "./openshell-structured-ask.js";
 import { createOpenShellStructuredProvisioner, resolveStructuredClaudeModels } from "./openshell-structured-provisioner.js";
 import { resolveOpenShellClaudeModel } from "./runtime-host/openshell-claude-boot.js";
@@ -241,7 +242,17 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  let runtimeSelection: RuntimeSelection;
+  try {
+    runtimeSelection = resolveRuntimeSelection(process.env);
+  } catch (error) {
+    if (!(error instanceof RuntimeSelectionError)) throw error;
+    process.stderr.write(`error: ${error.message}\n`);
+    process.exitCode = 1;
+    return;
+  }
   process.stdout.write(`${describeExecutionLimitsConfig(executionLimits)}\n`);
+  if (runtimeSelection.warnings.length > 0) process.stderr.write(`warning: ${runtimeSelection.warnings.join(" ")}\n`);
   const port = Number.parseInt(process.env["PORT"] ?? "4787", 10);
   const host = process.env["GENBI_HOST"]?.trim() || "127.0.0.1";
   const workspaceRoot = process.env["WREN_HARNESS_WORKSPACE_ROOT"];
@@ -669,12 +680,12 @@ async function main(): Promise<void> {
   // requests never reach this selection or its executable/policy inputs.
   // Read at admission time so an operator override from the Harness page applies to the next session.
   const getComponentLimits = () => effectiveExecutionLimits(executionLimits, store.getExecutionLimitSettings()).componentLimits;
-  const codexConfiguration = readCodexBootConfiguration(process.env);
+  const codexConfiguration = readCodexBootConfiguration(process.env, runtimeSelection);
   const codexComposition = createCodexRuntimeComposition({ configuration: codexConfiguration, packageRoot,
     producerBinary: producerExecutable?.executable ?? "", profileSource: harnessProfileSources.analysis, store,
     getBinding: currentInteractiveBinding, sourceWrenHome: nativeSourceWrenHome, artifacts: nativeArtifacts,
     getComponentLimits });
-  const openshellComposition = await createOpenShellRuntimeComposition({ env: process.env, store, stateRoot: nativeMaterializationState.root, currentProject: getUserProject });
+  const openshellComposition = await createOpenShellRuntimeComposition({ env: process.env, selection: runtimeSelection, store, stateRoot: nativeMaterializationState.root, currentProject: getUserProject });
   const openshellProvisioner = createOpenShellStructuredProvisioner({
     composition: openshellComposition, store, producerBinary: producerExecutable?.executable ?? "", wrenBinary: nativeWrenExecutable?.executable ?? "",
     profileSource, hostHome: nativeHome, sourceWrenHome: nativeSourceWrenHome, getBinding: currentInteractiveBinding,
@@ -688,14 +699,14 @@ async function main(): Promise<void> {
     },
   });
   const openshellStructured = createOpenShellStructuredAdapter(openshellProvisioner);
+  const claudeOnOpenShell = runtimeSelection.runtime === "openshell" && isBackendOffered(runtimeSelection, "claude");
   const nativeRuntimeHost = new RuntimeHost({
-    selected: (vendor) => selectNativeRuntimeBackend({ vendor: vendor ?? store.getNativeRuntimeBinding().provider,
-      codexBackend: codexConfiguration.selected, claudeOpenShell: openshellComposition.selected }),
+    selected: () => selectNativeRuntimeBackend({ selection: runtimeSelection, codexBackend: codexConfiguration.selected }),
     deployment: process.env["NODE_ENV"] === "production" ? "production" : "development",
-    localAvailable: () => codexConfiguration.allowLocal ? nativeTerminalHostAvailable() : false,
+    localAvailable: localTerminalAvailable(runtimeSelection, nativeTerminalHostAvailable),
     vendorProbes: { "codex-app-server": codexComposition.probe, openshell: openshellComposition.probe },
   });
-  const openShellNative = openshellComposition.selected ? new OpenShellNativeSessions({ store, provisioner: openshellProvisioner, runtime: () => structuredRuntime, getBinding: currentInteractiveBinding, routeOptions: () => effectiveRouteOptions(deps) }) : undefined;
+  const openShellNative = claudeOnOpenShell ? new OpenShellNativeSessions({ store, provisioner: openshellProvisioner, runtime: () => structuredRuntime, getBinding: currentInteractiveBinding, routeOptions: () => effectiveRouteOptions(deps) }) : undefined;
   const nativeSessions = new NativeSessionService({
     ...(openShellNative ? { openShellNative } : {}),
     store,
@@ -741,6 +752,7 @@ async function main(): Promise<void> {
     warbleBin: producerExecutable?.executable ?? "warble",
     terminalHostAvailable: nativeTerminalHostAvailable,
     runtimeHost: nativeRuntimeHost,
+    selection: runtimeSelection,
     directCodex: codexComposition.native,
     resolveManagedCodexWrenRuntime: () => resolveManagedWrenRuntime({ packageRoot }),
     nativeHome,
@@ -755,8 +767,8 @@ async function main(): Promise<void> {
 
   // Explicit opt-in remains behind the packaged exact-version certification gate.
   const structuredRuntime = new StructuredRuntime({
-    selected: { codex: codexConfiguration.selected, claude: openshellComposition.selected ? "openshell" : "local" }, allowLocal: codexConfiguration.allowLocal, deployment,
-    adapters: { codex: createCodexStructuredAdapter(codexComposition.structured), ...(openshellComposition.selected ? { claude: openshellStructured } : {}) },
+    selection: runtimeSelection, deployment,
+    adapters: { codex: createCodexStructuredAdapter(codexComposition.structured), ...(claudeOnOpenShell ? { claude: openshellStructured } : {}) },
     onRevoke: openshellComposition.revokeRuntime,
     localRoute: route, localSetupFor: (choice) => setupRunnerFor?.(choice) ?? setupRunner,
   });

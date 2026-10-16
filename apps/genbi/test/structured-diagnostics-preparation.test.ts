@@ -22,6 +22,8 @@ import { streamTurn, type TurnDeps } from "../server/turn.js";
 import { createApp } from "../server/app.js";
 
 import type { StructuredDiagnosticObserver, StructuredDiagnosticRecord } from "../server/structured-diagnostics.js";
+import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 const digest = "sha256:" + "a".repeat(64);
@@ -66,7 +68,7 @@ async function fixture(diagnostics: StructuredDiagnosticObserver) {
   const identity = { image: digest, policy: digest, gateway: "synthetic", workspace: "default", configuration: digest };
   const never = async (): Promise<never> => { throw Error("No runtime or network permitted"); };
   const driver: OpenShellDriver = { version: "synthetic", identity, modelIdentity: identity, probe: async () => {}, create: never, list: never, inspect: never, remove: never, assertAbsent: never, exec: never, duplex: never };
-  const composition = await createOpenShellRuntimeCompositionForTesting({ env: { GENBI_CLAUDE_RUNTIME: "openshell", GENBI_OPENSHELL_CONFIG: config }, store, stateRoot: path.join(root, "lifecycle"), driver, claude: { vault, duplex: driver.duplex! } });
+  const composition = await createOpenShellRuntimeCompositionForTesting({ env: { GENBI_OPENSHELL_CONFIG: config }, selection: openshellClaude, store, stateRoot: path.join(root, "lifecycle"), driver, claude: { vault, duplex: driver.duplex! } });
   cleanup.push(async () => { await composition.shutdown(); store.close(); });
   // This diagnostic fixture stops before opening any worker; admit preparation explicitly.
   Object.defineProperty(composition, "dataWorkerAvailable", { value: true });
@@ -76,7 +78,7 @@ async function fixture(diagnostics: StructuredDiagnosticObserver) {
   const profileSource = path.join(application, "profiles/genbi-default");
   const provisioner = createOpenShellStructuredProvisioner({ composition, store, producerBinary: producer, wrenBinary: wren, profileSource, hostHome: root, sourceWrenHome: () => home, getBinding: () => store.getEnrichmentBinding(), modelsFor: settings => resolveStructuredClaudeModels(settings, () => "synthetic-model"), assertConfigurationCurrent() {}, diagnostics });
   const local = vi.fn(async () => { throw Error("No fallback"); });
-  const runtime = new StructuredRuntime({ selected: { claude: "openshell", codex: "local" }, allowLocal: false, localRoute: local, localSetupFor: () => undefined, adapters: { claude: createOpenShellStructuredAdapter(provisioner, diagnostics) }, diagnostics });
+  const runtime = new StructuredRuntime({ selection: openshellClaude, localRoute: local, localSetupFor: () => undefined, adapters: { claude: createOpenShellStructuredAdapter(provisioner, diagnostics) }, diagnostics });
   const app = createApp({ store, structuredRuntime: runtime, route: local, baseRouteOptions: { authChoice: { mode: "subscription", provider: "claude" }, profileSource, userProject: project } });
   return { root, store, runtime, app, local, providerBoundaries: () => providerBoundaries };
 }

@@ -25,7 +25,8 @@ export interface RuntimeHostOptions {
   /** Server-owned selection. Browser input is deliberately absent from this type. */
   readonly selected: RuntimeBackendId | ((vendor?: "codex" | "claude") => RuntimeBackendId);
   readonly deployment: RuntimeDeployment;
-  readonly localAvailable: () => boolean | Promise<boolean>;
+  /** Receives the vendor under probe, so a boot that does not offer that vendor locally can say so. */
+  readonly localAvailable: (vendor?: "codex" | "claude") => boolean | Promise<boolean>;
   /** Internal test/adaptor seam. Future vendor adapters must supply this server-side. */
   readonly vendorProbes?: VendorRuntimeProbes;
 }
@@ -52,7 +53,7 @@ export class RuntimeHost {
 
   constructor(private readonly options: RuntimeHostOptions) {}
 
-  private async probeLocal(): Promise<RuntimeBackendProbeResult<"local">> {
+  private async probeLocal(vendor?: "codex" | "claude"): Promise<RuntimeBackendProbeResult<"local">> {
     if (this.options.deployment === "production") {
       return {
         readiness: runtimeNotReady("local", "unavailable", "local_runtime_production_forbidden"),
@@ -60,7 +61,7 @@ export class RuntimeHost {
       };
     }
     try {
-      if (await this.options.localAvailable()) {
+      if (await this.options.localAvailable(vendor)) {
         return {
           readiness: runtimeReady("development-local", ["pty", "terminal_replay", "terminal_resize", "terminal_terminate"]),
           diagnostic: { phase: "capability", requiredCapability: "pty" },
@@ -99,7 +100,7 @@ export class RuntimeHost {
 
   async probe(vendor?: "codex" | "claude"): Promise<RuntimeReadiness> {
     const [local, codex, claude, openshell] = await Promise.all([
-      this.probeLocal(),
+      this.probeLocal(vendor),
       this.probeCodex(),
       this.probeClaude(),
       this.options.vendorProbes?.openshell?.().catch(() => ({ readiness: runtimeNotReady("openshell", "unavailable", "runtime_probe_failed"), diagnostic: { phase: "probe" as const } })) ?? Promise.resolve({ readiness: runtimeNotReady("openshell", "unprovisioned", "openshell_configuration_invalid"), diagnostic: { phase: "provisioning" as const } }),

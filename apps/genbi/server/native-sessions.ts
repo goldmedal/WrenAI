@@ -36,6 +36,7 @@ import { sealNativeClaudeResumeHandle, sealNativeResumeHandle, unsealNativeResum
 import { RuntimeHost } from "./runtime-host/local.js";
 import { runtimeNotReady } from "./runtime-host/policy.js";
 import type { RuntimeReadiness } from "./runtime-host/types.js";
+import { BACKENDS, type BackendName, type RuntimeSelection } from "./runtime-selection.js";
 import type { OpenShellNativeSessions, ScopedAttachment, ScopedFrame, ScopedReplay } from "./openshell-native-sessions.js";
 
 export const NATIVE_VENDORS = ["claude", "codex"] as const;
@@ -243,7 +244,14 @@ export type NativeSessionReadiness = {
   readonly profiles?: Readonly<Record<string, NativeProfileReadiness>>;
   /** Health of the host-owned GenBI MCP endpoint; never includes a credential. */
   readonly mcp: NativeMcpHealth;
+  /** Where agents run and, per backend, whether it is offered, kept apart from `runtime` (the saved Runtime binding). */
+  readonly runtimeSelection?: NativeRuntimeSelectionReadiness;
 } & Record<NativePurpose, NativePurposeReadiness>;
+
+export interface NativeRuntimeSelectionReadiness {
+  readonly runtime: RuntimeSelection["runtime"];
+  readonly backends: Readonly<Record<BackendName, { readonly offered: boolean; readonly state: "ready" | "unavailable" | "not_offered"; readonly reason?: string }>>;
+}
 
 /**
  * The profile component each purpose enters through. This host owns these names: the components
@@ -478,6 +486,8 @@ export interface NativeSessionServiceOptions {
   readonly terminalHostAvailable?: () => Promise<boolean>;
   /** Phase-1 readiness boundary; no runtime host can be selected by browser input. */
   readonly runtimeHost?: RuntimeHost;
+  /** Boot selection: a vendor the runtime does not offer is refused at launch and reported not offered. */
+  readonly selection?: RuntimeSelection;
   /** Test seam for the local executable probe. */
   readonly executableAvailable?: (vendor: NativeVendor) => boolean;
   /** Test seam for the configured local Warble producer probe. */
@@ -1230,7 +1240,27 @@ export class NativeSessionService {
     return result;
   }
 
+  /** Why this boot does not offer the vendor, or undefined when it does (or no selection is wired). */
+  private vendorNotOffered(vendor: NativeVendor): string | undefined {
+    const offer = this.options.selection?.offers[vendor];
+    return offer && !offer.offered ? `The ${vendor} backend is not offered: ${offer.reason}` : undefined;
+  }
+
+  private runtimeSelectionReadiness(purposes: Readonly<Record<NativePurpose, NativePurposeReadiness>>): { runtimeSelection?: NativeRuntimeSelectionReadiness } {
+    const selection = this.options.selection;
+    if (!selection) return {};
+    const backends = Object.fromEntries(BACKENDS.map((name) => {
+      const offer = selection.offers[name];
+      if (!offer.offered) return [name, { offered: false, state: "not_offered" as const, ...(offer.reason ? { reason: offer.reason } : {}) }];
+      const state = name !== "pi" && purposes.analysis.vendors?.[name]?.available ? "ready" as const : "unavailable" as const;
+      return [name, { offered: true, state }];
+    })) as NativeRuntimeSelectionReadiness["backends"];
+    return { runtimeSelection: { runtime: selection.runtime, backends } };
+  }
+
   private async assertSelectedRuntimeReady(vendor?: NativeVendor): Promise<RuntimeReadiness> {
+    const refusal = vendor ? this.vendorNotOffered(vendor) : undefined;
+    if (refusal) throw new InteractiveLaunchError(refusal);
     const readiness = await this.runtimeHost.probe(vendor);
     if (readiness.selected === "openshell") throw new InteractiveLaunchError("OpenShell native model sessions are not supported.");
     if (readiness.selectedReadiness.state !== "ready") throw new InteractiveLaunchError(readiness.selectedReadiness.message);
@@ -1674,14 +1704,15 @@ export class NativeSessionService {
     const runtimeHostReadiness = await this.runtimeHost.probe();
     if (runtimeHostReadiness.selected === "openshell") {
       const scoped = await this.options.openShellNative?.readiness();
-      const reason = scoped?.state === "ready" ? undefined : scoped?.message ?? "OpenShell scoped analysis is unavailable.";
+      const claudeRefusal = this.vendorNotOffered("claude");
+      const reason = claudeRefusal ?? (scoped?.state === "ready" ? undefined : scoped?.message ?? "OpenShell scoped analysis is unavailable.");
       const purposes = Object.fromEntries(NATIVE_PURPOSES.map((purpose) => [purpose, {
         scopeKind: NATIVE_DISPATCH_REGISTRY[purpose].scopeKind, profile: NATIVE_DISPATCH_REGISTRY[purpose].profile,
         target: "claude-code:interactive", targetLabel: "OpenShell scoped analysis",
         available: purpose === "analysis" && reason === undefined, ...(purpose !== "analysis" ? { reason: "This purpose is unavailable. Official Claude TUI is unavailable." } : reason ? { reason } : {}),
-        vendors: { codex: { available: false }, claude: { available: purpose === "analysis" && reason === undefined } },
+        vendors: { codex: { available: false, ...(this.vendorNotOffered("codex") ? { reason: this.vendorNotOffered("codex")! } : {}) }, claude: { available: purpose === "analysis" && reason === undefined } },
       }])) as Record<NativePurpose, NativePurposeReadiness>;
-      return { runtime: this.options.store.getNativeRuntimeBinding(), runtimeHost: runtimeHostReadiness, purposes, ...purposes,
+      return { runtime: this.options.store.getNativeRuntimeBinding(), runtimeHost: runtimeHostReadiness, purposes, ...this.runtimeSelectionReadiness(purposes), ...purposes,
         mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason: "Scoped sessions use host-governed analysis tools. Official Claude TUI is unavailable." } };
     }
     if (runtimeHostReadiness.selected === "codex-app-server") {
@@ -1698,10 +1729,10 @@ export class NativeSessionService {
         const unavailable = reason ?? (purpose !== "analysis" ? "This purpose is not supported by direct Codex sessions." : undefined);
         return [purpose, { scopeKind: NATIVE_DISPATCH_REGISTRY[purpose].scopeKind, profile: NATIVE_DISPATCH_REGISTRY[purpose].profile,
           target: "codex:interactive", targetLabel: "Codex CLI", available: !unavailable, ...(unavailable ? { reason: unavailable } : {}),
-          vendors: { codex: { available: !unavailable }, claude: { available: false } } }];
+          vendors: { codex: { available: !unavailable }, claude: { available: false, ...(this.vendorNotOffered("claude") ? { reason: this.vendorNotOffered("claude")! } : {}) } } }];
       })) as Record<NativePurpose, NativePurposeReadiness>;
       const profiles = await this.conversationProfileReadiness(purposes.analysis, "codex");
-      return { runtime, runtimeHost: runtimeHostReadiness, purposes, ...(profiles ? { profiles } : {}), ...purposes, mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason: "Direct conversations use host-owned tools." } };
+      return { runtime, runtimeHost: runtimeHostReadiness, purposes, ...(profiles ? { profiles } : {}), ...this.runtimeSelectionReadiness(purposes), ...purposes, mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason: "Direct conversations use host-owned tools." } };
     }
     const hostAvailable = await terminalHostAvailable();
     const selectedRuntimeUnavailable = runtimeHostReadiness.selectedReadiness.state === "ready"
@@ -1757,7 +1788,8 @@ export class NativeSessionService {
               ? mcpReadiness.reason
               : undefined;
       const vendorRuntimeUnavailable = dispatch?.provider === "codex" ? codexWrenRuntimeUnavailable : undefined;
-      const reason = runtimeCorrection ?? selectedRuntimeUnavailable ?? vendorRuntimeUnavailable ?? sharedReason;
+      const offerRefusal = dispatch ? this.vendorNotOffered(dispatch.provider) : undefined;
+      const reason = runtimeCorrection ?? offerRefusal ?? selectedRuntimeUnavailable ?? vendorRuntimeUnavailable ?? sharedReason;
       const executable = dispatch?.provider === "claude" ? "claude" : "codex";
       const unavailable = reason ?? (!hostAvailable
         ? "native terminal host cannot spawn local processes on this machine"
@@ -1784,6 +1816,10 @@ export class NativeSessionService {
           : !hostAvailable ? { available: false, reason: "native terminal host cannot spawn local processes on this machine" }
             : !executableAvailable(vendor) ? { available: false, reason: `the ${legacyExecutable} interactive CLI is not available on this machine` }
               : { available: true };
+      }
+      for (const vendor of NATIVE_VENDORS) {
+        const refusal = this.vendorNotOffered(vendor);
+        if (refusal) vendorReadiness[vendor] = { available: false, reason: refusal };
       }
       const legacyAvailable = legacyFixture ? Object.values(vendorReadiness).some((value) => value.available) : unavailable === undefined;
       result[purpose] = {
@@ -1818,6 +1854,7 @@ export class NativeSessionService {
       runtimeHost: runtimeHostReadiness,
       purposes: result,
       ...(profiles ? { profiles } : {}),
+      ...this.runtimeSelectionReadiness(result),
       mcp: this.options.artifactService?.health() ?? {
         server: "GenBI MCP",
         tool: "save_dashboard",
