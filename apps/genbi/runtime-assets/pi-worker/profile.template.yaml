@@ -1,0 +1,26 @@
+# OpenShell provider profile for an API-key model vendor used by the pi step worker.
+# The credential is injected by OpenShell as a placeholder; the sandbox never holds the key.
+id: {{PROFILE_ID}}
+display_name: {{DISPLAY_NAME}}
+description: API-key model endpoint for the GenBI pi step worker
+category: inference
+credentials:
+- name: api_key
+  description: Model API key
+  env_vars:
+  - {{CREDENTIAL_ENV}}
+  required: true
+  auth_style: bearer
+  header_name: authorization
+endpoints:
+- host: {{ENDPOINT_HOST}}
+  port: {{ENDPOINT_PORT}}
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+binaries:
+- /usr/local/bin/node
+inference_capable: true
+discovery:
+  credentials:
+  - api_key
