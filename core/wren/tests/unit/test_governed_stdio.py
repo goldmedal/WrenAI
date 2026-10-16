@@ -251,6 +251,8 @@ LITERAL_MONTHS = (
     [
         LITERAL_MONTHS,
         "SELECT 1",
+        "SELECT 1 AS x",
+        "SELECT 9900 AS n",
         "WITH m AS (SELECT 1 AS n) SELECT n FROM m",
         # A reference differing from a CTE alias only in case or quoting is the CTE.
         "WITH months AS (SELECT 424 AS n) SELECT n FROM Months",
@@ -271,11 +273,49 @@ def test_query_reading_no_table_is_rejected_before_execution(bound_transport, sq
     assert frames[-1] == {
         "id": 1,
         "error": {
-            "class": "policy_rejected",
-            "message": transport.ERROR_MESSAGES["policy_rejected"],
+            "class": "ungrounded_literal",
+            "message": transport.ERROR_MESSAGES["ungrounded_literal"],
         },
     }
     bound_transport.engine.query.assert_not_called()
+
+
+def test_the_literal_class_tells_the_model_to_cite_or_compute_and_copies_nothing(
+    bound_transport,
+):
+    sql = "SELECT 267919.19 AS secret_total_from_the_request"
+    frames = bound_transport.run(
+        (
+            json.dumps({"id": 1, "operation": "query", "sql": sql, "limit": 5}) + "\n"
+        ).encode()
+    )
+    frame = frames[-1]
+    assert set(frame["error"]) == {"class", "message"}
+    message = frame["error"]["message"]
+    assert "query_id" in message and "one SELECT over the models" in message
+    for leak in (sql, "267919", "secret_total", "NoSourceTables", "WrenError"):
+        assert leak not in json.dumps(frame)
+
+
+def test_a_policy_violation_keeps_the_policy_class(bound_transport):
+    bound_transport.engine.query.side_effect = WrenError(
+        ErrorCode.BLOCKED_FUNCTION, "x", phase=ErrorPhase.SQL_POLICY_CHECK
+    )
+    frames = bound_transport.run(
+        b'{"id":1,"operation":"query","sql":"SELECT n FROM orders","limit":1}\n'
+    )
+    assert frames[-1]["error"]["class"] == "policy_rejected"
+
+
+def test_a_query_over_a_model_next_to_a_literal_select_still_executes(
+    bound_transport,
+):
+    frames = bound_transport.run(
+        b'{"id":1,"operation":"query","sql":"SELECT 9900 AS n","limit":1}\n'
+        b'{"id":2,"operation":"query","sql":"SELECT n FROM orders","limit":1}\n'
+    )
+    assert frames[1]["error"]["class"] == "ungrounded_literal"
+    assert frames[2]["result"]["definition"]["source_tables"] == ["orders"]
 
 
 @pytest.mark.parametrize(

@@ -66,6 +66,39 @@ describe("fresh AI SDK governed steps", () => {
     const runaway = new MockLanguageModelV4({ doGenerate: async () => call("answer", `call-${count++}`) });
     expect((await runAiComponentStep({ ...run(), perSlot: true }, runaway)).failed).toBe(true);
   });
+  describe("a single-answer step that recovers from a tool error", () => {
+    const SQL = "SELECT COUNT(*) AS n FROM orders";
+    const queryCall = (sql: string, id: string) => ({ content: [{ type: "tool-call" as const, toolName: "query", toolCallId: id, input: JSON.stringify({ sql }) }], finishReason: { unified: "tool-calls" as const, raw: "tool-calls" }, usage, warnings: [] });
+    const proven = (sources: string[]) => async (input: unknown) => {
+      const sql = (input as { sql: string }).sql;
+      if (sql.includes("missing")) throw new GovernedWrenError("model_not_found");
+      return { columns: ["n"], rows: [{ n: 1 }], definition: { sql, source_tables: sources, filters: [] }, query_id: "q1" };
+    };
+    const withQuery = (execute: (input: unknown) => Promise<unknown>): StepRun => ({ ...run(), tools: { query: execute },
+      toolSchemas: { query: { type: "object", additionalProperties: false, required: ["sql"], properties: { sql: { type: "string" } } } }, toolDescriptions: { query: "Run SQL" } });
+    it("is not failed when a proven query result followed the error", async () => {
+      const model = new MockLanguageModelV4({ doGenerate: [queryCall("SELECT 1 FROM missing", "bad"), queryCall(SQL, "good"), text("answered")] });
+      const result = await runAiComponentStep(withQuery(proven(["orders"])), model);
+      expect(result).toMatchObject({ value: "answered", failed: false });
+    });
+    it("is failed when the errors were never followed by a query that reads a table", async () => {
+      const onlyErrors = new MockLanguageModelV4({ doGenerate: [queryCall("SELECT 1 FROM missing", "bad"), text("gave up")] });
+      expect((await runAiComponentStep(withQuery(proven(["orders"])), onlyErrors)).failed).toBe(true);
+      // A result whose definition reads no table is an unproven observation and never recovers the step.
+      const unproven = new MockLanguageModelV4({ doGenerate: [queryCall("SELECT 1 FROM missing", "bad"), queryCall(SQL, "empty"), text("answered")] });
+      expect((await runAiComponentStep(withQuery(proven([])), unproven)).failed).toBe(true);
+      // A definition proven for other SQL than the one executed does not count either.
+      const mismatched = new MockLanguageModelV4({ doGenerate: [queryCall("SELECT 1 FROM missing", "bad"), queryCall(SQL, "other"), text("answered")] });
+      const other = withQuery(async (input) => ({ ...(await proven(["orders"])(input)) as object, definition: { sql: "SELECT 2", source_tables: ["orders"], filters: [] } }));
+      expect((await runAiComponentStep(other, mismatched)).failed).toBe(true);
+    });
+    it("is still failed when the loop did not complete, whatever it observed", async () => {
+      let count = 0;
+      const runaway = new MockLanguageModelV4({ doGenerate: async () => queryCall(count++ === 0 ? "SELECT 1 FROM missing" : SQL, `call-${count}`) });
+      const result = await runAiComponentStep(withQuery(proven(["orders"])), runaway);
+      expect(count).toBe(12); expect(result.failed).toBe(true);
+    });
+  });
   it("sizes the loop cap to the batch: six slots with one retry each still reach the final answer", async () => {
     const questions = ["a", "b", "c", "d", "e", "f"].map((slot) => ({ slot_id: slot, expected_shape: "scalar", question: `question ${slot}` }));
     const turns = [...questions.flatMap(({ slot_id }) => [call("answer", `${slot_id}-1`), call("answer", `${slot_id}-2`)]), text("[]")];

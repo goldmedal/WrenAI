@@ -1,5 +1,6 @@
 import { ToolLoopAgent, isStepCount, jsonSchema, tool, type LanguageModel, type ToolSet } from "ai";
 import { readSlots } from "./egress.js";
+import { groundedQuery } from "./normalize.js";
 import type { StepResponse, StepRun } from "./runner.js";
 
 const SINGLE_ANSWER_STEPS = 12;
@@ -30,14 +31,20 @@ export async function runAiComponentStep(run: StepRun, model: LanguageModel): Pr
   });
   const result = await agent.generate({ prompt, abortSignal: run.signal });
   const toolErrors = result.steps.some((step) => step.content.some((part) => part.type === "tool-error"));
-  // A single-answer step fails on any tool error, so the declared repair step runs and an
-  // unrepaired failure ends the child. In a per-slot invocation a tool error is one slot's
+  // A query result the host can ground an answer on: the one test normalization applies, over
+  // the observed input and output only. The model's own claim about a result never counts.
+  const sawSuccessfulQuery = result.steps.some((step) => step.content.some((part) => part.type === "tool-result"
+    && groundedQuery({ input: part.input, output: part.output }) !== undefined));
+  // A single-answer step with tool errors fails when it never observed a grounded query, so the
+  // declared repair step runs and an unrepaired failure ends the child; a model that recovered
+  // from one bad query within the step is not failed for it (normalization still decides what
+  // grounds). In a per-slot invocation a tool error is one slot's
   // outcome (the model reports it as `{slot_id, status: "unanswerable"}` and answers the rest);
   // the step itself fails only when the loop did not complete. Normalization still grounds
   // every answered slot in an observed query, so the leniency cannot promote a claim to data.
   return {
     value: result.text,
-    failed: result.finishReason !== "stop" || (!run.perSlot && toolErrors),
+    failed: result.finishReason !== "stop" || (!run.perSlot && toolErrors && !sawSuccessfulQuery),
     usage: { inputTokens: result.totalUsage.inputTokens ?? 0, outputTokens: result.totalUsage.outputTokens ?? 0 },
   };
 }

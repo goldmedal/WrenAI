@@ -12,6 +12,7 @@ const queryMessages: Readonly<Record<GovernedErrorClass, string>> = Object.freez
   invalid_request: "The query request is invalid. Please rephrase the question.",
   model_not_found: "The requested table is unavailable in the current dataset. Use the tables in its semantic context.",
   cube_not_queryable: "The query read a semantic definition as if it were a table. Use the base model of that definition and compute the measure from its columns.",
+  ungrounded_literal: "The query returned values typed into it rather than data from the dataset. Compute the value from the dataset's tables in one query.",
   policy_rejected: "The query was rejected by the read-only policy. Use a read-only analytical query.",
   invalid_sql: "The query could not be planned against the current dataset. Check the SQL and required columns.",
   execution_failed: "The current dataset could not execute the query. Check that the required columns exist and their types match the query.",
@@ -87,6 +88,10 @@ export function structuredDataRefusal(code?: string | null): { readonly reason: 
   if (code === "query.cube_not_queryable") return {
     reason: "I could not answer this question because the query read a semantic definition as if it were a table.",
     fix: "Ask for the measure over its base model's fields, or rephrase the question using the dataset's tables and fields.",
+  };
+  if (code === "query.ungrounded_literal") return {
+    reason: "I could not answer this question because the query returned values typed into it rather than data from the dataset.",
+    fix: "Ask the question again so the answer is computed from the dataset's tables, or rephrase it using the dataset's available fields.",
   };
   return undefined;
 }

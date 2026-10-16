@@ -57,6 +57,18 @@ def validate_read_only_query(sql: str, dialect: str | None) -> None:
         ) from error
 
 
+class NoSourceTablesError(WrenError):
+    """A query that reads no stored table. Callers classify it by type, never by text."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            ErrorCode.INVALID_SQL,
+            "The query reads no table, so its values cannot come from the data; "
+            "query at least one model.",
+            phase=ErrorPhase.SQL_POLICY_CHECK,
+        )
+
+
 def require_source_tables(ast: exp.Expression) -> list[str]:
     """Return the tables a parsed query reads, refusing one that reads none.
 
@@ -79,10 +91,5 @@ def require_source_tables(ast: exp.Expression) -> list[str]:
         }
     )
     if not tables:
-        raise WrenError(
-            ErrorCode.INVALID_SQL,
-            "The query reads no table, so its values cannot come from the data; "
-            "query at least one model.",
-            phase=ErrorPhase.SQL_POLICY_CHECK,
-        )
+        raise NoSourceTablesError()
     return tables
