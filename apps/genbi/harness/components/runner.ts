@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { normalizeComponentRequest, type ComponentInvocationResult } from "@warble/claude-agent-sdk";
 import { readSlots, wholeChildDisclosure, type EgressDecision, type EgressProvenance } from "./egress.js";
-import { checkStepRender, declaredRenderBlocks } from "./normalize.js";
+import { checkStepRender, declaredRenderBlocks, groundedQuery } from "./normalize.js";
 import { parseTerminalJson } from "./terminal-json.js";
 import { reportedUsage, type StepUsage } from "./usage.js";
 
@@ -589,7 +589,10 @@ export class ComponentRunner {
           accepting = false;
           // A transport cannot return while unobserved child calls still run.
           await this.wait(Promise.all(queued));
-          const toolFailed = response.failed === true || (toolErrored && !perSlot);
+          // A tool error fails a single-answer step unless the step also observed a query the host can
+          // ground on: a model that recovered within the step is not sent to the repair step for it.
+          const groundedInStep = tools.some((item) => item.step === step.name && groundedQuery(item) !== undefined);
+          const toolFailed = response.failed === true || (toolErrored && !perSlot && !groundedInStep);
           // A per-slot terminal must parse (the one tolerant definition normalization also uses).
           // When it does not and a repair step is declared for this step, the step fails so the
           // repair runs once; the repair receives the raw text alongside the parse error.

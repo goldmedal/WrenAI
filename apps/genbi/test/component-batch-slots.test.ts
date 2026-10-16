@@ -97,6 +97,26 @@ describe("per-slot failure isolation in a batch-shaped child", () => {
     const result = await new ComponentRunner(plan(), host(strong).host).run("answer_batch", { request: "one question" });
     expect(result).toMatchObject({ status: "ok", output: { kind: "value", value: { rows: [{ n: 1672 }], verified: true, definition: { sql: SQL.a } } } });
   });
+  it("a single-answer step that recovers from a tool error with a proven query is answered without the repair step", async () => {
+    const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.b, "b1"), query(SQL.a, "a"),
+      text({ columns: ["n"], rows: [[0]], verified: true, definition: { sql: SQL.a } })] });
+    const f = host(strong);
+    const prompts: string[] = [];
+    const recording: RunnerHost = { ...f.host, async runStep(run, binding) { prompts.push(run.prompt); return f.host.runStep(run, binding); } };
+    const result = await new ComponentRunner(plan(), recording).run("answer_batch", { request: "one question" });
+    expect(result).toMatchObject({ status: "ok", output: { kind: "value", value: { rows: [{ n: 1672 }], verified: true, definition: { sql: SQL.a } } } });
+    expect(prompts).toEqual(["resolve", "generate"]);
+    expect(f.executed).toEqual([SQL.b, SQL.a]);
+  });
+  it("a recovery on a result whose definition reads no table is not a recovery: the repair step still runs", async () => {
+    const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.b, "b1"), query(SQL.a, "a"), text("answered"), text("repaired nothing")] });
+    const f = host(strong, { definition: { sql: SQL.a, source_tables: [], filters: [] } });
+    const prompts: string[] = [];
+    const recording: RunnerHost = { ...f.host, async runStep(run, binding) { prompts.push(run.prompt); return f.host.runStep(run, binding); } };
+    const result = await new ComponentRunner(plan(), recording).run("answer_batch", { request: "one question" });
+    expect(result).toMatchObject({ status: "refused", code: "callee_refused" });
+    expect(prompts).toEqual(["resolve", "generate", "repair"]);
+  });
   it("a malformed slot declaration does not buy per-slot leniency", async () => {
     const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.b, "b1"), text("gave up"), query(SQL.b, "b2"), text("still nothing")] });
     const result = await new ComponentRunner(plan(), host(strong).host).run("answer_batch", { request: "batch", input: { slots: [{ slot_id: "a" }] } });
