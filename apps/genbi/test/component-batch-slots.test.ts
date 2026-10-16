@@ -108,6 +108,21 @@ describe("per-slot failure isolation in a batch-shaped child", () => {
     expect(prompts).toEqual(["resolve", "generate"]);
     expect(f.executed).toEqual([SQL.b, SQL.a]);
   });
+  it("a grounded query in the primary step does not recover its repair step: the runner counts only the step's own evidence", async () => {
+    // A host that reports `failed: false` for every step, so only the runner's own tool-error rule can fail the repair step.
+    const f = host(new MockLanguageModelV4({ doGenerate: async () => text("unused") }));
+    const prompts: string[] = [];
+    const scripted: RunnerHost = { ...f.host, async runStep(run) {
+      prompts.push(run.prompt);
+      if (run.prompt === "generate") { await run.tools.query!({ sql: SQL.a }); return { value: "primary failed", failed: true }; }
+      if (run.prompt === "repair") { await run.tools.query!({ sql: SQL.b }).catch(() => undefined); return { value: "nothing", failed: false }; }
+      return { value: "intent", failed: false };
+    } };
+    const result = await new ComponentRunner(plan(), scripted).run("answer_batch", { request: "one question" });
+    expect(prompts).toEqual(["resolve", "generate", "repair"]);
+    expect(f.executed).toEqual([SQL.a, SQL.b]);
+    expect(result).toMatchObject({ status: "error", code: "callee_failed" });
+  });
   it("a recovery on a result whose definition reads no table is not a recovery: the repair step still runs", async () => {
     const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.b, "b1"), query(SQL.a, "a"), text("answered"), text("repaired nothing")] });
     const f = host(strong, { definition: { sql: SQL.a, source_tables: [], filters: [] } });
