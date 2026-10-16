@@ -106,6 +106,12 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
 fn write_catalog(project_dir: &Path, catalog_path: &Path) -> Result<(), String> {
     let sources = read_project_dir(project_dir)
         .map_err(|e| format!("failed to read {}: {e}", project_dir.display()))?;
+    let rules = wren_context_loader::read_knowledge_rules(project_dir).map_err(|e| {
+        format!(
+            "failed to read knowledge rules in {}: {e}",
+            project_dir.display()
+        )
+    })?;
     let catalog = match &sources {
         Some(sources) => capability_catalog(sources),
         None => capability_catalog(&wren_context_loader::ProjectSources {
@@ -119,6 +125,7 @@ fn write_catalog(project_dir: &Path, catalog_path: &Path) -> Result<(), String> 
             dashboards_yml: None,
         }),
     };
+    let catalog = catalog.with_knowledge_rules(rules);
     let document = catalog_document(&catalog)
         .map_err(|e| format!("failed to serialize the capability catalog: {e}"))?;
     std::fs::write(catalog_path, document)

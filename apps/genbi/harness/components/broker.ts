@@ -6,6 +6,7 @@ import type { ComponentInvocationResult } from "@warble/claude-agent-sdk";
 import { planDigest } from "./plan.js";
 import { verifyComponentContext } from "./context.js";
 import { describeRenderContract } from "./render-contract-text.js";
+import { knowledgeRulesSection, type KnowledgeRuleFile } from "./knowledge-rules.js";
 
 /** Captured by the host from its project, session and approved runtime records. */
 export interface ComponentIdentity {
@@ -47,12 +48,12 @@ function snapshotCubes(snapshot: unknown): { name: string; base?: string }[] {
  * dimensions, next to the models, so each cube is named once more as a semantic definition over a
  * base model: a model otherwise reads one as a queryable table.
  */
-export function snapshotSurfaceText(snapshot: unknown): string {
+export function snapshotSurfaceText(snapshot: unknown, rules: readonly KnowledgeRuleFile[] = []): string {
   const text = `Host semantic context:\n${JSON.stringify(snapshot)}`;
   const cubes = snapshotCubes(snapshot);
-  if (cubes.length === 0) return text;
-  const list = cubes.map((cube) => cube.base ? `${cube.name} (base model: ${cube.base})` : cube.name).join("; ");
-  return `${text}\n\nCubes: ${list}. A cube is a semantic definition (a base model plus measure and dimension expressions), not a SQL table: never reference a cube by name in a query. Query its base model and compute a measure from that model's columns.`;
+  const withCubes = cubes.length === 0 ? text
+    : `${text}\n\nCubes: ${cubes.map((cube) => cube.base ? `${cube.name} (base model: ${cube.base})` : cube.name).join("; ")}. A cube is a semantic definition (a base model plus measure and dimension expressions), not a SQL table: never reference a cube by name in a query. Query its base model and compute a measure from that model's columns.`;
+  return rules.length === 0 ? withCubes : `${withCubes}\n\n${knowledgeRulesSection(rules)}`;
 }
 /** The step run as the host's `step` sees it: the assembled prompt plus its named parts for fingerprinting. */
 export type BrokeredStepRun = StepRun & {
@@ -63,7 +64,7 @@ export type BrokeredStepRun = StepRun & {
 export interface ComponentBrokerOptions {
   readonly plan: ExecutionPlan;
   /** Fresh snapshots captured from the same project binding used by prepare(). */
-  readonly contexts: Readonly<Record<string, { binding: Readonly<Record<string, unknown>>; snapshot: unknown }>>;
+  readonly contexts: Readonly<Record<string, { binding: Readonly<Record<string, unknown>>; snapshot: unknown; rules?: readonly KnowledgeRuleFile[] }>>;
   readonly verifierBinary: string;
   readonly identity: ComponentIdentity;
   readonly currentIdentity: () => ComponentIdentity | undefined;
@@ -161,7 +162,7 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
       const context = contexts[component.id];
       const render = z.object({ render_blocks: z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict()).optional() }).passthrough().parse(component.declaration.effect ?? {}).render_blocks;
       const surface = options.contextSurface ? options.contextSurface(component, run)
-        : context ? { kind: "snapshot" as const, text: snapshotSurfaceText(context.snapshot) } : undefined;
+        : context ? { kind: "snapshot" as const, text: snapshotSurfaceText(context.snapshot, context.rules) } : undefined;
       const renderText = run.terminal && render?.length ? `Render output: Return only one JSON object with a blocks array.\n${describeRenderContract(render)}\nCopy data and definitions only from successful host tool or child results. A KPI label must identify its returned column; do not invent units or deltas. If evidence is insufficient, return {"status":"refused","message":"Insufficient verified data"}.` : "";
       const surfaces: Record<string, string> = { prompt: run.prompt };
       if (surface) surfaces["context"] = surface.text;

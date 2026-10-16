@@ -5,7 +5,7 @@ import path from "node:path";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { fingerprintSurfaces } from "@warble/claude-agent-sdk";
-import { generatePreparedContext, generatePreparedContextAndCatalog, resolveContextLoader } from "../compile/context-loader.js";
+import { generatePreparedContextAndCatalog, resolveContextLoader } from "../compile/context-loader.js";
 import { hashDirectory } from "../compile/fingerprint.js";
 import { resolveWarbleBinary } from "../compile/resolve-binary.js";
 import type { PromptSurfaceRecord, StepTrace, TraceStep, UsageRecord } from "../events/types.js";
@@ -18,6 +18,7 @@ import { resolveWrenBinary } from "../tools/index.js";
 import { runAiComponentStep } from "./ai-step.js";
 import { createComponentBroker, snapshotSurfaceText, type ComponentAccess, type ContextSurface } from "./broker.js";
 import { buildCapabilityCard, type CapabilityCard } from "./capability-card.js";
+import { knowledgeRulesOfCatalog, withKnowledgeRules } from "./knowledge-rules.js";
 import { verifyEgress } from "./egress.js";
 import { createModelJudge } from "./egress-judge.js";
 import { normalizeComponentEvidence } from "./normalize.js";
@@ -66,16 +67,18 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     const accessIdentity = await captureWrenAccessIdentity(project);
     const snapshotPath = path.join(scratch, "context.json");
     const catalogPath = path.join(scratch, "catalog.json");
-    // A zone-aware run also needs the capability catalog: the card public-zone steps
-    // receive instead of the snapshot. One generator process reads the project once.
-    if (zoneAware) await generatePreparedContextAndCatalog(resolveContextLoader().bin, project, snapshotPath, catalogPath);
-    else await generatePreparedContext(resolveContextLoader().bin, project, snapshotPath);
+    // Every run generates the capability catalog next to the snapshot: it carries the project's
+    // knowledge rules, which private steps receive after the snapshot, and it is the source of the
+    // card public-zone steps receive instead of it. One generator process reads the project once.
+    await generatePreparedContextAndCatalog(resolveContextLoader().bin, project, snapshotPath, catalogPath);
     const snapshot: unknown = JSON.parse(await readFile(snapshotPath, "utf8"));
+    const catalog: unknown = JSON.parse(await readFile(catalogPath, "utf8"));
+    const rules = knowledgeRulesOfCatalog(catalog);
     let card: CapabilityCard | undefined;
     if (zoneAware) {
       // The bound policy's shape limits go on the card, so the planner plans within what egress allows.
       const maxBytes = options.capabilityCard?.maxBytes;
-      card = buildCapabilityCard(JSON.parse(await readFile(catalogPath, "utf8")), { ...(maxBytes !== undefined ? { maxBytes } : {}),
+      card = buildCapabilityCard(catalog, { ...(maxBytes !== undefined ? { maxBytes } : {}),
         ...(binding.disclosurePolicy ? { disclosure: binding.disclosurePolicy } : {}) });
       if (card.truncated) traceSteps.push({ id: "capability-card", tool: "capability_card", outcome: "success", ordinal: -1,
         detail: `warning: capability card truncated by the size bound (${card.omittedLines} lines omitted, ${card.bytes} bytes kept)` });
@@ -90,7 +93,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     const contexts = Object.fromEntries(Object.values(plan.components).map((component) => {
       const binding = z.object({ project: z.string() }).passthrough().parse(component.declaration.context_binding);
       if (path.resolve(binding.project) !== project) throw new Error("Component is bound to another project");
-      return [component.id, { binding, snapshot }];
+      return [component.id, withKnowledgeRules({ binding, snapshot }, rules)];
     }));
     const registry = createDefaultProviderRegistry();
     const identity = { session: randomUUID(), vendor: "in-process", account: planDigest(binding), generation: randomUUID(),
@@ -132,7 +135,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       ...(card ? { contextSurface: (component, run): ContextSurface | undefined => {
         if (zoneOf(component.id, run.tier) === "public") return { kind: "card", text: card!.text };
         const context = contexts[component.id];
-        return context ? { kind: "snapshot", text: snapshotSurfaceText(context.snapshot) } : undefined;
+        return context ? { kind: "snapshot", text: snapshotSurfaceText(context.snapshot, context.rules) } : undefined;
       } } : {}),
       async step(run, component) {
         await checkProject();

@@ -11,8 +11,13 @@ import { openWrenComponentAccess } from "../harness/components/wren-access.js";
 vi.mock("../harness/components/ai-step.js", () => ({ runAiComponentStep: vi.fn() }));
 vi.mock("../harness/components/wren-access.js", async (original) => ({ ...await original<typeof import("../harness/components/wren-access.js")>(), openWrenComponentAccess: vi.fn() }));
 vi.mock("../harness/tools/index.js", async (original) => ({ ...await original<typeof import("../harness/tools/index.js")>(), resolveWrenBinary: vi.fn() }));
+const catalogRules = vi.hoisted(() => ({ files: [] as { path: string; content: string }[] }));
 vi.mock("../harness/compile/context-loader.js", () => ({ resolveContextLoader: () => ({ bin: "synthetic-context-loader" }),
   generatePreparedContext: async (_bin: string, _project: string, output: string) => writeFile(output, JSON.stringify({ context_version: 2, parseable: true })),
+  generatePreparedContextAndCatalog: async (_bin: string, _project: string, output: string, catalog: string) => {
+    await writeFile(output, JSON.stringify({ context_version: 2, parseable: true }));
+    await writeFile(catalog, JSON.stringify({ catalog_version: 1, project: {}, models: [], relationships: [], cubes: [], views: [], ...(catalogRules.files.length ? { knowledge_rules: catalogRules.files } : {}) }));
+  },
 }));
 
 function plan(project: string): ExecutionPlan {
@@ -27,8 +32,31 @@ function plan(project: string): ExecutionPlan {
   } };
 }
 
-beforeEach(() => vi.resetAllMocks());
+beforeEach(() => { vi.resetAllMocks(); catalogRules.files = []; });
 describe("in-process composed route", () => {
+  it.each([[true], [false]])("hands the project's knowledge rules to every step's context (rules present: %s)", async (present) => {
+    const project = await mkdtemp(path.join(os.tmpdir(), "genbi-composed-rules-"));
+    try {
+      if (present) catalogRules.files = [{ path: "knowledge/rules/metrics.md", content: "refund_reversal rows are excluded from revenue." }];
+      vi.mocked(openWrenComponentAccess).mockResolvedValue({ query: async (input: { sql: string }) => ({ columns: ["n"], rows: [{ n: 7 }], definition: { sql: input.sql, source_tables: ["orders"], filters: [] } }), inspect: async () => ({}), close: async () => {} });
+      const prompts: string[] = [];
+      vi.mocked(runAiComponentStep).mockImplementation(async (step: StepRun) => {
+        prompts.push(step.prompt);
+        if (step.tools.answer) { await step.tools.answer({ request: "first" }); return { value: JSON.stringify({ blocks: [{ type: "table", columns: ["n"], rows: [[7]] }] }) }; }
+        await step.tools.query!({ sql: "SELECT n FROM orders" });
+        return { value: "done" };
+      });
+      await runInProcessDefault({ bundle: describeComponentPlan(plan(project), "synthetic"), userProject: project, question: "overview", agentId: "dashboard",
+        authChoice: { mode: "api-key", adapter: "openai" }, profileSource: project,
+        tierBinding: { strong: { adapter: "mock", config: {} }, cheap: { adapter: "mock", config: {} } },
+        ...(process.env.WARBLE_TEST_CLI ? { warbleBin: process.env.WARBLE_TEST_CLI } : {}) });
+      expect(prompts.length).toBeGreaterThan(1);
+      for (const prompt of prompts) {
+        expect(prompt.includes("## Knowledge rules")).toBe(present);
+        expect(prompt.includes("### knowledge/rules/metrics.md\nrefund_reversal rows are excluded from revenue.")).toBe(present);
+      }
+    } finally { await rm(project, { recursive: true, force: true }); }
+  });
   it("uses the dedicated route, repeated isolated child access and truthful events", async () => {
     const project = await mkdtemp(path.join(os.tmpdir(), "genbi-composed-route-"));
     try {

@@ -2,7 +2,7 @@
 
 exports[`capability card > is byte-identical across runs and carries names, types, descriptions, relationships, enum meanings, grains and the declared date range 1`] = `
 "# Capability card
-Schema of the bound project: names, types, descriptions, relationships, cubes, enum meanings and declared time grains. It carries no sample values, row counts or SQL; ask the data oracle for values.
+Schema of the bound project: names, types, descriptions, relationships, cubes, enum meanings, declared time grains and, when the project has them, its knowledge rules (authored business definitions, quoted as written). It carries no sample values, row counts, model or view SQL definitions or saved queries; ask the data oracle for values.
 project: card_demo (duckdb)
 
 ## Models
@@ -36,5 +36,17 @@ A cube is a semantic definition (a base model plus measures and dimensions), not
 
 ## Enum meanings
 - customers.tier: ENT = enterprise; SMB = small business
-- customers.status: A = active; C = churned"
+- customers.status: A = active; C = churned
+
+## Knowledge rules
+
+Business rules of the bound project (canonical metric definitions, default filters, units, enum meanings). Follow them when choosing tables, filters and metric definitions.
+
+### knowledge/rules/general.md
+## Currency
+All amounts are USD.
+
+### knowledge/rules/net-revenue.md
+## Net revenue
+Net revenue = SUM(orders.amount_cents + orders.fee_cents) / 100 per order, never the gross amount."
 `;

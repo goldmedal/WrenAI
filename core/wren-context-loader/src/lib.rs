@@ -31,12 +31,14 @@ mod project;
 
 pub use catalog::{
     capability_catalog, catalog_document, CapabilityCatalog, CatalogColumn, CatalogCube,
-    CatalogCubeMember, CatalogEnumValue, CatalogModel, CatalogProject, CatalogRelationship,
-    CatalogView, CATALOG_VERSION,
+    CatalogCubeMember, CatalogEnumValue, CatalogKnowledgeRule, CatalogModel, CatalogProject,
+    CatalogRelationship, CatalogView, CATALOG_VERSION,
 };
 pub use introspect::{infer_additivity, MdlContext};
 pub use lineage::{cube_id, dashboard_id, dim_id, metric_id, model_id, query_id, rel_id, view_id};
-pub use project::{assemble, KnowledgeRules, LoadError, LoadedProject, ProjectSources};
+pub use project::{
+    assemble, KnowledgeRuleFile, KnowledgeRules, LoadError, LoadedProject, ProjectSources,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use project::{read_knowledge_rules, read_project_dir};
 
