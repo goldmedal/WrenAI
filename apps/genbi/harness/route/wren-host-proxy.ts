@@ -29,7 +29,7 @@ const ERROR_TEXT: Readonly<Record<string, string>> = {
   model_not_found: "The query references a table that is not a model in the bound semantic context; query only the models it defines.",
   cube_not_queryable: "The query reads a cube as if it were a table. A cube is a semantic definition (a base model plus measure and dimension expressions), not a SQL table; query the cube's base model instead and compute the measure from the cube definition's expression over the base model's columns.",
   ungrounded_literal: "The query reads no bound model, so the values it returns are literals typed into the query, not data. A value must come from an executed query over the bound models: cite the earlier query that already produced it by its query_id, or compute it in one SELECT over the models.",
-  policy_rejected: "The read-only analytical policy rejected the query: use one SELECT that reads at least one bound model.",
+  policy_rejected: "The read-only analytical policy rejected the query: use one SELECT over the bound models with standard analytical functions only.",
   invalid_sql: "The SQL could not be parsed or planned against the semantic context.",
   execution_failed: "The data source rejected the query at execution time, for example an unknown column or a type mismatch.",
   timeout: "The query exceeded the statement time limit.",
