@@ -25,7 +25,8 @@ project: card_demo (duckdb)
 - orders_customer: orders customers MANY_TO_ONE on orders.customer_id = customers.id
 
 ## Cubes
-- order_metrics (base: orders) — Revenue and order counts.
+A cube is a semantic definition (a base model plus measures and dimensions), not a table: never query a cube by name in SQL. Query its base model and compute a measure from that model's columns.
+- order_metrics (cube, not a table; base model: orders) — Revenue and order counts.
   measures: total_revenue DOUBLE — Sum of order amounts in USD.; order_count BIGINT
   dimensions: customer_id INTEGER
   time dimensions: order_date DATE [grains: day/month/quarter/year; range: 2023-01-01..2024-12-31]

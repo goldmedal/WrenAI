@@ -4,12 +4,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { generatePreparedContextAndCatalog, resolveContextLoader } from "../harness/compile/context-loader.js";
+import { snapshotSurfaceText } from "../harness/components/broker.js";
 import { buildCapabilityCard, capabilityCatalogSchema, DEFAULT_CARD_MAX_BYTES } from "../harness/components/capability-card.js";
 import { describeZoneDryRun, formatZoneDryRun } from "../harness/components/zone-dry-run.js";
 import { parseDisclosurePolicy } from "../harness/providers/zone.js";
 import { reportPlan, splitBinding } from "./zone-fixtures.js";
 
 const FIXTURE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "card-project");
+const JAFFLE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "core", "wren-context-loader", "tests", "fixtures", "jaffle-wren");
 
 /** Runs the real generator over `project` and returns the catalog document text. */
 async function catalogOf(project: string): Promise<string> {
@@ -19,6 +21,43 @@ async function catalogOf(project: string): Promise<string> {
     return await readFile(path.join(scratch, "catalog.json"), "utf8");
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }
+
+describe("prepared snapshot surface", () => {
+  it("marks every cube of the real context producer's output as a definition over its base model, and keeps the snapshot bytes intact", async () => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "genbi-snapshot-surface-"));
+    try {
+      await generatePreparedContextAndCatalog(resolveContextLoader().bin, FIXTURE, path.join(scratch, "context.json"), path.join(scratch, "catalog.json"));
+      const snapshot = JSON.parse(await readFile(path.join(scratch, "context.json"), "utf8"));
+      const text = snapshotSurfaceText(snapshot);
+      expect(text.startsWith(`Host semantic context:\n${JSON.stringify(snapshot)}\n\n`)).toBe(true);
+      expect(text).toContain("Cubes: order_metrics (base model: orders). A cube is a semantic definition");
+      expect(text).toContain("not a SQL table");
+    } finally { await rm(scratch, { recursive: true, force: true }); }
+  });
+  it("marks the jaffle project's revenue cube on both surfaces, from the real context producer", async () => {
+    const scratch = await mkdtemp(path.join(os.tmpdir(), "genbi-jaffle-surface-"));
+    try {
+      await generatePreparedContextAndCatalog(resolveContextLoader().bin, JAFFLE, path.join(scratch, "context.json"), path.join(scratch, "catalog.json"));
+      const surface = snapshotSurfaceText(JSON.parse(await readFile(path.join(scratch, "context.json"), "utf8")));
+      expect(surface).toContain("Cubes: revenue (base model: orders). A cube is a semantic definition");
+      const card = buildCapabilityCard(JSON.parse(await readFile(path.join(scratch, "catalog.json"), "utf8"))).text;
+      expect(card).toContain("- revenue (cube, not a table; base model: orders)");
+      expect(card).toContain("A cube is a semantic definition (a base model plus measures and dimensions), not a table");
+      expect(card).toMatch(/measures: total_revenue DOUBLE; avg_order_value DOUBLE/);
+    } finally { await rm(scratch, { recursive: true, force: true }); }
+  });
+  it("lists each cube with the model or view it is defined over, and adds nothing to a cube-less snapshot", () => {
+    const node = (id: string, kind: string) => ({ id, kind });
+    const snapshot = { context_version: 2, lineage: {
+      nodes: [node("model:orders", "model"), node("view:daily", "view"), node("cube:revenue", "cube"), node("cube:daily_kpis", "cube"), node("cube:orphan", "cube"), node("metric:revenue.total", "metric")],
+      edges: [{ from: "model:orders", to: "cube:revenue" }, { from: "view:daily", to: "cube:daily_kpis" }, { from: "cube:revenue", to: "metric:revenue.total" }] } };
+    expect(snapshotSurfaceText(snapshot)).toContain("Cubes: revenue (base model: orders); daily_kpis (base model: daily); orphan. A cube is");
+    const plain = { context_version: 2, parseable: true, models: [{ name: "orders" }], lineage: { nodes: [node("model:orders", "model")], edges: [] } };
+    expect(snapshotSurfaceText(plain)).toBe(`Host semantic context:\n${JSON.stringify(plain)}`);
+    expect(snapshotSurfaceText({ context_version: 2 })).toBe('Host semantic context:\n{"context_version":2}');
+    expect(snapshotSurfaceText(null)).toBe("Host semantic context:\nnull");
+  });
+});
 
 describe("capability card", () => {
   it("is byte-identical across runs and carries names, types, descriptions, relationships, enum meanings, grains and the declared date range", async () => {
@@ -37,7 +76,8 @@ describe("capability card", () => {
     expect(card).toContain("  - customer_id: INTEGER (relationship: orders_customer)");
     expect(card).toContain("  - amount_cents: BIGINT (calculated)");
     expect(card).toContain("- orders_customer: orders customers MANY_TO_ONE on orders.customer_id = customers.id");
-    expect(card).toContain("- order_metrics (base: orders) — Revenue and order counts.");
+    expect(card).toContain("- order_metrics (cube, not a table; base model: orders) — Revenue and order counts.");
+    expect(card).toContain("A cube is a semantic definition (a base model plus measures and dimensions), not a table");
     expect(card).toContain("measures: total_revenue DOUBLE — Sum of order amounts in USD.; order_count BIGINT");
     expect(card).toContain("time dimensions: order_date DATE [grains: day/month/quarter/year; range: 2023-01-01..2024-12-31]");
     expect(card).toContain("- customer_orders — Orders joined to their customer.");

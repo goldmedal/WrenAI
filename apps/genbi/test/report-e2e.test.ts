@@ -6,6 +6,7 @@ import { normalizeComponentResult, type RenderBlock } from "@warble/claude-agent
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "../harness/events/types.js";
 import { runAiComponentStep } from "../harness/components/ai-step.js";
+import { snapshotSurfaceText } from "../harness/components/broker.js";
 import { buildCapabilityCard } from "../harness/components/capability-card.js";
 import { describeComponentPlan } from "../harness/components/display.js";
 import type { StepRun, StepUsage } from "../harness/components/runner.js";
@@ -450,7 +451,7 @@ describe("M1: the annual revenue report end to end, offline", () => {
       // The run binds `policy`, so the card the public steps receive states its limits.
       const card = buildCapabilityCard(CATALOG, { disclosure: policy });
       // The host re-serialises the parsed snapshot, so the digest is over the compact form, not the pretty-printed file.
-      const snapshotDigest = sha(`Host semantic context:\n${JSON.stringify(JSON.parse(await readFile(SNAPSHOT_PATH, "utf8")))}`);
+      const snapshotDigest = sha(snapshotSurfaceText(JSON.parse(await readFile(SNAPSHOT_PATH, "utf8"))));
       const surfaces = result.trace?.surfaces ?? [];
       // Recorded when each step starts: the planner first, then the child it called, then the narrator.
       expect(surfaces.map((record) => [record.component, record.step, record.zone, record.context])).toEqual([

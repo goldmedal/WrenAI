@@ -15,7 +15,7 @@ from wren.mdl.cte_rewriter import get_sqlglot_dialect
 from wren.model.data_source import DataSource
 from wren.model.error import ErrorCode, ErrorPhase, WrenError
 from wren.profile import expand_profile_secrets, resolve_profile_for_project
-from wren.query_semantics import query_semantics
+from wren.query_semantics import cubes_read_as_tables, query_semantics
 from wren.read_only import require_source_tables
 
 MAX_REQUEST = 65_536
@@ -30,6 +30,13 @@ ERROR_MESSAGES: dict[str, str] = {
     "model_not_found": (
         "The query references a table that is not a model in the bound semantic "
         "context; query only the models it defines."
+    ),
+    "cube_not_queryable": (
+        "The query reads a cube as if it were a table. A cube is a semantic "
+        "definition (a base model plus measure and dimension expressions), not "
+        "a SQL table; query the cube's base model instead and compute the "
+        "measure from the cube definition's expression over the base model's "
+        "columns."
     ),
     "policy_rejected": (
         "The read-only analytical policy rejected the query: use one SELECT over "
@@ -125,6 +132,7 @@ def serve(project: Path) -> None:
             if not isinstance(request, dict) or request.get("id") != expected_id:
                 return
             expected_id += 1
+            source_tables: list[str] = []
             try:
                 if request.get("operation") == "inspect" and set(request) == {
                     "id",
@@ -171,6 +179,10 @@ def serve(project: Path) -> None:
                 _write({"id": request["id"], "result": value})
             except Exception as error:
                 kind = classify_error(error)
+                if kind == "model_not_found" and cubes_read_as_tables(
+                    source_tables, manifest
+                ):
+                    kind = "cube_not_queryable"
                 _write(
                     {
                         "id": request["id"],

@@ -16,7 +16,7 @@ import type { InProcessOptions } from "../route/types.js";
 import type { RunAgentResult } from "../session/types.js";
 import { resolveWrenBinary } from "../tools/index.js";
 import { runAiComponentStep } from "./ai-step.js";
-import { createComponentBroker, type ComponentAccess, type ContextSurface } from "./broker.js";
+import { createComponentBroker, snapshotSurfaceText, type ComponentAccess, type ContextSurface } from "./broker.js";
 import { buildCapabilityCard, type CapabilityCard } from "./capability-card.js";
 import { verifyEgress } from "./egress.js";
 import { createModelJudge } from "./egress-judge.js";
@@ -132,7 +132,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
       ...(card ? { contextSurface: (component, run): ContextSurface | undefined => {
         if (zoneOf(component.id, run.tier) === "public") return { kind: "card", text: card!.text };
         const context = contexts[component.id];
-        return context ? { kind: "snapshot", text: `Host semantic context:\n${JSON.stringify(context.snapshot)}` } : undefined;
+        return context ? { kind: "snapshot", text: snapshotSurfaceText(context.snapshot) } : undefined;
       } } : {}),
       async step(run, component) {
         await checkProject();

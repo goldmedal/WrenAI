@@ -131,8 +131,9 @@ function renderCatalogLines(catalog: CapabilityCatalog): string[] {
   lines.push("");
   lines.push("## Cubes");
   if (catalog.cubes.length === 0) lines.push("- (none)");
+  else lines.push("A cube is a semantic definition (a base model plus measures and dimensions), not a table: never query a cube by name in SQL. Query its base model and compute a measure from that model's columns.");
   for (const item of catalog.cubes) {
-    lines.push(`- ${item.name} (base: ${item.base_object})${describe(item.description)}`);
+    lines.push(`- ${item.name} (cube, not a table; base model: ${item.base_object})${describe(item.description)}`);
     const render = (label: string, members: typeof item.measures) => {
       if (members.length === 0) return;
       lines.push(`  ${label}: ${members.map((m) => {
