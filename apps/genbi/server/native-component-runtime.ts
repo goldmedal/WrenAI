@@ -8,6 +8,7 @@ import { deriveClaudeNativeRuntime } from "./runtime-host/openshell-claude-provi
 import { runClaudeComponentStep, type ClaudeComponentRuntime } from "./runtime-host/claude-component-step.js";
 import { runCodexComponentStep, type CodexComponentPolicy } from "./runtime-host/codex-component-step.js";
 import type { RpcTransport } from "./runtime-host/codex-rpc.js";
+import { runPiComponentStep, type PiComponentRuntime } from "./runtime-host/pi-component-step.js";
 
 /** Injected only after vendor certification. This factory does not confer certification. */
 export type NativeComponentVendor = {
@@ -21,6 +22,10 @@ export type NativeComponentVendor = {
   readonly vendor: "claude";
   openStep?(model: string, tier: string, signal: AbortSignal): Promise<ClaudeComponentRuntime>;
   open(model: string, signal: AbortSignal, tier?: string): Promise<ClaudeComponentRuntime>;
+} | {
+  readonly vendor: "pi";
+  openStep?(model: string, tier: string, signal: AbortSignal): Promise<PiComponentRuntime>;
+  open(model: string, signal: AbortSignal, tier?: string): Promise<PiComponentRuntime>;
 } | {
   readonly vendor: "codex";
   open(model: string, signal: AbortSignal): Promise<{ readonly transport: RpcTransport; readonly policy: CodexComponentPolicy }>;
@@ -83,7 +88,7 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
       await checkAccess(run.signal);
       const model = models[run.tier];
       if (!model || !component.steps.some((step) => step.tier === run.tier)) throw new Error("Missing native component step binding");
-      const resource = await (provider.vendor === "claude" && provider.openStep ? provider.openStep(model, run.tier, run.signal) : open(model, run.signal));
+      const resource = await ((provider.vendor === "claude" || provider.vendor === "pi") && provider.openStep ? provider.openStep(model, run.tier, run.signal) : open(model, run.signal));
       const transport = "transport" in resource ? resource.transport : resource;
       let closing: Promise<void> | undefined;
       const close = () => closing ??= transport.close();
@@ -99,7 +104,11 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
             { ...resource.policy, assertCurrent() { check(); originalCheck(); },
               assertLive() { checkLive(); originalLive(); } }, run);
         }
-        if (vendor === "claude" && !("transport" in resource)) {
+        if (vendor === "pi" && "vendor" in resource && resource.vendor === "pi") {
+          if (resource.model !== model) throw new Error("Native component account or model mismatch");
+          return await runPiComponentStep(resource, run, { check });
+        }
+        if (vendor === "claude" && !("transport" in resource) && !("vendor" in resource)) {
           if (resource.account.email !== account.accountEmail || resource.model !== model) throw new Error("Native component account or model mismatch");
           return await runClaudeComponentStep(deriveClaudeNativeRuntime(resource, check, close), run);
         }

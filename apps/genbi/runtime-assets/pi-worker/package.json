@@ -1,0 +1,8 @@
+{
+  "name": "genbi-pi-worker",
+  "private": true,
+  "description": "Pinned pi coding agent for the GenBI OpenShell per-step worker image",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.4"
+  }
+}

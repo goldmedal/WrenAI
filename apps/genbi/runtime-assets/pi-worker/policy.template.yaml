@@ -1,0 +1,23 @@
+# Deny-all sandbox policy for the pi step worker plus exactly one model endpoint.
+# Template: the endpoint host and port are parameters of the host-owned renderer; the rendered file is what the driver hashes.
+version: 1
+filesystem_policy:
+  include_workdir: false
+  read_only: [/usr, /opt/pi, /opt/genbi, /lib, /bin, /proc, /dev/urandom, /etc/passwd, /etc/group, /etc/nsswitch.conf, /etc/hosts, /etc/resolv.conf, /etc/ssl, /etc/localtime, /etc/ld.so.cache, /etc/openshell-tls]
+  read_write: [/sandbox, /tmp, /dev/null]
+landlock:
+  compatibility: hard_requirement
+process:
+  run_as_user: "1500"
+  run_as_group: "1500"
+network_policies:
+  model_provider:
+    name: pi model endpoint
+    endpoints:
+      - host: {{ENDPOINT_HOST}}
+        port: {{ENDPOINT_PORT}}
+        protocol: rest
+        enforcement: enforce
+        access: read-write
+    binaries:
+      - path: /usr/local/bin/node
