@@ -25,7 +25,8 @@ const nativePlan = z.object({ ...identity, version: z.literal("1"), execution_st
   plans: z.record(z.string(), z.record(z.string(), z.unknown())), prepared_contexts: z.record(z.string(), digest),
   root_tools: rootTools, request_schema: z.unknown(),
 }).strict();
-export type NativeComponentIdentity = Pick<z.infer<typeof launchHost>, "session_id" | "vendor" | "auth_identity" | "runtime_generation" | "binding">;
+/** `pi` only ever labels a host-owned OpenShell Structured Ask; the launch/plan documents above stay Claude/Codex. */
+export type NativeComponentIdentity = Pick<z.infer<typeof launchHost>, "session_id" | "auth_identity" | "runtime_generation" | "binding"> & { readonly vendor: z.infer<typeof launchHost>["vendor"] | "pi" };
 export interface NativeComponentReceipt {
   readonly identity: NativeComponentIdentity;
   readonly irDocument: string;

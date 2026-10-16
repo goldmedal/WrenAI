@@ -244,7 +244,7 @@ What each runtime supports:
 | | `claude` | `codex` | `pi` | In-process api-key and gateway | Local-mode auth |
 | --- | --- | --- | --- | --- | --- |
 | `local` | yes | yes (`exec` or `app-server`) | no | yes | yes |
-| `openshell` | yes | no | not yet available | no | no |
+| `openshell` | yes | no | yes (api-key and gateway Ask only) | only through `pi` | no |
 
 A runtime never offers a backend it does not support and never falls back to another runtime.
 A listed backend the runtime cannot offer does not stop boot: boot prints one warning, readiness
@@ -313,6 +313,24 @@ Ordinary runtime/binding revocation aborts work and retains the login; explicit 
 still removes its retained credentials. Readiness/UI expose availability and execution location,
 without account identity, paths or credentials. Synthetic validation does not imply a real-model
 acceptance run.
+
+With `GENBI_RUNTIME=openshell` and `GENBI_BACKEND=pi`, the boot serves the pi step worker for
+api-key and gateway Ask instead of Claude (one model backend per boot), with
+`GENBI_OPENSHELL_PI_BOOT` naming a protected descriptor with the same file rules; that variable,
+like every `GENBI_OPENSHELL_*` variable, refuses boot under `local`. `pi` is always offered on the
+OpenShell row when listed; it is ready only when its descriptor and gateway verification succeed,
+and otherwise readiness reports it unavailable. The Claude descriptor and vault are not read in
+that mode, the driver configuration carries the `pi` block and no `model` block, and a
+subscription Ask is not offered. The descriptor
+names an operator-provisioned OpenShell provider and provider profile, one pinned model id per
+tier, and the one model endpoint; the BFF never holds the vendor key, never reads
+`OPENAI_API_KEY` or `GENBI_GATEWAY_API_KEY` for such an Ask, and never creates or changes a gateway
+object. It only verifies, read-only and fail-closed at boot, before every Ask and every step
+sandbox, that the provider exists with the profile as its type, that the exported profile has the
+recorded digest with exactly one endpoint and only the node binary, and that the credential name
+matches. The setup steps and the descriptor shape are in `runtime-assets/pi-worker/README.md`.
+Only the `answer_query` Ask is available; setup, dashboards, enrichment, hybrid and native
+sessions stay unavailable, exactly as for Claude, and nothing falls back to in-process execution.
 
 This backend requires a **GenBI-exclusive gateway/workspace with no other resource writer**,
 and one lifecycle controller per private state root. Shared gateways are unsupported.

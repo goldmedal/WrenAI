@@ -333,3 +333,44 @@ export async function compileUnboundProfileTierNames(options: {
     await rm(workDir, { recursive: true, force: true });
   }
 }
+
+/** The Ask auth mode a pi OpenShell boot declares, in the persisted settings vocabulary. */
+export const PI_BOOT_AUTH_MODE: Readonly<Record<"api-key" | "gateway", RuntimeSettings["authMode"]>> = Object.freeze({ "api-key": "byo", gateway: "gateway" });
+
+/**
+ * Resolves every tier to exactly the model id a pi boot pins for it. Aliases, `inherit`, an unpinned
+ * tier and any base URL are rejected: the endpoint comes only from the protected boot descriptor and the
+ * gateway profile it names, never from saved settings.
+ */
+export function resolvePiTierModels(settings: RuntimeSettings, pinned: Readonly<Record<string, string>>): Readonly<Record<string, string>> {
+  if (settings.hybrid) throw new RuntimeBindingError("Hybrid is not available with a pi runtime.");
+  if (nonEmpty(settings.apiKeyBaseURL) !== undefined || nonEmpty(settings.gatewayBaseURL) !== undefined) {
+    throw new RuntimeBindingError("A pi runtime takes its endpoint from the server configuration; clear the Base URL.");
+  }
+  const models: Record<string, string> = {};
+  for (const binding of settings.tierModels) {
+    if (!nonEmpty(binding.tier) || Object.hasOwn(models, binding.tier)) throw new RuntimeBindingError("A tier binding must name one tier.");
+    if (nonEmpty(binding.baseURL) !== undefined) throw new RuntimeBindingError(`Tier "${binding.tier}": a pi runtime takes its endpoint from the server configuration; clear the Base URL.`);
+    const model = effectiveTierModel(binding, settings);
+    if (!model) throw new RuntimeBindingError(`Tier "${binding.tier}" needs a model.`);
+    if (!Object.hasOwn(pinned, binding.tier) || pinned[binding.tier] !== model) {
+      throw new RuntimeBindingError(`Tier "${binding.tier}": the model must be exactly the one this pi runtime allows for that tier.`);
+    }
+    models[binding.tier] = model;
+  }
+  if (!Object.keys(models).length) throw new RuntimeBindingError("At least one tier binding is required.");
+  return Object.freeze(models);
+}
+
+/** Save-time and run-time validation of a runtime that a pi boot serves. Replaces the in-process requirements. */
+export function validatePiRuntimeBindings(settings: RuntimeSettings, bundleTiers: readonly string[], pinned: Readonly<Record<string, string>>, auth: "api-key" | "gateway"): void {
+  if (settings.authMode !== PI_BOOT_AUTH_MODE[auth]) throw new RuntimeBindingError(`This server's pi runtime serves only the ${PI_BOOT_AUTH_MODE[auth]} authentication mode.`);
+  const expected = new Set(bundleTiers);
+  const bound = new Set(settings.tierModels.map(binding => binding.tier));
+  const missing = bundleTiers.filter(tier => !bound.has(tier));
+  const extra = [...bound].filter(tier => !expected.has(tier));
+  if (expected.size === 0 || missing.length || extra.length) {
+    throw new RuntimeBindingError(`Tier bindings must exactly match the compiled bundle (${[...(missing.length ? [`missing: ${missing.join(", ")}`] : []), ...(extra.length ? [`unknown: ${extra.join(", ")}`] : [])].join("; ")}).`);
+  }
+  resolvePiTierModels(settings, pinned);
+}

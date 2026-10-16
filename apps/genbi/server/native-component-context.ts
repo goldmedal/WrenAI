@@ -36,7 +36,7 @@ export async function prepareCapturedNativeComponentHost(
 export async function prepareCapturedStructuredAskHost(
   irDocument: string, scope: Readonly<Record<string, unknown>>, options: NativeComponentContextOptions,
 ): Promise<NativeComponentPreparation> {
-  if (options.vendor.vendor !== "claude" || options.identity.vendor !== "claude") throw new Error("Structured OpenShell Ask requires Claude");
+  if ((options.vendor.vendor !== "claude" && options.vendor.vendor !== "pi") || options.identity.vendor !== options.vendor.vendor) throw new Error("Structured OpenShell Ask requires Claude or pi");
   const capturedScope = structuredClone(scope);
   const bindings = await captureBindings(irDocument, options);
   return observeStructured(options.diagnostics, "host_admission", () => prepareStructuredAskComponentHost(irDocument, capturedScope, bindings));

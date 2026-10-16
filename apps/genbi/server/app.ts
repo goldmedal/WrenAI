@@ -1789,7 +1789,9 @@ export function createApp(deps: TurnDeps) {
     // Derive the candidate live AuthChoice from the merged (not-yet-persisted)
     // settings and validate it BEFORE any mutation — a rejected save must leave
     // both the persisted settings and the live auth binding untouched.
-    const candidateAuthChoice = toAuthChoiceFromRuntimeSettings(updated);
+    // A pi OpenShell boot never reads a vendor key and replaces the in-process requirements.
+    const keyIsolated = deps.structuredRuntime?.keyIsolated() === true && updated.authMode !== "subscription";
+    const candidateAuthChoice = toAuthChoiceFromRuntimeSettings(updated, { readKeys: !keyIsolated });
 
     if (candidateAuthChoice.mode === "subscription" && deps.loginProbe) {
       const loggedIn =
@@ -1812,7 +1814,10 @@ export function createApp(deps: TurnDeps) {
     try {
       if (!deps.getRuntimeTierNames) throw new Error("runtime tier discovery is not configured");
       const bundleTiers = await deps.getRuntimeTierNames();
-      validateRuntimeTierBindings(updated, bundleTiers);
+      if (keyIsolated) {
+        if (!deps.piRuntime) return c.json({ error: "The server's pi runtime is not configured." }, 400);
+        deps.piRuntime.validate(updated, bundleTiers);
+      } else validateRuntimeTierBindings(updated, bundleTiers);
     } catch (err) {
       if (err instanceof RuntimeBindingError) return c.json({ error: err.message }, 400);
       const message = err instanceof Error ? err.message : String(err);
@@ -1822,7 +1827,7 @@ export function createApp(deps: TurnDeps) {
     // Non-subscription turns execute the materialized per-tier AdapterSpecs.
     // Validate the credentials those rows actually use; the legacy global
     // adapter may be completely overridden and is not evidence of execution.
-    if (candidateAuthChoice.mode !== "subscription") {
+    if (candidateAuthChoice.mode !== "subscription" && !keyIsolated) {
       const envStatus = detectAdapterEnv();
       for (const envVar of requiredInProcessCredentialEnvVars(updated)) {
         const present =

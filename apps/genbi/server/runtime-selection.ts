@@ -21,15 +21,18 @@ export type BackendSupport = "supported" | "planned" | "unsupported";
 
 export interface RuntimeSupport {
   readonly backends: Readonly<Record<BackendName, BackendSupport>>;
-  /** In-process api-key and gateway execution. Not an agent backend, so the list never gates it. */
-  readonly inProcessAuth: boolean;
+  /**
+   * Api-key and gateway execution. `true` is host in-process execution, not an agent backend, so the list never gates it.
+   * `{ via }` is execution through that listed backend only (the pi step worker on OpenShell): offered exactly when the backend is.
+   */
+  readonly inProcessAuth: boolean | { readonly via: BackendName };
   readonly localModeAuth: boolean;
 }
 
 /** The support matrix. Every offer decision reads this table; there are no scattered conditionals. */
 export const RUNTIME_SUPPORT: Readonly<Record<RuntimeKind, RuntimeSupport>> = Object.freeze({
   local: Object.freeze({ backends: Object.freeze({ claude: "supported", codex: "supported", pi: "unsupported" } as const), inProcessAuth: true, localModeAuth: true }),
-  openshell: Object.freeze({ backends: Object.freeze({ claude: "supported", codex: "unsupported", pi: "planned" } as const), inProcessAuth: false, localModeAuth: false }),
+  openshell: Object.freeze({ backends: Object.freeze({ claude: "supported", codex: "unsupported", pi: "supported" } as const), inProcessAuth: Object.freeze({ via: "pi" } as const), localModeAuth: false }),
 });
 
 const DEFAULT_LOCAL_BACKENDS: readonly BackendName[] = Object.freeze(["claude", "codex"] as const);
@@ -125,12 +128,21 @@ export function resolveRuntimeSelection(env: NodeJS.ProcessEnv): RuntimeSelectio
 export const isBackendOffered = (selection: RuntimeSelection, backend: BackendName): boolean => selection.offers[backend].offered;
 
 /**
- * In-process api-key and gateway execution is not an agent backend, so the list does not gate it.
- * This is the single seam where a later pi-on-OpenShell route would make it available.
+ * Api-key and gateway execution. On the local runtime it is in-process and the list does not gate it. On OpenShell it is
+ * offered only through the pi backend: this is the single seam that routes such an Ask to the pi adapter, and without pi
+ * in the list it stays not offered.
  */
 export function inProcessAuthOffer(selection: RuntimeSelection): BackendOffer {
-  return RUNTIME_SUPPORT[selection.runtime].inProcessAuth ? Object.freeze({ offered: true }) : Object.freeze({ offered: false, reason: UNSUPPORTED_REASON });
+  const support = RUNTIME_SUPPORT[selection.runtime].inProcessAuth;
+  const offered = typeof support === "object" ? isBackendOffered(selection, support.via) : support;
+  return offered ? Object.freeze({ offered: true }) : Object.freeze({ offered: false, reason: UNSUPPORTED_REASON });
 }
+
+/** True when api-key and gateway Ask runs through a listed backend (pi on OpenShell) and never in-process on the host. */
+export const inProcessAuthViaBackend = (selection: RuntimeSelection): BackendName | undefined => {
+  const support = RUNTIME_SUPPORT[selection.runtime].inProcessAuth;
+  return typeof support === "object" && isBackendOffered(selection, support.via) ? support.via : undefined;
+};
 
 export function localModeAuthOffer(selection: RuntimeSelection): BackendOffer {
   return RUNTIME_SUPPORT[selection.runtime].localModeAuth ? Object.freeze({ offered: true }) : Object.freeze({ offered: false, reason: UNSUPPORTED_REASON });

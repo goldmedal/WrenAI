@@ -16,8 +16,12 @@ import type { RuntimeSettings } from "./wire-types.js";
  * `config.apiKey` the same way — pi-ai never reads env vars or credential files on its own.
  * The key value is never read into `RuntimeSettings`, SQLite, or any log — only referenced here,
  * transiently, to build the in-memory `AuthChoice` passed straight to the adapter factory.
+ *
+ * With `readKeys: false` (a pi OpenShell boot) no environment variable is read at all: the vendor
+ * credential lives only in the operator-created OpenShell provider, never in this process.
  */
-export function toAuthChoiceFromRuntimeSettings(settings: RuntimeSettings): AuthChoice {
+export function toAuthChoiceFromRuntimeSettings(settings: RuntimeSettings, options: { readonly readKeys?: boolean } = {}): AuthChoice {
+  const readKeys = options.readKeys !== false;
   switch (settings.authMode) {
     case "subscription":
       return { mode: "subscription", provider: settings.subscriptionProvider ?? "claude" };
@@ -28,14 +32,14 @@ export function toAuthChoiceFromRuntimeSettings(settings: RuntimeSettings): Auth
       if (settings.gatewayProvider !== undefined) config["provider"] = settings.gatewayProvider;
       if (settings.gatewayModel !== undefined) config["model"] = settings.gatewayModel;
       if (settings.gatewayBaseURL?.trim()) config["baseUrl"] = settings.gatewayBaseURL;
-      const apiKey = process.env[GATEWAY_API_KEY_ENV];
+      const apiKey = readKeys ? process.env[GATEWAY_API_KEY_ENV] : undefined;
       if (apiKey?.trim()) config["apiKey"] = apiKey;
       return { mode: "gateway", config };
     }
     case "byo": {
       const adapter = settings.apiKeyAdapter ?? "anthropic";
       if (adapter === "openai-compatible") {
-        const config: Record<string, unknown> = { apiKey: process.env["OPENAI_API_KEY"] ?? "" };
+        const config: Record<string, unknown> = readKeys ? { apiKey: process.env["OPENAI_API_KEY"] ?? "" } : {};
         if (settings.apiKeyModel !== undefined) config["model"] = settings.apiKeyModel;
         if (settings.apiKeyBaseURL !== undefined) config["baseURL"] = settings.apiKeyBaseURL;
         return { mode: "api-key", adapter, config };

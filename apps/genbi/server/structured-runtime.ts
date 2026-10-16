@@ -2,9 +2,9 @@ import { observeStructuredAsync, type StructuredDiagnosticObserver } from "./str
 import { enforceCompliance, type AuthChoice, type RouteOptions, type RouteResult, type SetupStepRunner, type SetupStepRunOptions, type SetupStepRunResult } from "../harness/index.js";
 import type { RuntimeBackendReadiness } from "./runtime-host/types.js";
 import type { OpenShellModelSession } from "./runtime-host/openshell-model-session.js";
-import { authOffer, BACKENDS, inProcessAuthOffer, localModeAuthOffer, type BackendName, type RuntimeSelection } from "./runtime-selection.js";
+import { authOffer, BACKENDS, inProcessAuthOffer, inProcessAuthViaBackend, localModeAuthOffer, type BackendName, type RuntimeSelection } from "./runtime-selection.js";
 
-export type StructuredVendor = "codex" | "claude";
+export type StructuredVendor = "codex" | "claude" | "pi";
 export type StructuredBackend = "local" | "codex-app-server" | "claude-sandbox-runtime" | "openshell";
 export interface StructuredScope {
   readonly sessionId: string;
@@ -56,6 +56,13 @@ export class StructuredRuntime {
     if (selection.runtime === "openshell") return "openshell";
     return vendor === "codex" && selection.codexMode === "app-server" ? "codex-app-server" : "local";
   }
+  /** True when api-key and gateway Ask runs through the pi backend on OpenShell: the BFF then reads and holds no vendor key for it. */
+  keyIsolated(): boolean { return inProcessAuthViaBackend(this.options.selection) === "pi"; }
+  /** The backend that executes an auth choice on an agent adapter: the subscription's vendor, or pi for api-key/gateway via the seam. */
+  private vendorFor(auth: AuthChoice): StructuredVendor | undefined {
+    if (auth.mode === "subscription") return auth.provider;
+    return auth.mode !== "local" && inProcessAuthViaBackend(this.options.selection) === "pi" ? "pi" : undefined;
+  }
   private adapter(vendor: StructuredVendor): StructuredAdapter | undefined {
     const candidate = this.options.adapters?.[vendor];
     return candidate?.vendor === vendor && candidate.backend === this.backendFor(vendor) ? candidate : undefined;
@@ -64,8 +71,9 @@ export class StructuredRuntime {
   assertOperationSupported(auth: AuthChoice, operation: "ask" | "setup" | "native"): void {
     this.assertActive();
     if (!authOffer(this.options.selection, auth).offered) throw new StructuredRuntimeError("unavailable");
-    if (auth.mode === "subscription" && this.backendFor(auth.provider) === "openshell"
-      && (operation === "setup" || operation === "ask" && !this.adapter(auth.provider)?.ask || operation === "native" && !this.adapter(auth.provider)?.nativeSessions)) throw new StructuredRuntimeError("unsupported");
+    const vendor = this.vendorFor(auth);
+    if (vendor !== undefined && this.backendFor(vendor) === "openshell"
+      && (operation === "setup" || operation === "ask" && !this.adapter(vendor)?.ask || operation === "native" && !this.adapter(vendor)?.nativeSessions)) throw new StructuredRuntimeError("unsupported");
   }
   private notOffered(reason: string | undefined, extra: Record<string, unknown> = {}) {
     return { offered: false, state: "not_offered", ask: false, setup: false, reason: reason ?? "Not offered.", ...extra } as const;
@@ -75,10 +83,9 @@ export class StructuredRuntime {
     const entries = await Promise.all(BACKENDS.map(async (name: BackendName) => {
       const offer = selection.offers[name];
       if (!offer.offered) return [name, this.notOffered(offer.reason)] as const;
-      if (name === "pi") return [name, { offered: true, state: "unavailable", ask: false, setup: false, reason: "Selected vendor backend is not configured." }] as const;
       const vendor: StructuredVendor = name;
       const backend = this.backendFor(vendor)!;
-      if (backend === "local") {
+      if (backend === "local" && vendor !== "pi") {
         const localReady = !this.lifetime.signal.aborted;
         return [name, { offered: true, backend, state: localReady ? "ready" : "unavailable", ask: localReady, setup: localReady && !!this.options.localSetupFor({ mode: "subscription", provider: vendor }), reason: "Explicit local execution; vendor isolation is not claimed." }] as const;
       }
@@ -96,7 +103,8 @@ export class StructuredRuntime {
       ? { offered: true, backend: "in-process", state: this.lifetime.signal.aborted ? "unavailable" : "ready", ask: !this.lifetime.signal.aborted, reason: "Configured in-process execution." }
       : this.notOffered(offer.reason, { backend: "in-process" });
     return { runtime: selection.runtime, backends, codex: backends.codex, claude: backends.claude,
-      ...(auth ? { active: auth.mode === "subscription" ? backends[auth.provider] : inProcess(auth.mode === "local" ? localModeAuthOffer(selection) : inProcessAuthOffer(selection)) } : {}) };
+      ...(auth ? { active: auth.mode === "subscription" ? backends[auth.provider]
+        : auth.mode === "local" ? inProcess(localModeAuthOffer(selection)) : this.keyIsolated() ? backends.pi : inProcess(inProcessAuthOffer(selection)) } : {}) };
   }
   async route(options: RouteOptions, scope: StructuredScope): Promise<RouteResult> {
     return this.run(options.authChoice, scope, async (adapter, guarded) => {
@@ -127,14 +135,15 @@ export class StructuredRuntime {
       if (signal.aborted) throw new StructuredRuntimeError("cancelled");
       try { scope.assertCurrent(); } catch { throw new StructuredRuntimeError("stale"); }
     };
-    const diagnostics = auth.mode === "subscription" && this.backendFor(auth.provider) === "openshell" ? this.options.diagnostics : undefined;
+    const vendor = this.vendorFor(auth);
+    const diagnostics = vendor !== undefined && this.backendFor(vendor) === "openshell" ? this.options.diagnostics : undefined;
     const pending = observeStructuredAsync(diagnostics, "runtime_admission", async () => {
       assertCurrent(); enforceCompliance(auth, { deployment: this.options.deployment ?? deployment });
       // Admission is the no-fallback gate: a backend or auth path the runtime does not offer never reaches an adapter or the local route.
       if (!authOffer(this.options.selection, auth).offered) throw new StructuredRuntimeError("unavailable");
       let adapter: StructuredAdapter | undefined;
-      if (auth.mode === "subscription" && this.backendFor(auth.provider) !== "local") {
-        adapter = this.adapter(auth.provider);
+      if (vendor !== undefined && this.backendFor(vendor) !== "local") {
+        adapter = this.adapter(vendor);
         if (!adapter) throw new StructuredRuntimeError("unavailable");
         let ready: RuntimeBackendReadiness;
         try { ready = await observeStructuredAsync(diagnostics, "runtime_readiness", () => adapter!.probe()); } catch { throw new StructuredRuntimeError("unavailable"); }

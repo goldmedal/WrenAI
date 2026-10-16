@@ -41,15 +41,18 @@ export interface OpenShellStructuredProvisioner {
   }>;
 }
 
-/** One server-selected analytical root; final text and vendor artifacts have no answer authority. */
-export function createOpenShellStructuredAdapter(provisioner: OpenShellStructuredProvisioner, diagnostics?: StructuredDiagnosticObserver): StructuredAdapter {
+/** One server-selected analytical root; final text and vendor artifacts have no answer authority. The vendor is the boot's single model vendor. */
+export function createOpenShellStructuredAdapter(provisioner: OpenShellStructuredProvisioner, diagnostics?: StructuredDiagnosticObserver, vendor: "claude" | "pi" = "claude"): StructuredAdapter {
   return {
-    vendor: "claude", backend: "openshell", nativeSessions: !!provisioner.reserveSession, probe: () => provisioner.probe(),
+    vendor, backend: "openshell", nativeSessions: !!provisioner.reserveSession, probe: () => provisioner.probe(),
     async ask(options, scope) {
       const timing = structuredTimingForObserver(diagnostics);
       markStructuredTiming(timing, "adapter_enter");
       observeStructured(diagnostics, "adapter_validation", () => {
-      if (options.authChoice.mode !== "subscription" || options.authChoice.provider !== "claude"
+      const authorized = vendor === "claude" ? options.authChoice.mode === "subscription" && options.authChoice.provider === "claude"
+        : (options.authChoice.mode === "api-key" || options.authChoice.mode === "gateway")
+          && options.modelsConfig === undefined && options.model === undefined && options.codexModels === undefined;
+      if (!authorized
         || (options.agentId ?? "answer_query") !== "answer_query" || options.tierBinding !== undefined
         || options.disclosurePolicy !== undefined || options.zoneRoles !== undefined || options.mcpServers !== undefined
         || options.bundle !== undefined || options.inProcess !== undefined || options.dispatched !== undefined || options.codexAsk !== undefined)

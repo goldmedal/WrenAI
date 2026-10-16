@@ -14,7 +14,7 @@ const subsets = (items: readonly BackendName[]): BackendName[][] => items.reduce
 
 /** Independent oracle for the support matrix, written out by hand rather than read from the table under test. */
 const expectedOffer = (runtime: "local" | "openshell", listed: readonly BackendName[], backend: BackendName): boolean =>
-  listed.includes(backend) && (runtime === "local" ? backend !== "pi" : backend === "claude");
+  listed.includes(backend) && (runtime === "local" ? backend !== "pi" : backend === "claude" || backend === "pi");
 
 describe("runtime selection: environment matrix", () => {
   it("defaults to the local runtime offering claude and codex with the exec Codex mode", () => {
@@ -67,7 +67,7 @@ describe("runtime selection: environment matrix", () => {
   it("refuses claude together with pi under openshell and allows each alone", () => {
     expect(refusal({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "pi,claude" })).toContain("only one model backend");
     expect(resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" }).offers.claude.offered).toBe(true);
-    expect(resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "pi" }).offers.pi).toEqual({ offered: false, reason: PLANNED_REASON });
+    expect(resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "pi" }).offers.pi).toEqual({ offered: true });
   });
   it("refuses an invalid GENBI_CODEX_MODE value and an inapplicable one", () => {
     expect(refusal({ GENBI_CODEX_MODE: "auto" })).toContain("GENBI_CODEX_MODE");
@@ -155,10 +155,10 @@ describe("runtime selection: admission and readiness", () => {
     const down = runtimeFor({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" }, { claude: { ...openshellAdapter(), probe: async () => ({ state: "unavailable", code: "openshell_unavailable", message: "x" }) as never } });
     expect((await down.runtime.readiness()).backends.claude).toMatchObject({ offered: true, state: "unavailable", ask: false });
   });
-  it("pi under openshell is recognised but not yet offered, and nothing is routed to it", async () => {
+  it("pi under openshell is offered, and without its adapter nothing runs: not ready, no fallback", async () => {
     const f = runtimeFor({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "pi" });
     const readiness = await f.runtime.readiness(gateway);
-    expect(readiness.backends.pi).toMatchObject({ offered: false, state: "not_offered", reason: PLANNED_REASON });
+    expect(readiness.backends.pi).toMatchObject({ offered: true, state: "unavailable", ask: false });
     expect(readiness.backends.claude).toMatchObject({ offered: false, state: "not_offered" });
     await expect(f.runtime.route(request(gateway), scope())).rejects.toMatchObject({ code: "unavailable" });
     await expect(f.runtime.route(request(claude), scope())).rejects.toMatchObject({ code: "unavailable" });
