@@ -139,6 +139,9 @@ They live in the catalog and not in the prepared document because the prepared-c
 by Warble and rejects unknown fields. The harness reads the catalog on every in-process run, appends the
 rules to the private-zone snapshot text, renders them in full on the capability card, and includes them
 in the context the identity digest covers. `knowledge/sql/` (confirmed queries) is never carried.
+`check-context` (`verifyComponentContext`) verifies only the prepared document, so the integrity of the
+rules rests on `planDigest(contexts)` plus the project fingerprint re-check (`checkProject()` before every
+step), not on `check-context`.
 
 ### Distributing the context-loader generator
 
