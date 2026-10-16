@@ -93,7 +93,7 @@ describe("capability card", () => {
     for (const forbidden of ["Acme Corp", "Globex", "Initech", "SELECT", "FROM ", "deleted_at", "amount * 100", "internal_note", "sample_values"]) {
       expect(card, `card carries ${forbidden}`).not.toContain(forbidden);
     }
-    expect(card).toContain("It carries no sample values, row counts or SQL");
+    expect(card).toContain("It carries no sample values, row counts, model or view SQL definitions or saved queries");
   });
   it("does not change when unknown fields are added to the project (allow-list, not deny-list)", async () => {
     const baseline = buildCapabilityCard(JSON.parse(await catalogOf(FIXTURE)));

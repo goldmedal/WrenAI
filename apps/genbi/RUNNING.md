@@ -374,6 +374,10 @@ primary keys, relationships, cube members with declared `granularities` and
 `[enum]`-tagged descriptions — and the harness renders it through a second
 allow-list, so a new MDL field never leaks by default and no `ref_sql`, view
 statement, expression, saved query, sample value or row count is carried. The
+project's knowledge rules (`knowledge/rules/*.md`) are the one piece of free
+text on the card: they are carried in full under `## Knowledge rules` (private
+steps receive the same text after the snapshot), while `knowledge/sql/` confirmed
+queries stay off it. The
 card is deterministic (same project, same bytes), size-bounded (32 KiB by
 default, `capabilityCard.maxBytes`; trailing lines are dropped and a marker
 line plus a trace warning say so). With a `disclosure_policy` bound, the card

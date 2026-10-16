@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { DisclosurePolicy } from "../providers/zone.js";
+import { knowledgeRuleFiles, knowledgeRulesSection } from "./knowledge-rules.js";
 
 /**
  * The capability card: what a planner outside the data zone may know about
@@ -10,7 +11,10 @@ import type { DisclosurePolicy } from "../providers/zone.js";
  *
  * Allow-list, not deny-list: the zod schemas below strip every key they do
  * not name, so a new catalog or MDL field does not leak by default. Nothing
- * here is computed from data — no sample values, no row counts, no SQL.
+ * here is computed from data — no sample values, no row counts, no model, view or
+ * measure SQL, no confirmed-query memory (`knowledge/sql/`). The project's knowledge
+ * rules (`knowledge/rules/*.md`) are carried whole: they are authored prose, disclosable
+ * like the schema.
  */
 
 const properties = { description: z.string().optional() };
@@ -33,6 +37,7 @@ export const capabilityCatalogSchema = z.object({
   relationships: z.array(relationship).default([]),
   cubes: z.array(cube).default([]),
   views: z.array(view).default([]),
+  knowledge_rules: knowledgeRuleFiles,
 });
 export type CapabilityCatalog = z.infer<typeof capabilityCatalogSchema>;
 
@@ -91,7 +96,7 @@ function taggedEnums(description: string | undefined): { value: string; meaning:
 function renderHeadLines(catalog: CapabilityCatalog, disclosure: CardDisclosureLimits | undefined): string[] {
   const lines: string[] = [];
   lines.push("# Capability card");
-  lines.push("Schema of the bound project: names, types, descriptions, relationships, cubes, enum meanings and declared time grains. It carries no sample values, row counts or SQL; ask the data oracle for values.");
+  lines.push("Schema of the bound project: names, types, descriptions, relationships, cubes, enum meanings, declared time grains and, when the project has them, its knowledge rules (authored business definitions, quoted as written). It carries no sample values, row counts, model or view SQL definitions or saved queries; ask the data oracle for values.");
   const project = [catalog.project.name, catalog.project.data_source ? `(${catalog.project.data_source})` : undefined].filter(Boolean).join(" ");
   if (project) lines.push(`project: ${project}`);
   lines.push("");
@@ -160,6 +165,10 @@ function renderCatalogLines(catalog: CapabilityCatalog): string[] {
   lines.push("");
   lines.push("## Enum meanings");
   lines.push(...(enums.length ? enums : ["- (none declared)"]));
+  if (catalog.knowledge_rules.length > 0) {
+    lines.push("");
+    lines.push(...knowledgeRulesSection(catalog.knowledge_rules).split("\n"));
+  }
   return lines;
 }
 

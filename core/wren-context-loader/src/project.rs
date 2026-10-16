@@ -295,7 +295,9 @@ pub fn read_project_dir(dir: &std::path::Path) -> std::io::Result<Option<Project
 ///
 /// The native host owns these filesystem reads; dispatchers receive only the normalized string.
 /// Current `knowledge/rules/*.md` files are sorted by path and concatenated first, followed by the
-/// legacy root `instructions.md` when present. Empty files contribute nothing.
+/// legacy root `instructions.md` when present. Empty files contribute nothing. The same files are
+/// also returned one by one in [`KnowledgeRules::files`], in that order, so a host can show where
+/// each rule came from.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_knowledge_rules(dir: &std::path::Path) -> std::io::Result<KnowledgeRules> {
     use std::fs;
@@ -312,11 +314,18 @@ pub fn read_knowledge_rules(dir: &std::path::Path) -> std::io::Result<KnowledgeR
     };
     paths.sort();
 
-    let mut parts = Vec::new();
+    let mut files = Vec::new();
     for path in paths {
-        let contents = fs::read_to_string(path)?;
+        let contents = fs::read_to_string(&path)?;
         if !contents.trim().is_empty() {
-            parts.push(contents.trim().to_string());
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            files.push(KnowledgeRuleFile {
+                path: format!("knowledge/rules/{name}"),
+                content: contents.trim().to_string(),
+            });
         }
     }
 
@@ -325,13 +334,22 @@ pub fn read_knowledge_rules(dir: &std::path::Path) -> std::io::Result<KnowledgeR
     if used_legacy {
         let contents = fs::read_to_string(legacy_path)?;
         if !contents.trim().is_empty() {
-            parts.push(contents.trim().to_string());
+            files.push(KnowledgeRuleFile {
+                path: "instructions.md".to_string(),
+                content: contents.trim().to_string(),
+            });
         }
     }
 
+    let content = files
+        .iter()
+        .map(|file| file.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
     Ok(KnowledgeRules {
-        content: parts.join("\n\n"),
+        content,
         used_legacy,
+        files,
     })
 }
 
@@ -340,6 +358,16 @@ pub fn read_knowledge_rules(dir: &std::path::Path) -> std::io::Result<KnowledgeR
 pub struct KnowledgeRules {
     pub content: String,
     pub used_legacy: bool,
+    /// The non-empty rule files behind `content`, trimmed, in the same order: current
+    /// `knowledge/rules/*.md` sorted by path, then the legacy `instructions.md`.
+    pub files: Vec<KnowledgeRuleFile>,
+}
+
+/// One business-rule file: its project-relative path and trimmed contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRuleFile {
+    pub path: String,
+    pub content: String,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -13,6 +13,10 @@ vi.mock("../harness/components/wren-access.js", async (original) => ({ ...await 
 vi.mock("../harness/tools/index.js", async (original) => ({ ...await original<typeof import("../harness/tools/index.js")>(), resolveWrenBinary: vi.fn() }));
 vi.mock("../harness/compile/context-loader.js", () => ({ resolveContextLoader: () => ({ bin: "synthetic-context-loader" }),
   generatePreparedContext: async (_bin: string, _project: string, output: string) => writeFile(output, JSON.stringify({ context_version: 2, parseable: true })),
+  generatePreparedContextAndCatalog: async (_bin: string, _project: string, output: string, catalog: string) => {
+    await writeFile(output, JSON.stringify({ context_version: 2, parseable: true }));
+    await writeFile(catalog, JSON.stringify({ catalog_version: 1, project: {}, models: [], relationships: [], cubes: [], views: [] }));
+  },
 }));
 
 const PLAN_SQL = "SELECT plan, COUNT(*) AS customers FROM customers GROUP BY plan";

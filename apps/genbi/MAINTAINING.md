@@ -133,6 +133,13 @@ descriptive, SQL-free slice of a project that the harness renders into the capab
 public-zone steps (`RUNNING.md`, "Zone-aware tier binding"). It is generated at run time next to the
 prepared document and is not committed; `test/fixtures/card-project` is the fixture its tests use.
 
+The catalog also carries the project's business rules (`knowledge_rules`: each `knowledge/rules/*.md`,
+sorted by path, then a legacy root `instructions.md`, as `{path, content}`; omitted when there are none).
+They live in the catalog and not in the prepared document because the prepared-context format is owned
+by Warble and rejects unknown fields. The harness reads the catalog on every in-process run, appends the
+rules to the private-zone snapshot text, renders them in full on the capability card, and includes them
+in the context the identity digest covers. `knowledge/sql/` (confirmed queries) is never carried.
+
 ### Distributing the context-loader generator
 
 `@wrenai/genbi` pins `@wrenai/context-loader` to one exact version. The package postinstall

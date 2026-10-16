@@ -6,7 +6,9 @@
 //! `properties`) with lenient, allow-listed structs: every field that is not named here is dropped
 //! on read, so a new authored field never reaches the catalog by default. Nothing in the catalog
 //! is computed from data, and no SQL — `ref_sql`, view statements, calculated-column or measure
-//! expressions, saved queries — is carried.
+//! expressions, saved queries — is carried. The one free-text slice is the project's business rules
+//! (`knowledge/rules/*.md`, legacy `instructions.md`), carried whole as authored prose; the
+//! prepared-context document cannot carry them because Warble owns that format.
 //!
 //! The consuming host applies its own allow-list again when it renders the catalog into a card;
 //! this module is the first of the two layers, not the only one.
@@ -176,6 +178,15 @@ pub struct CatalogView {
     pub description: Option<String>,
 }
 
+/// One business-rule file (`knowledge/rules/*.md`, or the legacy root `instructions.md`), carried
+/// whole: rules are authored prose a host may disclose like schema. `knowledge/sql/` is not a
+/// rule file and never appears here.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CatalogKnowledgeRule {
+    pub path: String,
+    pub content: String,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct CatalogProject {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,9 +205,34 @@ pub struct CapabilityCatalog {
     pub relationships: Vec<CatalogRelationship>,
     pub cubes: Vec<CatalogCube>,
     pub views: Vec<CatalogView>,
+    /// Business rules, in `wren context instructions` order (current rule files sorted by path,
+    /// then the legacy `instructions.md`). Omitted when the project has none, so a project
+    /// without rules serializes exactly as before.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub knowledge_rules: Vec<CatalogKnowledgeRule>,
+    /// True when a root `instructions.md` exists (the deprecated location of the rules).
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub knowledge_rules_used_legacy: bool,
     /// Files that did not parse, by kind; the catalog is still emitted without them.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub diagnostics: Vec<String>,
+}
+
+impl CapabilityCatalog {
+    /// Attach the project's business rules, read by the host (`read_knowledge_rules`). Kept apart
+    /// from [`capability_catalog`], which is pure over the MDL sources.
+    pub fn with_knowledge_rules(mut self, rules: crate::project::KnowledgeRules) -> Self {
+        self.knowledge_rules = rules
+            .files
+            .into_iter()
+            .map(|file| CatalogKnowledgeRule {
+                path: file.path,
+                content: file.content,
+            })
+            .collect();
+        self.knowledge_rules_used_legacy = rules.used_legacy;
+        self
+    }
 }
 
 fn primary_key(value: Option<serde_yaml::Value>) -> Vec<String> {
@@ -362,6 +398,8 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
         relationships,
         cubes,
         views,
+        knowledge_rules: Vec::new(),
+        knowledge_rules_used_legacy: false,
         diagnostics,
     }
 }
