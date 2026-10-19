@@ -54,6 +54,8 @@ export class OpenShellLifecycle {
   get identity(): OpenShellDriver["identity"] { return Object.freeze({ ...this.options.driver.identity }); }
   get modelIdentity(): OpenShellDriver["identity"] | undefined { return this.options.driver.modelIdentity; }
   get dataIdentity(): OpenShellDriver["identity"] | undefined { return this.options.driver.dataIdentity; }
+  /** Fail closed: the validator exists only when the driver verified a protected validator descriptor. */
+  get validatorReady(): boolean { return this.options.driver.validatorReady?.() === true && !!this.options.driver.dataIdentity; }
   attachOwnedResources(resources: OpenShellOwnedResources): void {
     if (this.initialized || this.resources) throw new OpenShellError("openshell_scope_invalid");
     this.resources = resources;
@@ -115,7 +117,7 @@ export class OpenShellLifecycle {
     const permit = Object.freeze({ expiresAt: grant.expiresAt, release: () => { grant.released = true; this.pendingGrants.delete(grant); } });
     this.grants.set(permit, grant); return permit;
   }
-  private driverIdentity(identity: OpenShellIdentity): OpenShellDriver["identity"] | undefined { return ["model", "model_session"].includes(identity.purpose) ? this.options.driver.modelIdentity : identity.purpose === "data" ? this.options.driver.dataIdentity : this.options.driver.identity; }
+  private driverIdentity(identity: OpenShellIdentity): OpenShellDriver["identity"] | undefined { return ["model", "model_session"].includes(identity.purpose) ? this.options.driver.modelIdentity : identity.purpose === "data" || identity.purpose === "validate" ? this.options.driver.dataIdentity : this.options.driver.identity; }
   private checkGrant(grant: Grant): void {
     if (this.stopped || grant.released || grant.epoch !== this.epoch || grant.sessionEpoch !== (this.sessionEpochs.get(grant.identity.session) ?? 0) || grant.signal?.aborted || this.now() >= grant.expiresAt
       || !isDeepStrictEqual(grant.identity, grant.current())) throw new OpenShellError("openshell_scope_invalid");
@@ -138,9 +140,15 @@ export class OpenShellLifecycle {
       release: () => { controller.abort(); this.effects.delete(controller); } });
   }
   /** Reserve a data launch once before authorized delivery verification/ref effects. */
-  reserveDataLaunch(permit: OpenShellPermit): OpenShellEffectLease {
+  reserveDataLaunch(permit: OpenShellPermit): OpenShellEffectLease { return this.reserveSnapshotLaunch(permit, "data"); }
+  /** The validator has its own reservation: a data permit can never be reserved here, nor a validate permit above. */
+  reserveValidatorLaunch(permit: OpenShellPermit): OpenShellEffectLease {
+    if (!this.validatorReady) throw new OpenShellError("openshell_scope_invalid");
+    return this.reserveSnapshotLaunch(permit, "validate");
+  }
+  private reserveSnapshotLaunch(permit: OpenShellPermit, purpose: "data" | "validate"): OpenShellEffectLease {
     const grant = this.grants.get(permit);
-    if (!grant || grant.reserved || grant.consumed || grant.identity.purpose !== "data" || this.unsettled()) throw new OpenShellError("openshell_scope_invalid");
+    if (!grant || grant.reserved || grant.consumed || grant.identity.purpose !== purpose || this.unsettled()) throw new OpenShellError("openshell_scope_invalid");
     this.checkGrant(grant); grant.reserved = true; grant.expiresAt = Number.MAX_SAFE_INTEGER; this.pendingGrants.delete(grant);
     const controller = new AbortController(); this.effects.set(controller, grant.identity.session);
     const signal = AbortSignal.any([controller.signal, this.lifetime.signal, ...(grant.signal ? [grant.signal] : [])]);
@@ -175,7 +183,7 @@ export class OpenShellLifecycle {
         effect: async <T>(effect: (signal: AbortSignal, assertActive: () => void) => Promise<T>) => { check(); const result = await effect(signal, check); check(); return result; },
         exec: async (argv: readonly string[]) => { check(); const result = await this.options.driver.exec(owned.intent, argv, signal); check(); return result; },
         duplex: async (argv: readonly string[]) => {
-          check(); if (!["model", "model_session", "data"].includes(grant.identity.purpose) || !this.options.driver.duplex) throw new OpenShellError("openshell_scope_invalid");
+          check(); if (!["model", "model_session", "data", "validate"].includes(grant.identity.purpose) || !this.options.driver.duplex) throw new OpenShellError("openshell_scope_invalid");
           const stream = await this.options.driver.duplex(owned.intent, argv, signal); check();
           return { ...stream, write: (data: Buffer) => { check(); stream.write(data); }, close: () => stream.close() };
         },

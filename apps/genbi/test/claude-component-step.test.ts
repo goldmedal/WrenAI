@@ -68,14 +68,14 @@ describe("governed Claude component step", () => {
     const test = setup([{ ...init, ...changed }, result]);
     await expect(runClaudeComponentStep(test.runtime, test.run)).rejects.toThrow("Claude component protocol"); expect(test.run.tools.query).not.toHaveBeenCalled();
   });
-  it("keeps thinking progress unavailable to local Claude",async()=>{
+  it("ignores inert thinking progress for local Claude, with the same rules as the host path",async()=>{
     const test=setup([init,{type:"system",subtype:"thinking_tokens",session_id:"session",uuid:"progress",estimated_tokens:2.5,estimated_tokens_delta:0.5},result]);
-    await expect(runClaudeComponentStep(test.runtime,test.run)).rejects.toThrow("Claude component protocol");
+    await expect(runClaudeComponentStep(test.runtime,test.run)).resolves.toMatchObject({value:"synthetic answer"});
     expect(test.run.tools.query).not.toHaveBeenCalled();expect(test.runtime.close).toHaveBeenCalledTimes(1);
   });
-  it("keeps rate-limit events unavailable to local Claude",async()=>{
+  it("ignores inert rate-limit events for local Claude, with the same rules as the host path",async()=>{
     const test=setup([init,{type:"rate_limit_event",session_id:"session",uuid:"rate",rate_limit_info:{status:"allowed"}},result]);
-    await expect(runClaudeComponentStep(test.runtime,test.run)).rejects.toThrow("Claude component protocol");
+    await expect(runClaudeComponentStep(test.runtime,test.run)).resolves.toMatchObject({value:"synthetic answer"});
     expect(test.run.tools.query).not.toHaveBeenCalled();expect(test.runtime.close).toHaveBeenCalledTimes(1);
   });
   it("keeps local Claude builtin metadata unavailable", async () => {
@@ -131,4 +131,105 @@ describe("governed Claude component step", () => {
     await result; await expect(input.next()).resolves.toMatchObject({ done: true });
   });
 
+});
+
+const sid = { session_id: "session" };
+const assistant = (uuid: string, content: unknown[], extra: Record<string, unknown> = {}) => ({ type: "assistant", uuid, ...sid, parent_tool_use_id: null, message: { content }, ...extra });
+const benign: [string, unknown][] = [
+  ["thinking_tokens", { type: "system", subtype: "thinking_tokens", uuid: "b1", ...sid, estimated_tokens: 3, estimated_tokens_delta: 1 }],
+  ["rate_limit_event", { type: "rate_limit_event", uuid: "b2", ...sid, rate_limit_info: { status: "allowed", utilization: 0.5 } }],
+  ["system status", { type: "system", subtype: "status", uuid: "b3", ...sid, status: "requesting" }],
+  ["system status (idle)", { type: "system", subtype: "status", uuid: "b4", ...sid, status: null, permissionMode: "default" }],
+  ["api_retry", { type: "system", subtype: "api_retry", uuid: "b5", ...sid, attempt: 1, max_retries: 3, retry_delay_ms: 500, error_status: 529, error: "overloaded" }],
+  ["session_state_changed", { type: "system", subtype: "session_state_changed", uuid: "b6", ...sid, state: "running" }],
+  ["thinking content block", assistant("b7", [{ type: "thinking", thinking: "x" }, { type: "redacted_thinking", data: "x" }, { type: "text", text: "x" }])],
+];
+const rejected: [string, string, unknown[]][] = [
+  ["unexpected_event:system.compact_boundary", "unknown system event", [init, { type: "system", subtype: "compact_boundary", uuid: "x1", ...sid }, result]],
+  ["unexpected_event:system.other", "unrecognized system subtype", [init, { type: "system", subtype: "private-model-text", uuid: "x1", ...sid }, result]],
+  ["unexpected_event:stream_event", "partial stream event", [init, { type: "stream_event", uuid: "x1", ...sid }, result]],
+  ["unexpected_event:tool_progress", "tool progress", [init, { type: "tool_progress", uuid: "x1", ...sid }, result]],
+  ["unexpected_event:other", "unrecognized top-level type", [init, { type: "private-model-text", uuid: "x1", ...sid }, result]],
+  ["undeclared_tool_use", "undeclared tool_use", [init, assistant("x1", [{ type: "tool_use", id: "t", name: "mcp__component__other", input: {} }]), result]],
+  ["permission_denials", "permission denials", [init, { ...result, permission_denials: [{ tool_name: "Bash", tool_use_id: "t", tool_input: {} }] }]],
+  ["result_error", "error result", [init, { ...result, is_error: true }]],
+  ["result_shape", "malformed result", [init, { ...result, modelUsage: "none" }]],
+  ["model_usage_keys", "two models", [init, { ...result, modelUsage: { ...result.modelUsage, other: result.modelUsage["synthetic-model"] } }]],
+  ["parent_tool_use", "nested message", [init, assistant("x1", [], { parent_tool_use_id: "t" }), result]],
+  ["unexpected_block", "unknown content block", [init, assistant("x1", [{ type: "image" }]), result]],
+  ["duplicate_uuid", "repeated uuid", [init, assistant("init", []), result]],
+  ["session_mismatch", "foreign session", [init, assistant("x1", [], { session_id: "other" }), result]],
+  ["init_duplicate", "second init", [init, { ...init, uuid: "init2" }, result]],
+  ["init_tools", "extra init tool", [{ ...init, tools: ["mcp__component__query", "Bash"] }, result]],
+  ["schema", "malformed benign event", [init, { type: "system", subtype: "thinking_tokens", uuid: "x1", ...sid, estimated_tokens: "many" }, result]],
+  ["schema", "malformed status", [init, { type: "system", subtype: "status", uuid: "x1", ...sid, status: "private-model-text" }, result]],
+];
+describe("Claude component stream rules (non-host mode)", () => {
+  it.each(benign)("ignores the inert %s message without relaxing anything else", async (_name, event) => {
+    const test = setup([init, event, result]);
+    await expect(runClaudeComponentStep(test.runtime, test.run)).resolves.toMatchObject({ value: "synthetic answer" });
+    expect(test.run.tools.query).not.toHaveBeenCalled();
+  });
+  it("ignores every benign message together between a granted tool call and the result", async () => {
+    const test = setup([init, ...benign.map(([, event]) => event), async () => { await handlers.get("query")!({ sql: "SELECT 1" }); }, result]);
+    await expect(runClaudeComponentStep(test.runtime, test.run)).resolves.toMatchObject({ value: "synthetic answer" });
+    expect(test.run.tools.query).toHaveBeenCalledOnce();
+  });
+  it.each(rejected)("refuses with the %s site (%s) and the unchanged public error", async (site, _name, events) => {
+    const test = setup(events);
+    const error = await runClaudeComponentStep(test.runtime, test.run).catch((value: unknown) => value) as Error & { faultSite?: string };
+    expect(error).toBeInstanceOf(Error); expect(error.message).toBe("Claude component protocol"); expect(error.faultSite).toBe(site);
+    expect(JSON.stringify(error.faultSite)).not.toMatch(/private-model-text/);
+  });
+  const inertBurst = (count: number) => Array.from({ length: count }, (_v, index) => ({ type: "system", subtype: "session_state_changed", uuid: `m${index}`, ...sid, state: "running" }));
+  it("accepts a burst of more than 512 inert events and still returns the original result", async () => {
+    const test = setup([init, ...inertBurst(700), result]);
+    await expect(runClaudeComponentStep(test.runtime, test.run)).resolves.toMatchObject({ value: "synthetic answer" });
+  });
+  it("still caps substantive messages at 512 with step_frame_limit and reports closed-vocabulary counts", async () => {
+    const many = Array.from({ length: 520 }, (_v, index) => assistant(`s${index}`, [{ type: "text", text: "x" }]));
+    const test = setup([init, ...many, result]);
+    const error = await runClaudeComponentStep(test.runtime, test.run).catch((value: unknown) => value) as Error & { faultSite?: string; frameCounts?: Record<string, number> };
+    expect(error.faultSite).toBe("step_frame_limit");
+    expect(error.frameCounts).toEqual({ assistant: 512, "system:init": 1 });
+  });
+  it("bounds inert events by their own cap with inert_frame_limit", async () => {
+    const test = setup([init, ...inertBurst(8193), result]);
+    const error = await runClaudeComponentStep(test.runtime, test.run).catch((value: unknown) => value) as Error & { faultSite?: string; frameCounts?: Record<string, number> };
+    expect(error.faultSite).toBe("inert_frame_limit"); expect(error.frameCounts).toEqual({ "system:init": 1, "system:session_state_changed": 8193 });
+  });
+  it("counts hostile type strings and tool_use blocks only under fixed keys", async () => {
+    const test = setup([init, assistant("t1", [{ type: "tool_use", id: "t", name: "mcp__component__other", input: {} }]), result]);
+    const error = await runClaudeComponentStep(test.runtime, test.run).catch((value: unknown) => value) as Error & { frameCounts?: Record<string, number> };
+    expect(error.frameCounts).toEqual({ assistant: 1, tool_use: 1, "system:init": 1 });
+    const other = setup([init, { type: "private-model-text", uuid: "p", ...sid }, result]);
+    const second = await runClaudeComponentStep(other.runtime, other.run).catch((value: unknown) => value) as Error & { frameCounts?: Record<string, number> };
+    expect(second.frameCounts).toEqual({ other: 1, "system:init": 1 }); expect(JSON.stringify(second.frameCounts)).not.toContain("private-model-text");
+  });
+  it("labels a stream that ends before a result", async () => {
+    const test = setup([init]); test.next.mockImplementationOnce(async () => ({ done: false, value: init as unknown as SDKMessage })).mockImplementation(async () => ({ done: true, value: undefined as unknown as SDKMessage }));
+    const error = await runClaudeComponentStep(test.runtime, test.run).catch((value: unknown) => value) as Error & { faultSite?: string };
+    expect(error.message).toBe("Claude component protocol"); expect(error.faultSite).toBe("stream_ended");
+  });
+  it("a granted tool call after a benign event is still schema-validated and counted", async () => {
+    const test = setup([init, benign[0]![1], async () => { await handlers.get("query")!({ sql: "SELECT 1" }); }, result]);
+    await runClaudeComponentStep(test.runtime, test.run);
+    expect(test.run.tools.query).toHaveBeenCalledExactlyOnceWith({ sql: "SELECT 1" });
+  });
+});
+
+describe("component failure log", () => {
+  it("carries the closed fault_site label next to the unchanged public detail", async () => {
+    const { ComponentRunner } = await import("../harness/components/runner.js");
+    const test = setup([init, assistant("x1", [{ type: "tool_use", id: "t", name: "mcp__component__other", input: {} }]), result]);
+    const plan = { identity: "plan", entries: ["c"], components: { c: { id: "c", declaration: {}, steps: [{ name: "s", tier: "cheap", prompt: "p", consumes: [], produces: "o", tools: [], calls: [] }] } } };
+    const host = { prepare: async () => ({ tools: [], isCurrent: () => true, normalize: async () => ({ status: "ok" as const, output: { kind: "value" as const, value: 1 } }), close: async () => {} }),
+      runStep: async () => runClaudeComponentStep(test.runtime, test.run) };
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    let lines: string[] = [];
+    try { await new ComponentRunner(plan as never, host as never).run("c", { request: "x" }); } finally { lines = log.mock.calls.map((call) => String(call[0])); log.mockRestore(); }
+    const line = lines.find((text) => text.includes("[component-failure]") && text.includes("Claude component protocol"));
+    expect(line).toContain('"fault_site":"undeclared_tool_use"');
+    expect(line).toContain('"frame_counts":{"assistant":1,"tool_use":1,"system:init":1}');
+  });
 });

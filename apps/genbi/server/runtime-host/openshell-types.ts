@@ -16,8 +16,13 @@ export const openShellIdentitySchema = z.discriminatedUnion("purpose", [
   baseIdentitySchema.extend({ purpose: z.literal("model"), operation: z.literal("step"), snapshot: z.literal("none"), invocation: z.uuid(), step: z.uuid(), attempt: z.literal(1), model: token, tier: token }),
   baseIdentitySchema.omit({ turn: true }).extend({ purpose: z.literal("model_session"), operation: z.literal("session"), snapshot: z.literal("none") }),
   baseIdentitySchema.extend({ purpose: z.literal("data"), operation: z.literal("read"), snapshot: digest, publication: z.uuid(), reference: z.uuid() }),
+  // A separate, credential-less enrichment validator: same image/policy/snapshot shape as `data/read`, never the same authority.
+  baseIdentitySchema.extend({ purpose: z.literal("validate"), operation: z.literal("check"), snapshot: digest, publication: z.uuid(), reference: z.uuid() }),
 ]);
 export type OpenShellIdentity = z.infer<typeof openShellIdentitySchema>;
+/** Identities whose sandbox mounts one published project snapshot read-only. */
+export type OpenShellSnapshotIdentity = Extract<OpenShellIdentity, { purpose: "data" | "validate" }>;
+export const isSnapshotIdentity = (identity: OpenShellIdentity): identity is OpenShellSnapshotIdentity => identity.purpose === "data" || identity.purpose === "validate";
 export type OpenShellReason = RuntimeBackendReasonCode<"openshell">;
 export class OpenShellError extends Error {
   constructor(readonly code: OpenShellReason) { super(runtimeNotReady("openshell", "unavailable", code).message); }
@@ -65,6 +70,8 @@ export interface OpenShellDriver {
   readonly modelIdentity?: OpenShellDriver["identity"] | undefined;
   duplex?(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex>;
   readonly dataIdentity?: OpenShellDriver["identity"] | undefined;
+  /** True only when the protected descriptor names a validator digest equal to the packaged script (fail closed otherwise). */
+  validatorReady?(): boolean;
   probe(): Promise<void>;
   create(intent: OpenShellIntent, signal: AbortSignal): Promise<OpenShellResource>;
   list(intent: OpenShellIntent): Promise<readonly OpenShellResource[]>;

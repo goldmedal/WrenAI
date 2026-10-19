@@ -2,6 +2,8 @@ import { Typography } from 'antd';
 import { Panel } from '@/ui';
 import { t } from '@/i18n/strings';
 import { PurposeSessionLaunch } from '@/sessions/PurposeSessionLaunch';
+import { OpenShellEnrichment } from './OpenShellEnrichment';
+import { useContextStore } from './useContextStore';
 
 /**
  * Enrichment now hands the operator to the vendor's real interactive CLI.
@@ -10,6 +12,7 @@ import { PurposeSessionLaunch } from '@/sessions/PurposeSessionLaunch';
  * accept/edit/approve workflow.
  */
 export function EnrichmentPanel() {
+  const openShell = useContextStore((s) => s.enrichment?.backend === 'openshell' || s.enrichment?.run?.backend === 'openshell');
   return <Panel title={t('context.enrichmentTitle')}>
     <PurposeSessionLaunch
       purpose="context_enrichment"
@@ -20,5 +23,6 @@ export function EnrichmentPanel() {
     <Typography.Paragraph type="secondary" style={{ marginTop: 12 }}>
       Existing enrichment ledger and canonicalization routes remain available for compatibility.
     </Typography.Paragraph>
+    {openShell ? <OpenShellEnrichment /> : null}
   </Panel>;
 }

@@ -10,9 +10,10 @@ import { ComponentRunner, type ComponentLimits } from "../harness/components/run
 import type { Store } from "./db.js";
 import type { EnrichmentBinding } from "./enrichment.js";
 import type { NativeComponentVendor } from "./native-component-runtime.js";
-import { prepareCapturedStructuredAskHost } from "./native-component-context.js";
+import { deriveOpenShellEnrichmentIr } from "./openshell-enrichment.js";
+import { prepareCapturedStructuredAskHost, prepareCapturedStructuredEnrichHost } from "./native-component-context.js";
 import type { createOpenShellRuntimeComposition } from "./openshell-runtime-composition.js";
-import type { OpenShellStructuredProvisioner } from "./openshell-structured-ask.js";
+import type { OpenShellEnrichmentPreparation, OpenShellPreparedHost, OpenShellStructuredProvisioner } from "./openshell-structured-ask.js";
 import { assertNativeExecutableIdentity, attestNativeExecutable } from "./native-runtime-spec.js";
 import { assertRuntimeSettingsDispatchable, collectIrTierNames, effectiveTierModel, PI_BOOT_AUTH_MODE, resolvePiTierModels, RuntimeBindingError, validatePiRuntimeBindings, validateRuntimeTierBindings, writeClaudeModelsConfig } from "./runtime-binding.js";
 import { produceComponentHostPlan } from "./runtime-host/component-host-plan.js";
@@ -29,7 +30,7 @@ import { OpenShellError } from "./runtime-host/openshell-types.js";
 
 type FullComposition = Awaited<ReturnType<typeof createOpenShellRuntimeComposition>>;
 type Composition = Pick<FullComposition, "lifecycle" | "claudeVault" | "claudeProvider" | "probe" | "bindDataContext" | "dataWorkerAvailable">
-  & Partial<Pick<FullComposition, "piProvider" | "piBoot" | "verifyPiGateway">> & { readonly modelVendor?: OpenShellModelVendor };
+  & Partial<Pick<FullComposition, "piProvider" | "piBoot" | "verifyPiGateway" | "applyInventory">> & { readonly modelVendor?: OpenShellModelVendor };
 type ModelScope = Parameters<Composition["claudeProvider"]>[0]["scope"];
 /** Gateway objects are re-verified on this cadence while a pi run is active; a change cancels the run as stale. */
 const PI_GATEWAY_POLL_MS = 2000;
@@ -43,6 +44,8 @@ interface Options {
   readonly producerBinary: string;
   readonly wrenBinary: string;
   readonly profileSource: string;
+  /** The `genbi-enrich-context` profile; without it the provisioner cannot admit an enrichment stage. */
+  readonly enrichmentProfileSource?: string;
   readonly hostHome: string;
   readonly sourceWrenHome: () => string;
   readonly getBinding: () => EnrichmentBinding | undefined;
@@ -53,6 +56,7 @@ interface Options {
   readonly gatewayPollMs?: number;
 }
 const unavailable = () => new StructuredRuntimeError("unavailable");
+type AskInput = Parameters<OpenShellStructuredProvisioner["prepare"]>[0];
 
 /** The same governed native component host, without an outer vendor orchestration session. */
 export function createOpenShellStructuredProvisioner(options: Options): OpenShellStructuredProvisioner {
@@ -112,25 +116,14 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
     }, options.gatewayPollMs ?? PI_GATEWAY_POLL_MS);
     return { stop() { stopped = true; clearInterval(timer); } };
   };
-  const provisioner: OpenShellStructuredProvisioner = {
-    assertSessionCleaned(sessionId) {
-      const intents = options.store.listOpenShellIntents().filter(row => row.identity.session === sessionId);
-      const publications = options.store.listSnapshotPublications().filter(row => row.identity.session === sessionId);
-      const references = options.store.listSnapshotReferences().filter(row => row.identity.session === sessionId);
-      if (intents.some(row => row.phase !== "cleaned") || publications.some(row => row.phase !== "cleaned") || references.some(row => row.phase !== "released")) throw new StructuredRuntimeError("cleanup");
-    },
-    async probe() {
-      try {
-        return await observeStructuredAsync(options.diagnostics, "runtime_readiness", async () => {
-          observeStructured(options.diagnostics, "configuration", checkConfiguration);
-          observeStructured(options.diagnostics, "executable_capture", () => { attestNativeExecutable("producer", options.producerBinary); attestNativeExecutable("wren", options.wrenBinary); resolveContextLoaderBinary(); });
-          if (pi) await verifyGateway();
-          return (await composition.probe()).readiness;
-        });
-      } catch (error) { return runtimeNotReady("openshell", "unprovisioned", pi && error instanceof OpenShellError ? error.code : "openshell_configuration_invalid"); }
-    },
-    async prepare(input) {
-      if (!input.scope.signal || input.options.profileSource !== options.profileSource) throw unavailable();
+  /** The purpose is set by the typed `prepare` / `prepareEnrichment` entry points below, never inferred from the input's shape. */
+  type Tagged = { readonly purpose: "analysis"; readonly input: AskInput } | { readonly purpose: "enrichment"; readonly input: OpenShellEnrichmentPreparation };
+  const prepareScoped = async (tagged: Tagged): Promise<OpenShellPreparedHost> => {
+      const input = tagged.input;
+      const enrich = tagged.purpose === "enrichment" ? tagged.input : undefined;
+      const ask = tagged.purpose === "analysis" ? tagged.input : undefined;
+      // Enrichment drafts are Claude-subscription only; a pi boot never admits one.
+      if (!input.scope.signal || (enrich ? pi || options.enrichmentProfileSource === undefined : ask!.options.profileSource !== options.profileSource)) throw unavailable();
       const signal = input.scope.signal;
       signal.throwIfAborted(); input.scope.assertCurrent();
       const status = observeStructured(options.diagnostics, "configuration", checkConfiguration);
@@ -168,10 +161,10 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       /** Progress checks stay cheap; full executable hashes run only at execution/effect boundaries. */
       const assertExecutableCurrent = () => { check(); for (const executable of [producer, loader, wren, node]) measureStructuredTiming(timing, "exact_bytes", () => assertNativeExecutableIdentity(executable)); };
       assertExecutableCurrent();
-      const compiled = await observeStructuredAsync(options.diagnostics, "compile_profile", () => { assertExecutableCurrent(); return compileProfile({ profileSource: options.profileSource, userProject: binding.path, mode: "native", warbleBin: producer.executable }); });
+      const compiled = await observeStructuredAsync(options.diagnostics, "compile_profile", () => { assertExecutableCurrent(); return compileProfile({ profileSource: enrich ? options.enrichmentProfileSource! : options.profileSource, userProject: binding.path, mode: "native", warbleBin: producer.executable }); });
       check();
       const irDocument = await observeStructuredAsync(options.diagnostics, "ir_tiers", async () => {
-        const document = await readFile(compiled.irPath, "utf8");
+        const document = enrich ? deriveOpenShellEnrichmentIr(await readFile(compiled.irPath, "utf8")) : await readFile(compiled.irPath, "utf8");
         const tiers = collectIrTierNames(JSON.parse(document));
         if (!pi) validateRuntimeTierBindings(settings, tiers);
         else {
@@ -197,7 +190,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         check(); parent.throwIfAborted();
         if (!modelScope) throw unavailable();
         const captured = modelScope;
-        const provider = observeStructured(options.diagnostics, "provider_setup", () => composition.claudeProvider({ ...(timing ? { timing } : {}), ...(input.modelSession ? { modelSession: input.modelSession } : {}), scope: captured, currentScope: () => { try { check(); return captured; } catch { return undefined; } }, models, assertCurrent: check, assertExecutableCurrent }));
+        const provider = observeStructured(options.diagnostics, "provider_setup", () => composition.claudeProvider({ ...(timing ? { timing } : {}), ...(ask?.modelSession ? { modelSession: ask.modelSession } : {}), scope: captured, currentScope: () => { try { check(); return captured; } catch { return undefined; } }, models, assertCurrent: check, assertExecutableCurrent }));
         return observeStructuredAsync(options.diagnostics, "provider_open", () => provider.openStep!(model, tier, parent));
       };
       const vendor: NativeComponentVendor = pi
@@ -208,14 +201,14 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         accountEmail: observeStructured(options.diagnostics, "vendor_identity", () => composition.claudeVault!.verifiedIdentity().email), models, assertCurrent: check, openStep,
         open(model, parent, tier) { const selected = tier ?? Object.keys(models).find(key => models[key] === model); if (!selected) throw unavailable(); return openStep(model, selected, parent); } };
       const componentLimits = resolveComponentLimits();
-      const prepared = await observeStructuredAsync(options.diagnostics, "context_capture", () => { assertExecutableCurrent(); return prepareCapturedStructuredAskHost(irDocument, { binding: identity.binding, entry: { kind: "agent", verb: "answer_query", prompt: input.options.question } }, {
+      const prepared = await observeStructuredAsync(options.diagnostics, "context_capture", () => { assertExecutableCurrent(); return (enrich ? prepareCapturedStructuredEnrichHost : prepareCapturedStructuredAskHost)(irDocument, { binding: identity.binding, entry: enrich ? { kind: "agent", verb: enrich.stage, prompt: enrich.request } : { kind: "agent", verb: "answer_query", prompt: ask!.options.question } }, {
         identity, currentIdentity: () => { check(); return identity; }, assertCurrent: check,
         verifierBinary: producer.executable, contextLoaderBinary: loader.executable, wrenBinary: wren.executable, project: binding.path, signal, assertExecutableCurrent,
         wrenEnvironment: { PATH: [path.dirname(wren.executable), path.dirname(node.executable), "/usr/bin", "/bin"].join(path.delimiter), HOME: options.hostHome,
           WREN_HOME: sourceHome, WREN_PROJECT_HOME: binding.path, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" },
         openDataAccess: async parent => { if (!dataAccess || !modelScope) throw unavailable(); return observeStructuredQueryAccess(await dataAccess(modelScope, parent), queryFailure.record); },
         ...(componentLimits ? { componentLimits } : {}),
-        vendor, persistRoot: input.persistRoot, onEvent: event => {
+        vendor, ...(ask ? { persistRoot: ask.persistRoot } : enrich?.propose ? { propose: enrich.propose } : {}), onEvent: event => {
           if (event.kind === "step.start") queryFailure.start();
           if (event.kind === "step.finish") queryFailure.finish(event.status);
           input.onEvent(event);
@@ -225,7 +218,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       const { root, plan } = await observeStructuredAsync(options.diagnostics, "host_plan", () => { assertExecutableCurrent(); return produceComponentHostPlan({ irDocument, prepared, producerBinary: producer.executable, signal, assertCurrent: check, assertExecutableCurrent }); });
       modelScope = observeStructured(options.diagnostics, "model_scope", () => Object.freeze({ backend: "openshell", account: status.fingerprint!, generation: status.generation!, session: input.scope.sessionId, turn: input.scope.turnId,
         binding: binding.identity, bindingGeneration: String(binding.generation), bindingRevision: binding.revision,
-        context: planDigest(prepared.contexts), plan: plan.identity, ...composition.lifecycle!.modelIdentity! }));
+        context: planDigest(prepared.contexts), plan: enrich ? planDigest({ purpose: "enrichment", stage: enrich.stage, plan: plan.identity }) : plan.identity, ...composition.lifecycle!.modelIdentity! }));
       dataAccess = composition.bindDataContext(modelScope.context, check);
       check();
       let runner: ComponentRunner | undefined;
@@ -255,7 +248,29 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         },
         dispose() { return closing ??= (async () => { if (active) runner?.cancel(); await active?.catch(() => {}); if (runner?.cleanupFailed) throw new StructuredRuntimeError("cleanup"); })(); },
       };
+  };
+  const provisioner: OpenShellStructuredProvisioner = {
+    assertSessionCleaned(sessionId) {
+      const intents = options.store.listOpenShellIntents().filter(row => row.identity.session === sessionId);
+      const publications = options.store.listSnapshotPublications().filter(row => row.identity.session === sessionId);
+      const references = options.store.listSnapshotReferences().filter(row => row.identity.session === sessionId);
+      if (intents.some(row => row.phase !== "cleaned") || publications.some(row => row.phase !== "cleaned") || references.some(row => row.phase !== "released")) throw new StructuredRuntimeError("cleanup");
     },
+    async probe() {
+      try {
+        return await observeStructuredAsync(options.diagnostics, "runtime_readiness", async () => {
+          observeStructured(options.diagnostics, "configuration", checkConfiguration);
+          observeStructured(options.diagnostics, "executable_capture", () => { attestNativeExecutable("producer", options.producerBinary); attestNativeExecutable("wren", options.wrenBinary); resolveContextLoaderBinary(); });
+          if (pi) await verifyGateway();
+          return (await composition.probe()).readiness;
+        });
+      } catch (error) { return runtimeNotReady("openshell", "unprovisioned", pi && error instanceof OpenShellError ? error.code : "openshell_configuration_invalid"); }
+    },
+    prepare: (input) => prepareScoped({ purpose: "analysis", input }),
+    ...(pi ? {} : {
+      prepareEnrichment: (input: OpenShellEnrichmentPreparation) => prepareScoped({ purpose: "enrichment", input }),
+      enrichmentApprovedFiles: () => composition.applyInventory?.()?.approvedFiles,
+    }),
   };
   if (!pi) provisioner.reserveSession = async input => {
     const signal = input.scope.signal;

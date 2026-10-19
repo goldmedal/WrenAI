@@ -61,8 +61,21 @@ export type BrokeredStepRun = StepRun & {
   readonly surfaces?: Readonly<Record<string, string>>;
   readonly contextKind?: ContextSurface["kind"] | "none";
 };
+/** What a broker is admitted for. The grant set is fixed per purpose; a caller cannot widen it. */
+export type BrokerPurpose = "analysis" | "enrichment";
+export const BROKER_GRANTS: Readonly<Record<BrokerPurpose, readonly ("query" | "inspect" | "propose")[]>> = Object.freeze({
+  analysis: Object.freeze(["query", "inspect"] as const),
+  enrichment: Object.freeze(["query", "inspect", "propose"] as const),
+});
 export interface ComponentBrokerOptions {
   readonly plan: ExecutionPlan;
+  /** Defaults to `analysis`, which can never be granted `propose`. */
+  readonly purpose?: BrokerPurpose;
+  /**
+   * The enrichment-only `propose` grant: a root sink for one named component's verified result. Never model-visible
+   * as a tool, and mutually exclusive with `persistRoot` so an enrichment broker has exactly one write path.
+   */
+  readonly propose?: { readonly component: string; readonly persist: NonNullable<RunnerHost["persistRoot"]> };
   /** Fresh snapshots captured from the same project binding used by prepare(). */
   readonly contexts: Readonly<Record<string, { binding: Readonly<Record<string, unknown>>; snapshot: unknown; rules?: readonly KnowledgeRuleFile[] }>>;
   readonly verifierBinary: string;
@@ -95,11 +108,21 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
   const identity = Object.freeze({ ...options.identity });
   if (Object.values(identity).some((value) => !value.trim())) throw new Error("Missing component execution identity");
   const plan = structuredClone(options.plan);
+  const purpose: BrokerPurpose = options.purpose ?? "analysis";
+  if (options.propose && (!BROKER_GRANTS[purpose].includes("propose") || options.persistRoot || !plan.components[options.propose.component])) throw new Error("Proposal grant is not available to this component broker");
+  if (purpose === "enrichment" && options.persistRoot) throw new Error("Enrichment brokers have no root persistence grant");
   const contexts = structuredClone(options.contexts);
   if (identity.planDigest !== plan.identity || identity.contextDigest !== planDigest(contexts)) throw new Error("Component plan/context identity mismatch");
   const owners = new WeakMap<ComponentBinding, ComponentPlan>();
   const current = () => isDeepStrictEqual(identity, options.currentIdentity());
   const check = (signal: AbortSignal) => { signal.throwIfAborted(); if (!current()) throw new Error("Component binding expired"); };
+  const propose = options.propose;
+  const proposeRoot: RunnerHost["persistRoot"] | undefined = propose ? async (result, binding, signal) => {
+    check(signal);
+    const component = owners.get(binding);
+    if (!component || component.id !== propose.component || !binding.isCurrent()) throw new Error("Proposal grant does not cover this component");
+    await propose.persist(result, binding, signal);
+  } : undefined;
   return {
     async prepare(component, signal) {
       check(signal);
@@ -160,7 +183,8 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
       const component = owners.get(binding);
       if (!component || !binding.isCurrent()) throw new Error("Invalid component binding");
       const context = contexts[component.id];
-      const render = z.object({ render_blocks: z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict()).optional() }).passthrough().parse(component.declaration.effect ?? {}).render_blocks;
+      // The enrichment proposal is typed by the host, not by a render contract.
+      const render = purpose === "enrichment" ? undefined : z.object({ render_blocks: z.array(z.object({ type: z.string(), fields: z.record(z.string(), z.string()) }).strict()).optional() }).passthrough().parse(component.declaration.effect ?? {}).render_blocks;
       const surface = options.contextSurface ? options.contextSurface(component, run)
         : context ? { kind: "snapshot" as const, text: snapshotSurfaceText(context.snapshot, context.rules) } : undefined;
       const renderText = run.terminal && render?.length ? `Render output: Return only one JSON object with a blocks array.\n${describeRenderContract(render)}\nCopy data and definitions only from successful host tool or child results. A KPI label must identify its returned column; do not invent units or deltas. If evidence is insufficient, return {"status":"refused","message":"Insufficient verified data"}.` : "";
@@ -170,7 +194,7 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
       const prompt = [run.prompt, surface?.text ?? "", renderText].filter(Boolean).join("\n\n");
       return options.step({ ...run, prompt, surfaces: Object.freeze(surfaces), contextKind: surface?.kind ?? "none" }, component, identity);
     },
-    ...(options.persistRoot ? { persistRoot: options.persistRoot } : {}),
+    ...(proposeRoot ? { persistRoot: proposeRoot } : options.persistRoot ? { persistRoot: options.persistRoot } : {}),
     ...(options.verifyChild ? { verifyChild: options.verifyChild } : {}),
     ...(options.onEvent ? { onEvent: options.onEvent } : {}),
   };

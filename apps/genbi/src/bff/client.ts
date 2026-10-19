@@ -298,14 +298,24 @@ export function nativeSessionWebSocketUrl(id: string, capability: string): strin
 
 export type EnrichmentMode = 'grill' | 'autopilot';
 export type EnrichmentRisk = 'low' | 'high' | 'conflict' | 'ambiguous';
-export type EnrichmentChangeKind = 'knowledge_append' | 'new_cube' | 'new_view' | 'new_relationship' | 'mdl_metric' | 'calculated_column' | 'conflict' | 'ambiguous';
-export type EnrichmentOperationState = 'awaiting_decision' | 'awaiting_approval' | 'ready' | 'ready_to_reapply' | 'applying' | 'applied' | 'skipped' | 'reconcile_required';
-export type EnrichmentRunState = 'drafting' | 'awaiting_decision' | 'awaiting_approval' | 'ready' | 'completed' | 'cancelled' | 'reconcile_required' | 'failed';
+export type EnrichmentChangeKind = 'knowledge_append' | 'description_append' | 'new_cube' | 'new_view' | 'new_relationship' | 'mdl_metric' | 'calculated_column' | 'conflict' | 'ambiguous';
+export type EnrichmentOperationState = 'validation_pending' | 'validation_failed' | 'awaiting_decision' | 'awaiting_approval' | 'ready' | 'ready_to_reapply' | 'applying' | 'applied' | 'skipped' | 'reconcile_required';
+export type EnrichmentRunState = 'drafting' | 'validation_pending' | 'validation_failed' | 'awaiting_decision' | 'awaiting_approval' | 'ready' | 'completed' | 'cancelled' | 'reconcile_required' | 'failed' | 'applying' | 'applied' | 'apply_refused' | 'apply_failed' | 'discarded';
 export type EnrichmentAuditOutcome = 'applied' | 'skipped' | 'reverted' | 'failed' | 'reconcile_required';
 export type EnrichmentCapability = { available: true } | { available: false; reason: string };
 export interface EnrichmentOperation { id: string; sink: string; risk: EnrichmentRisk; summary: string; draft: string; changeKind: EnrichmentChangeKind; confidence: string; decision: 'accept' | 'edit' | 'skip' | null; completed: boolean; state: EnrichmentOperationState; }
-export interface EnrichmentRun { id: string; mode: EnrichmentMode; projectRevision: string; bindingGeneration: number; version: number; proposalId: string; proposalHash: string; status: EnrichmentRunState; createdAt: string; updatedAt: string; operations: EnrichmentOperation[]; events: { id: string; kind: string; createdAt: string }[]; audit: { entries: { operationId: string; sink: string; confidence: string; summary: string; outcome?: EnrichmentAuditOutcome }[]; history: { outcome: EnrichmentAuditOutcome; createdAt: string }[] }; error?: string; }
-export interface EnrichmentStatus { available: boolean; /** Separates bound foundation readiness from optional callback capability. */ foundationReady?: boolean; capabilities: { draft: EnrichmentCapability; apply: EnrichmentCapability; approval: EnrichmentCapability; reconcile: EnrichmentCapability }; run?: EnrichmentRun; }
+export interface EnrichmentRun { id: string; mode: EnrichmentMode; projectRevision: string; bindingGeneration: number; version: number; proposalId: string; proposalHash: string; status: EnrichmentRunState; createdAt: string; updatedAt: string; operations: EnrichmentOperation[]; events: { id: string; kind: string; createdAt: string }[]; audit: { entries: { operationId: string; sink: string; confidence: string; summary: string; outcome?: EnrichmentAuditOutcome }[]; history: { outcome: EnrichmentAuditOutcome; createdAt: string }[] }; error?: string; backend?: 'local' | 'openshell'; validation?: EnrichmentValidationFailure; review?: EnrichmentReview; apply?: EnrichmentApplyEvidence; }
+/** Sanitized validator/host refusal of an OpenShell run (`unsupported_by_runtime` is the out-of-scope code). */
+export interface EnrichmentValidationFailure { stage: 'host' | 'validator' | 'runtime'; code: string; message: string; path?: string; checks?: { check: string; status: 'pass' | 'fail' | 'skipped'; code?: string; message?: string }[]; }
+/** One reviewed file: the exact bounded before/after bytes as text. `appended` is the host-built tail of a knowledge append. */
+export interface EnrichmentDiffEntry { path: string; change: 'modified'; beforeSha256: string; afterSha256: string; before: string; after: string; appended: string | null; truncated?: boolean; }
+export interface EnrichmentReview { diff: EnrichmentDiffEntry[]; diffSha256: string; receipt: { checks: { check: string; status: 'pass' | 'fail' | 'skipped'; code?: string; message?: string }[]; mdl: { sha256: string; size: number }; changeSetSha256: string }; binding: { generation: number; revision: string }; snapshot: { digest: string }; }
+export interface EnrichmentApplyReceipt { version: 1; appliedAt: string; runId: string; diffSha256: string; changeSetSha256: string; files: { path: string; beforeSha256: string; afterSha256: string }[]; mdl: { sha256: string; written: boolean }; previousBinding: { generation: number; revision: string }; binding: { generation: number; revision: string }; }
+/** Journal state, sanitized refusal/failure code and, once applied, the receipt. */
+export interface EnrichmentApplyEvidence { state?: string; code?: string; receipt?: EnrichmentApplyReceipt; }
+/** Response of a successful authorize/apply/discard. `capability` is present only on authorize and is never to be stored or shown. */
+export interface EnrichmentApplyResponse { code: 'minted' | 'applied' | 'discarded'; capability?: string; expiresAt?: string; reviewSha256?: string; changeSetSha256?: string; receipt?: EnrichmentApplyReceipt; replay?: boolean; revocationPending?: boolean; runId: string; run?: EnrichmentRun; }
+export interface EnrichmentStatus { available: boolean; /** Which backend drafts runs; only `openshell` runs use the host-captured diff and one-use apply capability. */ backend?: 'local' | 'openshell'; /** Separates bound foundation readiness from optional callback capability. */ foundationReady?: boolean; capabilities: { draft: EnrichmentCapability; apply: EnrichmentCapability; approval: EnrichmentCapability; reconcile: EnrichmentCapability }; run?: EnrichmentRun; }
 /** Browser-editable fields only. The server derives operation identity, risk, and proposal hash. */
 export interface EnrichmentEditDraft { sink: string; changeKind: EnrichmentChangeKind; summary: string; draft: string; }
 
@@ -316,6 +326,9 @@ export function postEnrichmentEdit(runId: string, operationId: string, edit: Enr
 export function postEnrichmentApproval(runId: string, operationId: string, proposalHash: string, projectRevision: string, expectedVersion: number): Promise<EnrichmentRun> { return request<EnrichmentRun>(`/api/context/enrichment/${encodeURIComponent(runId)}/approval`, { method: 'POST', body: JSON.stringify({ operationId, proposalHash, projectRevision, expectedVersion }) }); }
 export function postEnrichmentCancel(runId: string, expectedVersion: number): Promise<EnrichmentRun> { return request<EnrichmentRun>(`/api/context/enrichment/${encodeURIComponent(runId)}/cancel`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }); }
 export function postEnrichmentRetry(runId: string, expectedVersion: number): Promise<EnrichmentRun> { return request<EnrichmentRun>(`/api/context/enrichment/${encodeURIComponent(runId)}/retry`, { method: 'POST', body: JSON.stringify({ expectedVersion }) }); }
+export function authorizeEnrichmentApply(runId: string): Promise<EnrichmentApplyResponse> { return request<EnrichmentApplyResponse>(`/api/context/enrichment/${encodeURIComponent(runId)}/apply/authorize`, { method: 'POST', body: '{}' }); }
+export function applyEnrichmentRun(runId: string, capability: string, reviewSha256: string): Promise<EnrichmentApplyResponse> { return request<EnrichmentApplyResponse>(`/api/context/enrichment/${encodeURIComponent(runId)}/apply`, { method: 'POST', body: JSON.stringify({ capability, reviewSha256 }) }); }
+export function discardEnrichmentRun(runId: string): Promise<EnrichmentApplyResponse> { return request<EnrichmentApplyResponse>(`/api/context/enrichment/${encodeURIComponent(runId)}/discard`, { method: 'POST', body: '{}' }); }
 export function postEnrichmentReapply(runId: string, operationId: string, expectedVersion: number): Promise<EnrichmentRun> { return request<EnrichmentRun>(`/api/context/enrichment/${encodeURIComponent(runId)}/reapply`, { method: 'POST', body: JSON.stringify({ operationId, expectedVersion }) }); }
 
 // ---------------------------------------------------------------------------
@@ -534,7 +547,7 @@ export interface StructuredAskReadiness {
   readonly runtime?: 'local' | 'openshell';
   readonly backends?: Readonly<Record<'claude' | 'codex' | 'pi', StructuredBackendReadiness>>;
   readonly active: { readonly backend: string; readonly state: string; readonly ask: boolean; readonly reason: string;
-    readonly modelExecution?: 'openshell'; readonly queryExecution?: 'openshell'; readonly supportedAgents?: readonly string[] };
+    readonly modelExecution?: 'openshell'; readonly queryExecution?: 'openshell'; readonly enrich?: boolean; readonly supportedAgents?: readonly string[] };
 }
 export function getStructuredAskReadiness(): Promise<StructuredAskReadiness> {
   return request('/api/structured-runtime/readiness');

@@ -6,10 +6,12 @@ import { createAgentEventEmitter, enforceCompliance, type RouteOptions, type Rou
 import type { ComponentEvent, RunnerHost } from "../harness/components/runner.js";
 import type { RuntimeBackendReadiness } from "./runtime-host/types.js";
 import { structuredQueryEnvelope } from "./structured-query-evidence.js";
-import { StructuredRuntimeError, type StructuredAdapter, type StructuredScope } from "./structured-runtime.js";
+import { StructuredRuntimeError, type EnrichOptions, type EnrichmentValidationRequest, type StructuredAdapter, type StructuredScope } from "./structured-runtime.js";
 import { isStructuredQueryFailure } from "./structured-error-feedback.js";
 import type { OpenShellModelSession } from "./runtime-host/openshell-model-session.js";
 import type { OpenShellIdentity } from "./runtime-host/openshell-types.js";
+import { runOpenShellEnrichment } from "./openshell-enrichment.js";
+import type { OpenShellEnrichmentValidator } from "./openshell-enrichment-validation.js";
 
 type RootResult = Extract<ComponentInvocationResult, { status: "ok" }>;
 type OpenShellResult = Extract<RouteResult, { backend: "openshell" }>;
@@ -23,6 +25,24 @@ export function readOpenShellStructuredResult(result: OpenShellResult): OpenShel
   return structuredClone(proof.snapshot);
 }
 
+export interface OpenShellPreparedHost {
+  assertCurrent(): void;
+  /** Actual OpenShell preparation supplies a full executable checkpoint. */
+  assertExecutableCurrent?(): void;
+  sessionIdentity?(): Extract<OpenShellIdentity, { purpose: "model_session" }>;
+  run(request: string): Promise<ComponentInvocationResult>;
+  /** Complete all host/worker cleanup before returning an answer. */
+  dispose(): Promise<void>;
+}
+export interface OpenShellEnrichmentPreparation {
+  readonly options: EnrichOptions;
+  readonly scope: StructuredScope;
+  /** One governed stage root; only `draft_enrichment` may carry the proposal sink. */
+  readonly stage: "inspect_context" | "draft_enrichment";
+  readonly request: string;
+  readonly propose?: { readonly component: string; readonly persist: NonNullable<RunnerHost["persistRoot"]> };
+  readonly onEvent: (event: ComponentEvent) => void;
+}
 export interface OpenShellStructuredProvisioner {
   probe(): Promise<RuntimeBackendReadiness>;
   /** Server-owned cleanup proof for one session, never a global idle requirement. */
@@ -30,21 +50,19 @@ export interface OpenShellStructuredProvisioner {
   reserveSession?(input: { readonly options: RouteOptions; readonly scope: StructuredScope }): Promise<OpenShellModelSession>;
   prepare(input: { readonly options: RouteOptions; readonly scope: StructuredScope;
     readonly modelSession?: OpenShellModelSession;
-    readonly persistRoot: NonNullable<RunnerHost["persistRoot"]>; readonly onEvent: (event: ComponentEvent) => void }): Promise<{
-    assertCurrent(): void;
-    /** Actual OpenShell preparation supplies a full executable checkpoint. */
-    assertExecutableCurrent?(): void;
-    sessionIdentity?(): Extract<OpenShellIdentity, { purpose: "model_session" }>;
-    run(request: string): Promise<ComponentInvocationResult>;
-    /** Complete all host/worker cleanup before returning an answer. */
-    dispose(): Promise<void>;
-  }>;
+    readonly persistRoot: NonNullable<RunnerHost["persistRoot"]>; readonly onEvent: (event: ComponentEvent) => void }): Promise<OpenShellPreparedHost>;
+  /** The enrichment purpose has its own admission entry point; `prepare` can never produce an enrichment host. */
+  prepareEnrichment?(input: OpenShellEnrichmentPreparation): Promise<OpenShellPreparedHost>;
+  /** The operator-approved snapshot file list (the published snapshot's file set), or undefined when no inventory is configured. Prompt hint only. */
+  enrichmentApprovedFiles?(): readonly string[] | undefined;
 }
 
-/** One server-selected analytical root; final text and vendor artifacts have no answer authority. The vendor is the boot's single model vendor. */
-export function createOpenShellStructuredAdapter(provisioner: OpenShellStructuredProvisioner, diagnostics?: StructuredDiagnosticObserver, vendor: "claude" | "pi" = "claude"): StructuredAdapter {
+/** One server-selected analytical root; final text and vendor artifacts have no answer authority. The vendor is the boot's single model vendor. Enrichment and its validator are Claude-only. */
+export function createOpenShellStructuredAdapter(provisioner: OpenShellStructuredProvisioner, diagnostics?: StructuredDiagnosticObserver, vendor: "claude" | "pi" = "claude", validator?: OpenShellEnrichmentValidator): StructuredAdapter {
   return {
     vendor, backend: "openshell", nativeSessions: !!provisioner.reserveSession, probe: () => provisioner.probe(),
+    ...(vendor === "claude" && provisioner.prepareEnrichment ? { enrich: (options: EnrichOptions, scope: StructuredScope) => runOpenShellEnrichment(provisioner, options, scope, diagnostics) } : {}),
+    ...(vendor === "claude" && validator ? { validateEnrichment: (request: EnrichmentValidationRequest, scope: StructuredScope) => validator.validate(request, scope), enrichmentValidationAvailable: () => validator.available() } : {}),
     async ask(options, scope) {
       const timing = structuredTimingForObserver(diagnostics);
       markStructuredTiming(timing, "adapter_enter");
@@ -73,7 +91,7 @@ export function createOpenShellStructuredAdapter(provisioner: OpenShellStructure
       const guarded = { ...scope, signal, assertCurrent };
       const emitter = createAgentEventEmitter(options.onEvent);
       const { warnings } = enforceCompliance(options.authChoice, { deployment: options.deployment ?? "personal" });
-      let prepared: Awaited<ReturnType<OpenShellStructuredProvisioner["prepare"]>> | undefined;
+      let prepared: OpenShellPreparedHost | undefined;
       let root: RootResult | undefined;
       let closing: Promise<void> | undefined;
       const close = () => closing ??= observeStructuredAsync(diagnostics, "adapter_cleanup", () => prepared?.dispose() ?? Promise.resolve());

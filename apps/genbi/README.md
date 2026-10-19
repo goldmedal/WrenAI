@@ -389,6 +389,30 @@ Startup reconciles workers before references and orphan publications, without re
 interrupted work. These guarantees require the same exclusive gateway/controller contract
 as the lifecycle backend.
 
+#### OpenShell enrichment: scope, Apply-all and recovery
+
+Under the OpenShell backend a context-enrichment draft is validated in a credential-less sandbox and then reviewed as **one change set**. The only actions are Apply-all and
+Discard; per-operation decisions, approvals, edits, retries and re-applies are refused.
+
+Scope (existing files only). The governed snapshot must keep equalling the operator's `approvedFiles` list exactly, so enrichment may only **modify files that are already in
+that snapshot**: append to an existing `knowledge/{rules,glossary,metrics,caveats,sql}/*.md`, add or extend `description` values in an existing `models/*/metadata.yml`, or
+extend an existing `relationships.yml`. Anything that creates a file, and every cube, view and calculated column, ends `validation_failed(unsupported_by_runtime)`; the host
+decides this before the sandbox runs, the validator refuses it independently, and Apply re-checks it. A `knowledge_append` draft is only the text to add: the host appends it to
+the current bytes (one separating newline when the file does not already end with one). Local-backend enrichment is unchanged.
+
+Apply-all. `POST /api/context/enrichment/:id/apply/authorize` mints a server-generated, single-use capability (256 bits, stored only as a hash, valid 10 minutes, returned once,
+bound to the run, review hash, change-set hash, binding and model account; minting again invalidates the previous one). `POST .../apply {capability, reviewSha256}` spends it,
+re-checks the account, binding generation and revision, the **full per-file source manifest** against the reviewed one, each target's before-bytes and the absence of links, then
+journals (`enrichment_apply_journal`, with the before bytes) **before** writing exactly the reviewed files plus the validator-regenerated `target/mdl.json` (temp file, fsync,
+rename, directory fsync). On success one transaction advances the binding generation, revokes the project's native sessions and marks the run `applied` with a receipt; new sessions
+publish a fresh snapshot, nothing is remounted and no image is rebuilt. Applying an applied run again returns its receipt and writes nothing. `POST .../discard` ends a validated or
+validation-failed run without writing anything.
+
+Recovery. On BFF start an `applying` journal row is rolled back if every file is exactly its old or its new bytes (run `apply_failed`), otherwise it becomes `reconcile_required`.
+Nothing is ever resumed forward. While a `reconcile_required` row exists for the project, no OpenShell apply can be minted or run. Operator resolution, with the BFF stopped:
+inspect the row (`sqlite3 <db> "select run_id, state, evidence, files_json from enrichment_apply_journal where state = 'reconcile_required'"`), restore each listed file from its
+base64 `before` bytes (or accept the current bytes), then `update enrichment_apply_journal set state = 'resolved' where run_id = '<id>'`.
+
 ### Host-only Claude component transport
 
 An internal OpenShell provider can run one governed Claude component step per fresh

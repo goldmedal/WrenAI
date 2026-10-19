@@ -17,6 +17,21 @@ import { snapshotHash } from "./runtime-host/openshell-snapshot-driver.js";
 import { openOpenShellWrenAccess } from "./runtime-host/openshell-wren-access.js";
 import { OpenShellError } from "./runtime-host/openshell-types.js";
 import { isBackendOffered, type RuntimeSelection } from "./runtime-selection.js";
+import { exchangeWithValidator } from "./runtime-host/openshell-validator-client.js";
+import type { SnapshotManifest } from "./runtime-host/openshell-snapshot-types.js";
+
+/**
+ * One published snapshot plus, on demand, the credential-less validator sandbox over it. Host review reads go through the
+ * manifest-verified source; the validator is launched only by `validate`, never by opening the session.
+ */
+export interface ValidatorSession {
+  readonly digest: string;
+  readonly manifest: SnapshotManifest;
+  readonly validator: { readonly script: string; readonly wheel: string; readonly toolchain: string; readonly architecture: string; readonly protocol: string; readonly image: string; readonly policy: string };
+  readSource(relative: string, maxBytes: number): Buffer | undefined;
+  validate(request: Buffer, timeoutMs: number): Promise<Buffer>;
+  close(): Promise<void>;
+}
 
 /** Outcome of the boot-time gateway proof; only a pi boot has one. */
 export type PiBootVerification = { readonly ok: boolean; readonly code?: string } | undefined;
@@ -95,6 +110,13 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
   const adapter: StructuredAdapter = { vendor: model.vendor, backend: "openshell", probe: async () => (await probe()).readiness };
   return { selected: configuration.selected, modelVendor: model.vendor, piBoot: pi?.boot, verifyPiGateway: pi?.verifyGateway, lifecycle, snapshots, adapter, probe,
     dataWorkerAvailable: !!(configuration.configuration?.dataWorker && snapshots && (options.claude || pi)),
+    /** Fail closed: the validator needs the protected data worker, snapshot authority and a verified validator descriptor. */
+    validatorAvailable: () => !!(configuration.configuration?.dataWorker?.validator && snapshots && lifecycle?.validatorReady && lifecycle.dataIdentity),
+    /** Read-only copy of the operator's approved snapshot file list, so Apply can prove the tree still equals what was reviewed. Never widens it. */
+    applyInventory: (): { readonly approvedFiles: readonly string[]; readonly preserveProjectConfig: boolean } | undefined => {
+      const capture = configuration.configuration?.snapshotCapture;
+      return capture ? { approvedFiles: Object.freeze([...capture.approvedFiles]), preserveProjectConfig: !!configuration.configuration?.dataWorker } : undefined;
+    },
     /** Explicit protected operator call, never an HTTP/browser enrollment route. */
     claudeVault: vault,
     /** Host-captured component preparation alone calls this; no browser tool exposes it. */
@@ -126,6 +148,53 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
           return { ...access, close: () => closing ??= (async () => { try { await access.close(); await snapshots!.remove(publication!.id); } finally { delivery!.release(); dataApprovals.delete(key); } })() };
         } catch (error) {
           delivery?.release(); dataApprovals.delete(key); await lease?.close(); if (publication) await snapshots.remove(publication.id); throw error;
+        } finally { publicationPermit.release(); }
+      };
+    },
+    /**
+     * Enrichment validation context (host only, never a browser or model tool). Publishes the current snapshot, then lets the host
+     * review it and, only if the host check passes, launch the credential-less validator over that same published snapshot.
+     */
+    bindValidatorContext(context: string, assertCurrent: () => void) {
+      assertCurrent(); const epoch = runtimeEpoch;
+      return async (scope: Omit<Extract<import("./runtime-host/openshell-types.js").OpenShellIdentity, { purpose: "lifecycle" }>, "purpose" | "operation" | "snapshot" | "image" | "policy" | "gateway" | "workspace" | "configuration">, signal: AbortSignal): Promise<ValidatorSession> => {
+        const config = configuration.configuration;
+        if (!snapshots || !lifecycle || !config?.dataWorker?.validator || !lifecycle.dataIdentity || !lifecycle.validatorReady) throw new OpenShellError("openshell_unavailable");
+        const worker = config.dataWorker, descriptor = worker.validator!;
+        const check = () => { signal.throwIfAborted(); assertCurrent(); if (epoch !== runtimeEpoch || scope.context !== context) throw new OpenShellError("openshell_scope_invalid"); };
+        check();
+        const identity = { ...scope, binding: snapshotHash(scope.binding), ...lifecycle.identity, purpose: "lifecycle" as const, operation: "worker" as const, snapshot: "none" as const };
+        const current = () => { try { check(); return identity; } catch { return undefined; } };
+        const key = approvalKey(identity);
+        if (dataApprovals.has(key)) throw new OpenShellError("openshell_scope_invalid");
+        dataApprovals.set(key, check);
+        let publicationPermit: Awaited<ReturnType<OpenShellProjectSnapshots["preparePublication"]>>;
+        try { publicationPermit = await snapshots.preparePublication(identity, current, signal); } catch (error) { dataApprovals.delete(key); throw error; }
+        let publication: Awaited<ReturnType<typeof snapshots.publish>> | undefined;
+        let delivery: Awaited<ReturnType<OpenShellProjectSnapshots["prepareValidatorDelivery"]>> | undefined;
+        let lease: Awaited<ReturnType<typeof snapshots.deliverValidator>> | undefined;
+        let closing: Promise<void> | undefined;
+        const release = () => closing ??= (async () => {
+          try { await lease?.close(); if (publication) await snapshots!.remove(publication.id); } finally { delivery?.release(); dataApprovals.delete(key); }
+        })();
+        try {
+          publication = await snapshots.publish(publicationPermit); check();
+          const published = publication, manifest = snapshots.manifest(published);
+          return { digest: published.digest, manifest,
+            validator: { script: descriptor.script, wheel: worker.wheel, toolchain: worker.toolchain, architecture: worker.architecture, protocol: descriptor.protocol, image: lifecycle.dataIdentity.image, policy: lifecycle.dataIdentity.policy },
+            readSource: (relative, maxBytes) => { check(); return snapshots!.readSource(published, relative, maxBytes); },
+            async validate(request, timeoutMs) {
+              check();
+              if (delivery || lease) throw new OpenShellError("openshell_scope_invalid");
+              delivery = await snapshots!.prepareValidatorDelivery(published, identity, current, signal);
+              lease = await snapshots!.deliverValidator(delivery); check();
+              const expected = { worker: "genbi-wren-validator/1" as const, snapshot: published.digest, script: descriptor.script, wheel: worker.wheel, toolchain: worker.toolchain, architecture: worker.architecture, protocol: descriptor.protocol };
+              return exchangeWithValidator({ lease, expected, request, signal, assertCurrent: check, timeoutMs });
+            },
+            close: release };
+        } catch (error) {
+          try { await release(); } catch { /* durable cleanup retry owns uncertainty */ }
+          throw error;
         } finally { publicationPermit.release(); }
       };
     },

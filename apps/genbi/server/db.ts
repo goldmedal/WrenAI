@@ -529,6 +529,8 @@ export interface EnrichmentRunRow {
   readonly buildDigest: string | null;
   readonly errorMessage: string | null;
   readonly bindingGeneration: number;
+  /** Which backend drafted (and so must validate) the run. An OpenShell run is never applied by the host-local apply path. */
+  readonly backend: "local" | "openshell";
   /** Monotonic optimistic-concurrency token; never use `updatedAt` as authority. */
   readonly version: number;
 }
@@ -541,6 +543,19 @@ export interface EnrichmentOperationRow extends EnrichmentOperation {
   readonly leaseToken: string | null;
   readonly leaseExpiresAt: string | null;
   readonly idempotencyKey: string;
+}
+
+/** The one-use apply capability as persisted: only a hash of the token, bound to the run, the review, the change set, the binding and the account. */
+export interface EnrichmentApplyCapabilityRow {
+  readonly runId: string; readonly tokenHash: string; readonly reviewSha256: string; readonly changeSetSha256: string;
+  readonly bindingPath: string; readonly bindingIdentity: string; readonly bindingGeneration: number; readonly bindingRevision: string; readonly account: string;
+  readonly mintedAt: string; readonly expiresAt: string; readonly consumedAt: string | null; readonly consumedOutcome: string | null;
+}
+export type EnrichmentApplyJournalState = "applying" | "applied" | "rolled_back" | "reconcile_required" | "resolved";
+export interface EnrichmentApplyJournalFile { readonly path: string; /** Base64 of the bytes found before the write (bounded). */ readonly before: string; readonly beforeSha256: string; readonly afterSha256: string }
+export interface EnrichmentApplyJournalRow {
+  readonly runId: string; readonly projectPath: string; readonly state: EnrichmentApplyJournalState; readonly capabilityHash: string; readonly changeSetSha256: string;
+  readonly files: readonly EnrichmentApplyJournalFile[]; readonly receipt: unknown; readonly evidence: string | null; readonly createdAt: string; readonly updatedAt: string;
 }
 
 export interface EnrichmentEventRow { readonly id: string; readonly runId: string; readonly kind: string; readonly message: string; readonly createdAt: string; }
@@ -728,6 +743,7 @@ export class Store {
   private readonly onContextSuccessWrite: StoreOptions["onContextSuccessWrite"];
   private readonly onEnrichmentTransitionWrite: StoreOptions["onEnrichmentTransitionWrite"];
   private readonly onEnrichmentCreationWrite: StoreOptions["onEnrichmentCreationWrite"];
+  private inApplyTransaction = false;
   private readonly now: () => Date;
 
   constructor(path: string, options: StoreOptions = {}) {
@@ -740,6 +756,15 @@ export class Store {
     this.db.exec(SCHEMA_SQL);
     this.db.exec("CREATE TABLE IF NOT EXISTS openshell_intents (id TEXT PRIMARY KEY, payload TEXT NOT NULL)");
     this.db.exec("CREATE TABLE IF NOT EXISTS openshell_snapshot_publications (id TEXT PRIMARY KEY, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS openshell_snapshot_references (id TEXT PRIMARY KEY, payload TEXT NOT NULL)");
+    // Additive: the OpenShell validation record (review or failure evidence) and the run's drafting backend.
+    this.db.exec("CREATE TABLE IF NOT EXISTS enrichment_validations (run_id TEXT PRIMARY KEY, outcome TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL)");
+    this.addColumnIfMissing("enrichment_runs", "backend", "TEXT NOT NULL DEFAULT 'local'");
+    // Additive: OpenShell apply-all. A one-use capability per run (hash only) and the durable journal written before any project file is touched.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS enrichment_apply_capabilities (run_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, review_sha256 TEXT NOT NULL, change_set_sha256 TEXT NOT NULL,
+      binding_path TEXT NOT NULL, binding_identity TEXT NOT NULL, binding_generation INTEGER NOT NULL, binding_revision TEXT NOT NULL, account TEXT NOT NULL,
+      minted_at TEXT NOT NULL, expires_at TEXT NOT NULL, consumed_at TEXT, consumed_outcome TEXT);
+      CREATE TABLE IF NOT EXISTS enrichment_apply_journal (run_id TEXT PRIMARY KEY, project_path TEXT NOT NULL, state TEXT NOT NULL, capability_hash TEXT NOT NULL, change_set_sha256 TEXT NOT NULL,
+      files_json TEXT NOT NULL, receipt_json TEXT, evidence TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
     this.migrateSchema();
     this.seedIfEmpty();
     this.reconcileOrphanedSetupTurns();
@@ -763,7 +788,7 @@ export class Store {
     if (previous && (previous.owner !== intent.owner || previous.name !== intent.name || !isDeepStrictEqual(previous.identity, intent.identity)
       || (previous.remoteId !== undefined && previous.remoteId !== intent.remoteId)
       || (previous.phase === "cleaned" && intent.phase !== "cleaned"))) throw new OpenShellError("openshell_journal_failed");
-    if (intent.identity.purpose === "data" && !previous) {
+    if ((intent.identity.purpose === "data" || intent.identity.purpose === "validate") && !previous) {
       const identity = intent.identity;
       const reference = this.listSnapshotReferences().find((row) => row.id === identity.reference);
       const publication = this.listSnapshotPublications().find((row) => row.id === identity.publication);
@@ -807,7 +832,7 @@ export class Store {
     if (previous && !transitions[previous.phase].includes(row.phase)) throw new OpenShellError("openshell_journal_failed");
     if (!previous) {
       const publication = this.listSnapshotPublications().find((value) => value.id === row.publication);
-      if (!publication || publication.phase !== "ready" || row.identity.purpose !== "data" || row.identity.publication !== row.publication
+      if (!publication || publication.phase !== "ready" || (row.identity.purpose !== "data" && row.identity.purpose !== "validate") || row.identity.publication !== row.publication
         || row.identity.reference !== row.id || row.identity.snapshot !== publication.manifest?.digest) throw new OpenShellError("openshell_scope_invalid");
     }
     this.db.prepare("INSERT INTO openshell_snapshot_references (id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(row.id, JSON.stringify(row));
@@ -864,6 +889,16 @@ export class Store {
   private reconcileOrphanedEnrichmentRuns(): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const now = this.now().toISOString();
+      // A validation is bound to its owning process and sandbox too: it never resumes. Its OpenShell intents are cleaned by lifecycle recovery.
+      const interrupted = this.db.prepare(`SELECT id FROM enrichment_runs WHERE status = 'validation_pending'`).all().map((row) => str(row as Record<string, unknown>, "id"));
+      for (const runId of interrupted) {
+        const failure = JSON.stringify({ version: 1, stage: "runtime", code: "interrupted", message: "The validation was interrupted by a BFF restart; start a new enrichment run." });
+        this.db.prepare(`UPDATE enrichment_runs SET error_message = ?, updated_at = ?, version = version + 1, status = 'validation_failed' WHERE id = ? AND status = 'validation_pending'`).run("a previous enrichment validation was interrupted by a BFF restart; start a new enrichment run", now, runId);
+        this.db.prepare(`UPDATE enrichment_operations SET state = 'validation_failed' WHERE run_id = ? AND state = 'validation_pending'`).run(runId);
+        this.db.prepare(`INSERT OR REPLACE INTO enrichment_validations (run_id, outcome, payload, created_at) VALUES (?, 'failed', ?, ?)`).run(runId, failure, now);
+        this.db.prepare(`INSERT INTO enrichment_events (id, run_id, kind, message, created_at) VALUES (?, ?, 'failed', ?, ?)`).run(newId("enrichment-event"), runId, "Enrichment validation failed.", now);
+      }
       const orphanRunIds = this.db
         .prepare(`SELECT id FROM enrichment_runs WHERE status = 'drafting'`)
         .all()
@@ -872,7 +907,6 @@ export class Store {
         this.db.exec("COMMIT");
         return;
       }
-      const now = this.now().toISOString();
       const message = "a previous enrichment draft was interrupted by a BFF restart; start a new enrichment run";
       this.db
         .prepare(`UPDATE enrichment_runs SET error_message = ?, updated_at = ?, version = version + 1, status = 'failed' WHERE status = 'drafting'`)
@@ -2099,11 +2133,11 @@ export class Store {
    * terminal status via `finalizeEnrichmentDraft` or `failEnrichmentRun`
    * (or, after a process restart, `reconcileOrphanedEnrichmentRuns`).
    */
-  createDraftingEnrichmentRun(params: { readonly id: string; readonly mode: EnrichmentMode; readonly binding: EnrichmentBinding }): EnrichmentRunRow {
+  createDraftingEnrichmentRun(params: { readonly id: string; readonly mode: EnrichmentMode; readonly binding: EnrichmentBinding; readonly backend?: "local" | "openshell" }): EnrichmentRunRow {
     const now = this.now().toISOString();
     this.db.exec("BEGIN");
     try {
-      this.db.prepare(`INSERT INTO enrichment_runs (id, mode, project_path, project_identity, project_revision, proposal_id, proposal_hash, status, created_at, updated_at, validation_digest, build_digest, error_message, binding_generation, version) VALUES (?, ?, ?, ?, ?, '', '', 'drafting', ?, ?, NULL, NULL, NULL, ?, 1)`).run(params.id, params.mode, params.binding.path, params.binding.identity, params.binding.revision, now, now, params.binding.generation);
+      this.db.prepare(`INSERT INTO enrichment_runs (id, mode, project_path, project_identity, project_revision, proposal_id, proposal_hash, status, created_at, updated_at, validation_digest, build_digest, error_message, binding_generation, version, backend) VALUES (?, ?, ?, ?, ?, '', '', 'drafting', ?, ?, NULL, NULL, NULL, ?, 1, ?)`).run(params.id, params.mode, params.binding.path, params.binding.identity, params.binding.revision, now, now, params.binding.generation, params.backend ?? "local");
       this.onEnrichmentCreationWrite?.("after_run");
       this.db.prepare(`INSERT INTO enrichment_events (id, run_id, kind, message, created_at) VALUES (?, ?, 'started', ?, ?)`).run(newId("enrichment-event"), params.id, "Enrichment draft started.", now);
       this.onEnrichmentCreationWrite?.("after_event");
@@ -2122,19 +2156,21 @@ export class Store {
    * restart already reconciled to 'failed' (or that was somehow already
    * finalized) cannot be resurrected by a late completion.
    */
-  finalizeEnrichmentDraft(params: { readonly runId: string; readonly expectedVersion: number; readonly proposalId: string; readonly proposalHash: string; readonly operations: readonly EnrichmentOperation[]; readonly validationDigest?: string; readonly buildDigest?: string }): boolean {
+  finalizeEnrichmentDraft(params: { readonly runId: string; readonly expectedVersion: number; readonly proposalId: string; readonly proposalHash: string; readonly operations: readonly EnrichmentOperation[]; readonly validationDigest?: string; readonly buildDigest?: string; readonly pendingValidation?: boolean }): boolean {
     this.db.exec("BEGIN");
     try {
       const now = this.now().toISOString();
-      const changedRun = this.db.prepare(`UPDATE enrichment_runs SET status = 'awaiting_decision', proposal_id = ?, proposal_hash = ?, validation_digest = ?, build_digest = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ? AND status = 'drafting'`).run(params.proposalId, params.proposalHash, params.validationDigest ?? null, params.buildDigest ?? null, now, params.runId, params.expectedVersion).changes;
+      // A pending-validation proposal is recorded but is not decidable, approvable or appliable until a later validator settles it.
+      const runStatus = params.pendingValidation ? "validation_pending" : "awaiting_decision";
+      const changedRun = this.db.prepare(`UPDATE enrichment_runs SET status = ?, proposal_id = ?, proposal_hash = ?, validation_digest = ?, build_digest = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ? AND status = 'drafting'`).run(runStatus, params.proposalId, params.proposalHash, params.validationDigest ?? null, params.buildDigest ?? null, now, params.runId, params.expectedVersion).changes;
       if (Number(changedRun) !== 1) {
         this.db.exec("ROLLBACK");
         return false;
       }
       this.onEnrichmentCreationWrite?.("after_run");
-      for (const operation of params.operations) this.db.prepare(`INSERT INTO enrichment_operations (run_id, operation_id, sink, risk, summary, draft, change_kind, confidence, decision, completed, state, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 'awaiting_decision', ?)`).run(params.runId, operation.id, operation.sink, operation.risk, operation.summary, operation.draft, operation.changeKind, operation.confidence, `${params.runId}:${operation.id}`);
+      for (const operation of params.operations) this.db.prepare(`INSERT INTO enrichment_operations (run_id, operation_id, sink, risk, summary, draft, change_kind, confidence, decision, completed, state, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)`).run(params.runId, operation.id, operation.sink, operation.risk, operation.summary, operation.draft, operation.changeKind, operation.confidence, runStatus === "validation_pending" ? "validation_pending" : "awaiting_decision", `${params.runId}:${operation.id}`);
       this.onEnrichmentCreationWrite?.("after_operations");
-      this.db.prepare(`INSERT INTO enrichment_events (id, run_id, kind, message, created_at) VALUES (?, ?, 'drafted', ?, ?)`).run(newId("enrichment-event"), params.runId, "A typed enrichment proposal is ready for review.", now);
+      this.db.prepare(`INSERT INTO enrichment_events (id, run_id, kind, message, created_at) VALUES (?, ?, 'drafted', ?, ?)`).run(newId("enrichment-event"), params.runId, params.pendingValidation ? "A typed enrichment proposal was recorded and awaits sandbox validation." : "A typed enrichment proposal is ready for review.", now);
       this.onEnrichmentCreationWrite?.("after_event");
       this.db.exec("COMMIT");
       return true;
@@ -2171,6 +2207,40 @@ export class Store {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  /**
+   * Settles a `validation_pending` OpenShell run exactly once: to `awaiting_decision` with its review record, or to the terminal
+   * `validation_failed` with sanitized evidence. Fenced on status and version, so a cancel, restart or concurrent settle wins cleanly.
+   */
+  settleEnrichmentValidation(params: { readonly runId: string; readonly expectedVersion: number; readonly outcome: { readonly kind: "validated"; readonly review: import("./enrichment-validation.js").ValidatedReview } | { readonly kind: "failed"; readonly failure: import("./enrichment-validation.js").ValidationFailure } }): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const now = this.now().toISOString();
+      const validated = params.outcome.kind === "validated";
+      const changedRun = this.db.prepare(`UPDATE enrichment_runs SET status = ?, error_message = ?, updated_at = ?, version = version + 1 WHERE id = ? AND version = ? AND status = 'validation_pending' AND backend = 'openshell'`)
+        .run(validated ? "awaiting_decision" : "validation_failed", validated ? null : (params.outcome as { failure: { message: string } }).failure.message, now, params.runId, params.expectedVersion).changes;
+      if (Number(changedRun) !== 1) { this.db.exec("ROLLBACK"); return false; }
+      this.onEnrichmentTransitionWrite?.("after_run");
+      this.db.prepare(`UPDATE enrichment_operations SET state = ? WHERE run_id = ? AND state = 'validation_pending'`).run(validated ? "awaiting_decision" : "validation_failed", params.runId);
+      this.onEnrichmentTransitionWrite?.("after_operation");
+      this.db.prepare(`INSERT OR REPLACE INTO enrichment_validations (run_id, outcome, payload, created_at) VALUES (?, ?, ?, ?)`)
+        .run(params.runId, validated ? "validated" : "failed", JSON.stringify(validated ? (params.outcome as { review: unknown }).review : (params.outcome as { failure: unknown }).failure), now);
+      this.db.prepare(`INSERT INTO enrichment_events (id, run_id, kind, message, created_at) VALUES (?, ?, ?, ?, ?)`).run(newId("enrichment-event"), params.runId, validated ? "validated" : "failed", validated ? "The proposal passed independent sandbox validation and is ready for review." : "Enrichment validation failed.", now);
+      this.onEnrichmentTransitionWrite?.("after_event");
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** The persisted review (validated) or sanitized evidence (failed) for one run, if any. */
+  getEnrichmentValidation(runId: string): { readonly outcome: "validated"; readonly review: import("./enrichment-validation.js").ValidatedReview } | { readonly outcome: "failed"; readonly failure: import("./enrichment-validation.js").ValidationFailure } | undefined {
+    const row = this.db.prepare(`SELECT outcome, payload FROM enrichment_validations WHERE run_id = ?`).get(runId) as { outcome: string; payload: string } | undefined;
+    if (!row) return undefined;
+    return row.outcome === "validated" ? { outcome: "validated", review: JSON.parse(row.payload) } : { outcome: "failed", failure: JSON.parse(row.payload) };
   }
 
   createEnrichmentRun(params: { readonly id: string; readonly mode: EnrichmentMode; readonly binding: EnrichmentBinding; readonly proposalId: string; readonly proposalHash: string; readonly operations: readonly EnrichmentOperation[]; readonly validationDigest?: string; readonly buildDigest?: string }): EnrichmentRunRow {
@@ -2216,29 +2286,113 @@ export class Store {
    * Bootstrap Setup sessions deliberately remain outside this project fence.
    */
   activateEnrichmentBindingAndRevokeBoundNativeSessions(binding: UnversionedEnrichmentBinding | ProjectIdentity): { readonly binding: EnrichmentBinding; readonly revokedNativeSessionIds: readonly string[] } {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const current = this.getEnrichmentBinding();
-      const revision = "revision" in binding ? binding.revision : "";
-      const next: EnrichmentBinding = { ...binding, revision, generation: (current?.generation ?? 0) + 1 };
-      const ids = this.db.prepare(
-        `SELECT id FROM native_sessions
-         WHERE status IN ('creating', 'running', 'detached') AND project_identity IS NOT NULL`,
-      ).all().map((row) => str(row as Record<string, unknown>, "id"));
-      const now = this.now().toISOString();
-      if (ids.length) {
-        const placeholders = ids.map(() => "?").join(",");
-        this.db.prepare(`UPDATE native_sessions SET status = 'stopped', updated_at = ?, ended_at = ?, failure = 'native project binding changed' WHERE id IN (${placeholders})`).run(now, now, ...ids);
-        this.db.prepare(`DELETE FROM native_setup_recovery_actions WHERE session_id IN (${placeholders})`).run(...ids);
-      }
-      this.setConfigJson("enrichment.binding", next);
-      this.db.exec("COMMIT");
-      return { binding: next, revokedNativeSessionIds: ids };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    return this.applyTransaction(() => this.advanceBindingAndRevokeNativeSessions(binding));
   }
+
+  /** The shared body: must run inside a transaction so the binding record and the session revocation commit together. */
+  private advanceBindingAndRevokeNativeSessions(binding: UnversionedEnrichmentBinding | ProjectIdentity): { readonly binding: EnrichmentBinding; readonly revokedNativeSessionIds: readonly string[] } {
+    const current = this.getEnrichmentBinding();
+    const revision = "revision" in binding ? binding.revision : "";
+    const next: EnrichmentBinding = { ...binding, revision, generation: (current?.generation ?? 0) + 1 };
+    const ids = this.db.prepare(
+      `SELECT id FROM native_sessions
+       WHERE status IN ('creating', 'running', 'detached') AND project_identity IS NOT NULL`,
+    ).all().map((row) => str(row as Record<string, unknown>, "id"));
+    const now = this.now().toISOString();
+    if (ids.length) {
+      const placeholders = ids.map(() => "?").join(",");
+      this.db.prepare(`UPDATE native_sessions SET status = 'stopped', updated_at = ?, ended_at = ?, failure = 'native project binding changed' WHERE id IN (${placeholders})`).run(now, now, ...ids);
+      this.db.prepare(`DELETE FROM native_setup_recovery_actions WHERE session_id IN (${placeholders})`).run(...ids);
+    }
+    this.setConfigJson("enrichment.binding", next);
+    return { binding: next, revokedNativeSessionIds: ids };
+  }
+
+  /** One `BEGIN IMMEDIATE` unit (re-entrant for the host's own composition). A throw rolls everything back. */
+  applyTransaction<T>(work: () => T): T {
+    if (this.inApplyTransaction) return work();
+    this.db.exec("BEGIN IMMEDIATE");
+    this.inApplyTransaction = true;
+    try { const result = work(); this.db.exec("COMMIT"); return result; }
+    catch (error) { try { this.db.exec("ROLLBACK"); } catch { /* already rolled back */ } throw error; }
+    finally { this.inApplyTransaction = false; }
+  }
+
+  // ----- OpenShell apply-all: capability, journal and fenced terminal transitions -----
+  putEnrichmentApplyCapability(row: EnrichmentApplyCapabilityRow): void {
+    this.db.prepare(`INSERT OR REPLACE INTO enrichment_apply_capabilities (run_id, token_hash, review_sha256, change_set_sha256, binding_path, binding_identity, binding_generation, binding_revision, account, minted_at, expires_at, consumed_at, consumed_outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`)
+      .run(row.runId, row.tokenHash, row.reviewSha256, row.changeSetSha256, row.bindingPath, row.bindingIdentity, row.bindingGeneration, row.bindingRevision, row.account, row.mintedAt, row.expiresAt);
+  }
+  getEnrichmentApplyCapability(runId: string): EnrichmentApplyCapabilityRow | undefined {
+    const row = this.db.prepare(`SELECT * FROM enrichment_apply_capabilities WHERE run_id = ?`).get(runId) as Record<string, unknown> | undefined;
+    return row ? { runId: str(row, "run_id"), tokenHash: str(row, "token_hash"), reviewSha256: str(row, "review_sha256"), changeSetSha256: str(row, "change_set_sha256"), bindingPath: str(row, "binding_path"),
+      bindingIdentity: str(row, "binding_identity"), bindingGeneration: Number(row["binding_generation"]), bindingRevision: str(row, "binding_revision"), account: str(row, "account"),
+      mintedAt: str(row, "minted_at"), expiresAt: str(row, "expires_at"), consumedAt: row["consumed_at"] === null ? null : str(row, "consumed_at"), consumedOutcome: row["consumed_outcome"] === null ? null : str(row, "consumed_outcome") } : undefined;
+  }
+  /** Atomically spends the capability: exactly one caller can ever get `true`, and only before expiry. */
+  consumeEnrichmentApplyCapability(runId: string, tokenHash: string, nowIso: string): boolean {
+    return Number(this.db.prepare(`UPDATE enrichment_apply_capabilities SET consumed_at = ?, consumed_outcome = 'used' WHERE run_id = ? AND token_hash = ? AND consumed_at IS NULL AND expires_at > ?`).run(nowIso, runId, tokenHash, nowIso).changes) === 1;
+  }
+  burnEnrichmentApplyCapability(runId: string, outcome: string, nowIso: string): void {
+    this.db.prepare(`UPDATE enrichment_apply_capabilities SET consumed_at = COALESCE(consumed_at, ?), consumed_outcome = COALESCE(consumed_outcome, ?) WHERE run_id = ?`).run(nowIso, outcome, runId);
+  }
+  insertEnrichmentApplyJournal(row: { readonly runId: string; readonly projectPath: string; readonly capabilityHash: string; readonly changeSetSha256: string; readonly files: readonly EnrichmentApplyJournalFile[] }): void {
+    const now = this.now().toISOString();
+    this.db.prepare(`INSERT INTO enrichment_apply_journal (run_id, project_path, state, capability_hash, change_set_sha256, files_json, receipt_json, evidence, created_at, updated_at) VALUES (?, ?, 'applying', ?, ?, ?, NULL, NULL, ?, ?)`)
+      .run(row.runId, row.projectPath, row.capabilityHash, row.changeSetSha256, JSON.stringify(row.files), now, now);
+  }
+  getEnrichmentApplyJournal(runId: string): EnrichmentApplyJournalRow | undefined {
+    const row = this.db.prepare(`SELECT * FROM enrichment_apply_journal WHERE run_id = ?`).get(runId);
+    return row ? rowToApplyJournal(row) : undefined;
+  }
+  listEnrichmentApplyJournals(states?: readonly EnrichmentApplyJournalState[]): EnrichmentApplyJournalRow[] {
+    return this.db.prepare(`SELECT * FROM enrichment_apply_journal ORDER BY created_at ASC, rowid ASC`).all().map(rowToApplyJournal).filter((row) => !states || states.includes(row.state));
+  }
+  /** Moves a journal row out of `applying` exactly once; evidence is kept with the row. */
+  settleEnrichmentApplyJournal(runId: string, state: Exclude<EnrichmentApplyJournalState, "applying">, evidence: string | null, receipt?: unknown): boolean {
+    return Number(this.db.prepare(`UPDATE enrichment_apply_journal SET state = ?, evidence = ?, receipt_json = COALESCE(?, receipt_json), updated_at = ? WHERE run_id = ? AND state IN ('applying', 'reconcile_required')`)
+      .run(state, evidence, receipt === undefined ? null : JSON.stringify(receipt), this.now().toISOString(), runId).changes) === 1;
+  }
+  /**
+   * A fenced run transition for the OpenShell apply lifecycle: moves the run (and its still-open operations) only from one of `from`,
+   * records the evidence event, and reports whether this caller won. Never touches operations that are already completed.
+   */
+  transitionEnrichmentRunFenced(params: { readonly runId: string; readonly from: readonly EnrichmentRunStatus[]; readonly to: EnrichmentRunStatus; readonly message?: string; readonly operationState?: EnrichmentOperationState;
+    readonly decision?: "skip"; readonly event: { readonly kind: string; readonly message: string } }): boolean {
+    return this.applyTransaction(() => {
+      const now = this.now().toISOString();
+      const marks = params.from.map(() => "?").join(",");
+      const changed = Number(this.db.prepare(`UPDATE enrichment_runs SET status = ?, error_message = COALESCE(?, error_message), updated_at = ?, version = version + 1 WHERE id = ? AND status IN (${marks})`)
+        .run(params.to, params.message ?? null, now, params.runId, ...params.from).changes);
+      if (changed !== 1) return false;
+      if (params.operationState) this.db.prepare(`UPDATE enrichment_operations SET state = ?, decision = COALESCE(?, decision) WHERE run_id = ? AND completed = 0 AND state NOT IN ('applied')`).run(params.operationState, params.decision ?? null, params.runId);
+      this.db.prepare(`INSERT INTO enrichment_events (id, run_id, kind, message, created_at) VALUES (?, ?, ?, ?, ?)`).run(newId("enrichment-event"), params.runId, params.event.kind, params.event.message, now);
+      return true;
+    });
+  }
+  /**
+   * The success tail in ONE transaction: the new binding generation (revoking project-scoped native sessions), the journal row, the run and its operations.
+   * Refuses unless both the journal row and the run are still `applying`, so a recovery or a concurrent writer can never be overwritten.
+   */
+  completeEnrichmentApply(params: { readonly runId: string; readonly binding: UnversionedEnrichmentBinding; readonly receipt: (advanced: EnrichmentBinding) => unknown; readonly appliedOperationIds: readonly string[] }): { readonly binding: EnrichmentBinding; readonly revokedNativeSessionIds: readonly string[] } | undefined {
+    return this.applyTransaction(() => {
+      const now = this.now().toISOString();
+      const run = this.getEnrichmentRun(params.runId);
+      if (!run || run.status !== "applying" || this.getEnrichmentApplyJournal(params.runId)?.state !== "applying") return undefined;
+      const advanced = this.advanceBindingAndRevokeNativeSessions(params.binding);
+      this.onEnrichmentTransitionWrite?.("after_run");
+      this.settleEnrichmentApplyJournal(params.runId, "applied", null, params.receipt(advanced.binding));
+      this.db.prepare(`UPDATE enrichment_runs SET status = 'applied', updated_at = ?, version = version + 1 WHERE id = ? AND status = 'applying'`).run(now, params.runId);
+      for (const operation of this.listEnrichmentOperations(params.runId)) {
+        const applied = params.appliedOperationIds.includes(operation.id);
+        this.db.prepare(`UPDATE enrichment_operations SET state = ?, completed = ? WHERE run_id = ? AND operation_id = ?`).run(applied ? "applied" : "skipped", applied ? 1 : 0, params.runId, operation.id);
+      }
+      this.onEnrichmentTransitionWrite?.("after_operation");
+      this.db.prepare(`INSERT INTO enrichment_events (id, run_id, kind, message, created_at) VALUES (?, ?, 'applied', ?, ?)`).run(newId("enrichment-event"), params.runId, "The validated change set was applied as one unit.", now);
+      return advanced;
+    });
+  }
+
   getEnrichmentBinding(): EnrichmentBinding | undefined { return this.getConfigJson<EnrichmentBinding>("enrichment.binding"); }
 
   getEnrichmentRun(id: string): EnrichmentRunRow | undefined { const row = this.db.prepare(`SELECT * FROM enrichment_runs WHERE id = ?`).get(id); return row ? rowToEnrichmentRun(row) : undefined; }
@@ -2752,11 +2906,17 @@ function rowToEvalRun(row: Record<string, unknown>): EvalRun {
 }
 
 function rowToEnrichmentRun(row: Record<string, unknown>): EnrichmentRunRow {
-  return { id: str(row, "id"), mode: str(row, "mode") as EnrichmentMode, projectPath: str(row, "project_path"), projectIdentity: str(row, "project_identity"), projectRevision: str(row, "project_revision"), proposalId: str(row, "proposal_id"), proposalHash: str(row, "proposal_hash"), status: str(row, "status") as EnrichmentRunStatus, createdAt: str(row, "created_at"), updatedAt: str(row, "updated_at"), validationDigest: strOrNull(row, "validation_digest"), buildDigest: strOrNull(row, "build_digest"), errorMessage: strOrNull(row, "error_message"), bindingGeneration: num(row, "binding_generation"), version: num(row, "version") };
+  return { id: str(row, "id"), mode: str(row, "mode") as EnrichmentMode, projectPath: str(row, "project_path"), projectIdentity: str(row, "project_identity"), projectRevision: str(row, "project_revision"), proposalId: str(row, "proposal_id"), proposalHash: str(row, "proposal_hash"), status: str(row, "status") as EnrichmentRunStatus, createdAt: str(row, "created_at"), updatedAt: str(row, "updated_at"), validationDigest: strOrNull(row, "validation_digest"), buildDigest: strOrNull(row, "build_digest"), errorMessage: strOrNull(row, "error_message"), bindingGeneration: num(row, "binding_generation"), backend: row["backend"] === "openshell" ? "openshell" : "local", version: num(row, "version") };
 }
 
 function rowToEnrichmentOperation(row: Record<string, unknown>): EnrichmentOperationRow {
   return { id: str(row, "operation_id"), sink: str(row, "sink"), risk: str(row, "risk") as EnrichmentRisk, summary: str(row, "summary"), draft: str(row, "draft"), changeKind: str(row, "change_kind") as import("./enrichment.js").EnrichmentChangeKind, confidence: normalizeEnrichmentConfidence(row["confidence"]), decision: strOrNull(row, "decision") as EnrichmentOperationRow["decision"], completed: str(row, "state") === "applied", state: str(row, "state") as EnrichmentOperationRow["state"], attempt: num(row, "attempt"), leaseToken: strOrNull(row, "lease_token"), leaseExpiresAt: strOrNull(row, "lease_expires_at"), idempotencyKey: str(row, "idempotency_key") };
+}
+
+function rowToApplyJournal(row: Record<string, unknown>): EnrichmentApplyJournalRow {
+  return { runId: str(row, "run_id"), projectPath: str(row, "project_path"), state: str(row, "state") as EnrichmentApplyJournalState, capabilityHash: str(row, "capability_hash"), changeSetSha256: str(row, "change_set_sha256"),
+    files: JSON.parse(str(row, "files_json")) as EnrichmentApplyJournalFile[], receipt: row["receipt_json"] === null ? null : JSON.parse(str(row, "receipt_json")), evidence: row["evidence"] === null ? null : str(row, "evidence"),
+    createdAt: str(row, "created_at"), updatedAt: str(row, "updated_at") };
 }
 
 function rowToEnrichmentEvent(row: Record<string, unknown>): EnrichmentEventRow {

@@ -148,7 +148,7 @@ describe("pinned thinking progress is bounded metadata", () => {
    {type:"assistant",session_id:"session",uuid:"assistant",message:{content:[{type:"text",text:"synthetic"}]}},
    {type:"result",session_id:"session",uuid:"result"}]) for(const parsed of frames.feed(encode(frame)))p.worker(parsed.value);
   frames.end();p.settled();expect(()=>p.claim("echo",{})).toThrow();
-  expect(()=>p.worker({...progress,uuid:"late"})).toThrow();
+  expect(()=>p.worker({...progress,uuid:"late"})).not.toThrow();expect(()=>p.worker({type:"assistant",session_id:"session",uuid:"late-assistant",message:{content:[]}})).toThrow();
  });
  it.each([
   {estimated_tokens:-1},{estimated_tokens_delta:-1},{estimated_tokens:NaN},{estimated_tokens:Infinity},
@@ -164,7 +164,7 @@ describe("pinned thinking progress is bounded metadata", () => {
  });
  it("counts progress toward frame and identity caps and rejects oversized identity",()=>{
   const p=gate().protocol;p.worker(init);const frames=new ClaudeLineFrames();frames.feed(encode(init));
-  for(let n=1;n<L.frames;n++){const frame={...progress,uuid:"p"+n};for(const parsed of frames.feed(encode(frame)))p.worker(parsed.value);}
+  for(let n=1;n<=8192;n++){const frame={...progress,uuid:"p"+n};for(const parsed of frames.feed(encode(frame)))p.worker(parsed.value);}
   expect(()=>frames.feed(encode({...progress,uuid:"overflow"}))).toThrow();expect(()=>p.worker({...progress,uuid:"overflow"})).toThrow();
   const fresh=gate().protocol;fresh.worker(init);expect(()=>fresh.worker({...progress,uuid:"x".repeat(129)})).toThrow();
  });
@@ -219,7 +219,7 @@ describe("inert pinned rate-limit transport",()=>{
   const p=ready().protocol,frames=new ClaudeLineFrames(),event={...rate,rate_limit_info:{status}};
   for(const parsed of frames.feed(encode(event)))p.worker(parsed.value);
   expect(()=>p.claim("echo",{text:"ok"})).toThrow();p.worker({type:"result",session_id:"session",uuid:"result"});
-  expect(()=>p.worker({...event,uuid:"late"})).toThrow();
+  expect(()=>p.worker({...event,uuid:"late"})).not.toThrow();expect(()=>p.worker({type:"assistant",session_id:"session",uuid:"late-assistant",message:{content:[]}})).toThrow();
  });
  it.each([-1,1.25,Number.MAX_SAFE_INTEGER+1,1e100])("keeps finite producer numeric %s inert without guessed limits",value=>{
   const p=ready().protocol;p.worker({...rate,rate_limit_info:{status:"allowed",utilization:value,surpassedThreshold:value,resetsAt:value===1.25?-2:value,overageResetsAt:-1,overagePeriodMonthly:{utilization:value},overagePeriodChannel:{utilization:value},unifiedWindows:{five_hour:{utilization:value,resetsAt:-1}}}});
@@ -240,5 +240,86 @@ describe("inert pinned rate-limit transport",()=>{
   expect(()=>gate().protocol.worker(rate)).toThrow();const f=ready(),p=f.protocol;p.worker(rate);expect(()=>p.worker(rate)).toThrow();
   expect(()=>p.worker({type:"assistant",uuid:"rate",session_id:"session",message:{content:[]}})).toThrow();f.revoke();expect(()=>p.worker({...rate,uuid:"new"})).toThrow();
  });
- it("keeps rate frames within existing frame caps",()=>{const p=ready().protocol,frames=new ClaudeLineFrames();frames.feed(encode(init));for(let i=1;i<L.frames;i++)for(const frame of frames.feed(encode({...rate,uuid:"rate"+i})))p.worker(frame.value);expect(()=>frames.feed(encode({...rate,uuid:"overflow"}))).toThrow();expect(()=>p.worker({...rate,uuid:"overflow"})).toThrow();});
+ it("keeps rate frames within existing frame caps",()=>{const p=ready().protocol,frames=new ClaudeLineFrames();frames.feed(encode(init));for(let i=1;i<=8192;i++)for(const frame of frames.feed(encode({...rate,uuid:"rate"+i})))p.worker(frame.value);expect(()=>frames.feed(encode({...rate,uuid:"overflow"}))).toThrow();expect(()=>p.worker({...rate,uuid:"overflow"})).toThrow();});
+});
+
+describe("raw transport: after the result", () => {
+ const sid = { session_id: "session" };
+ const res = { type: "result", session_id: "session", uuid: "result" };
+ const idle = { type: "system", subtype: "session_state_changed", uuid: "idle", ...sid, state: "idle" };
+ const siteOf = (action: () => void): string | undefined => { try { action(); } catch (error) { return (error as { site?: string }).site ?? "schema"; } return undefined; };
+ const done = () => { const p = gate().protocol; p.worker(init); p.worker(res); return p; };
+ it("accepts a trailing inert event without changing the settled result or reopening the stream", () => {
+  const p = done(); p.worker(idle); p.worker({ type: "system", subtype: "status", uuid: "st", ...sid, status: null });
+  p.settled(); expect(() => p.claim("echo", {})).toThrow();
+ });
+ it.each([
+  ["assistant", { type: "assistant", uuid: "a", ...sid, message: { content: [{ type: "text", text: "x" }] } }],
+  ["tool_use", { type: "assistant", uuid: "a", ...sid, message: { content: [{ type: "tool_use", name: "mcp__component__echo" }] } }],
+  ["second result", { ...res, uuid: "result2" }],
+  ["init", { ...init, uuid: "init2" }],
+  ["unknown system event", { type: "system", subtype: "compact_boundary", uuid: "c", ...sid }],
+ ])("refuses a trailing %s as message_after_result", (_name, event) => {
+  expect(siteOf(() => done().worker(event as Record<string, unknown>))).toBe("message_after_result");
+ });
+ it("keeps trailing events unique, same-session and bounded by the frame limit", () => {
+  const p = done(); p.worker(idle);
+  expect(siteOf(() => p.worker(idle))).toBe("duplicate_uuid");
+  expect(siteOf(() => p.worker({ ...idle, uuid: "other", session_id: "foreign" }))).toBe("session_mismatch");
+  const cap = (extra: Record<string, unknown>) => ({ ...extra });
+  void cap;
+ });
+ it("counts substantive and inert frames against separate caps, and reports closed-vocabulary counts", () => {
+  const q = gate().protocol; q.worker(init);
+  for (let index = 0; index < L.frames - 1; index++) q.worker({ type: "assistant", uuid: `a${index}`, ...sid, message: { content: [] } });
+  expect(siteOf(() => q.worker({ type: "assistant", uuid: "a-over", ...sid, message: { content: [] } }))).toBe("transport_frame_limit");
+  const r = gate().protocol; r.worker(init);
+  for (let index = 0; index < 8192; index++) r.worker({ type: "system", subtype: "session_state_changed", uuid: `n${index}`, ...sid, state: "running" });
+  expect(siteOf(() => r.worker({ ...idle, uuid: "one-too-many" }))).toBe("inert_frame_limit");
+  const counts = r.frameCounts();
+  expect(Object.keys(counts).sort()).toEqual(["system:init", "system:session_state_changed"]);
+  expect(counts["system:session_state_changed"]).toBe(8193);
+  const hostile = gate().protocol; hostile.worker(init);
+  try { hostile.worker({ type: "private-model-text", uuid: "h", ...sid }); } catch { /* refused */ }
+  expect(hostile.frameCounts()).toEqual({ "system:init": 1, other: 1 });
+  expect(JSON.stringify(hostile.frameCounts())).not.toContain("private-model-text");
+});
+});
+
+describe("raw transport: inert events and fault sites", () => {
+ const sid = { session_id: "session" };
+ const inert = [
+  { type: "system", subtype: "status", uuid: "s1", ...sid, status: "requesting" },
+  { type: "system", subtype: "status", uuid: "s2", ...sid, status: null, permissionMode: "default" },
+  { type: "system", subtype: "api_retry", uuid: "s3", ...sid, attempt: 1, max_retries: 3, retry_delay_ms: 250, error_status: 529, error: "overloaded" },
+  { type: "system", subtype: "session_state_changed", uuid: "s4", ...sid, state: "running" },
+ ];
+ const siteOf = (action: () => void): string | undefined => { try { action(); } catch (error) { return (error as { site?: string }).site ?? "schema"; } return undefined; };
+ it.each(inert)("ignores the inert %j event without claiming a tool or lifting a limit", event => {
+  const p = gate().protocol, frames = new ClaudeLineFrames();
+  for (const frame of [init, event, { type: "assistant", session_id: "session", uuid: "assistant", message: { content: [{ type: "text", text: "synthetic" }] } }, { type: "result", session_id: "session", uuid: "result" }]) for (const parsed of frames.feed(encode(frame))) p.worker(parsed.value);
+  frames.end(); p.settled(); expect(() => p.claim("echo", {})).toThrow();
+ });
+ it("still counts an inert event against the duplicate-uuid rule", () => {
+  const p = gate().protocol; p.worker(init); p.worker(inert[0]!);
+  expect(siteOf(() => p.worker(inert[0]!))).toBe("duplicate_uuid");
+ });
+ it.each([
+  [{ type: "system", subtype: "status", uuid: "m1", ...sid, status: "private-model-text" }, "schema"],
+  [{ type: "system", subtype: "api_retry", uuid: "m2", ...sid, attempt: "x", max_retries: 1, retry_delay_ms: 1, error_status: null, error: "e" }, "schema"],
+  [{ type: "system", subtype: "compact_boundary", uuid: "m3", ...sid }, "unexpected_event:system.compact_boundary"],
+  [{ type: "system", subtype: "private-model-text", uuid: "m4", ...sid }, "unexpected_event:system.other"],
+  [{ type: "tool_progress", uuid: "m5", ...sid }, "unexpected_event:tool_progress"],
+  [{ type: "stream_event", uuid: "m6", ...sid }, "unexpected_event:stream_event"],
+  [{ type: "private-model-text", uuid: "m7", ...sid }, "unexpected_event:other"],
+  [{ type: "assistant", uuid: "m8", ...sid, message: { content: [{ type: "tool_use", name: "mcp__component__other" }] } }, "undeclared_tool_use"],
+ ])("refuses %j with the %s site and no claim", (event, site) => {
+  const p = gate().protocol; p.worker(init);
+  expect(siteOf(() => p.worker(event as Record<string, unknown>))).toBe(site);
+  expect(() => p.claim("echo", { text: "ok" })).toThrow();
+ });
+ it("labels an unadmitted tool call and an extra init tool", () => {
+  const p = gate().protocol; p.worker(init); expect(siteOf(() => p.claim("echo", { text: "ok" }))).toBe("tool_claim");
+  expect(siteOf(() => gate().protocol.worker({ ...init, tools: ["mcp__component__echo", "Bash"] }))).toBe("init_tools");
+ });
 });

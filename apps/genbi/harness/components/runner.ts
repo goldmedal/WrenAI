@@ -218,7 +218,10 @@ function logComponentFailure(site: string, code: string, error: unknown, origin?
   const known = origin ?? (error !== null && typeof error === "object" ? failureOrigins.get(error) : undefined);
   const detail = error instanceof ExecutionFailure ? error.reason : error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
   const fields = { site, code, ...(known ? { component: known.component, ...(known.step ? { step: known.step } : {}), depth: known.depth } : {}),
-    ...(error instanceof Error ? { error: error.name } : {}), ...(detail ? { detail: redactForLog(detail) } : {}), ...(budget ?? {}) };
+    ...(error instanceof Error ? { error: error.name } : {}), ...(detail ? { detail: redactForLog(detail) } : {}),
+    ...(error !== null && typeof error === "object" && typeof (error as { faultSite?: unknown }).faultSite === "string" && /^[a-z_.:]{1,64}$/.test((error as { faultSite: string }).faultSite) ? { fault_site: (error as { faultSite: string }).faultSite } : {}),
+    ...(() => { const counts = error !== null && typeof error === "object" ? (error as { frameCounts?: unknown }).frameCounts : undefined; if (!counts || typeof counts !== "object") return {};
+      const safe = Object.entries(counts as Record<string, unknown>).filter(([key, value]) => /^[a-z_:]{1,40}$/.test(key) && Number.isInteger(value)).slice(0, 16); return safe.length ? { frame_counts: Object.fromEntries(safe) } : {}; })(), ...(budget ?? {}) };
   console.error(`[component-failure] ${JSON.stringify(fields)}`);
 }
 /** The run's wall-clock budget and how much of it a failing run had used; logged so a `cancelled` is attributable to the limit. */

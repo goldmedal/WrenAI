@@ -2,12 +2,17 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { OpenShellError, OPEN_SHELL_OWNER_LABEL, type OpenShellDriver, type OpenShellIntent, type OpenShellResource, type OpenShellDuplex } from "./openshell-types.js";
+import { OpenShellError, OPEN_SHELL_OWNER_LABEL, isSnapshotIdentity, type OpenShellDriver, type OpenShellIntent, type OpenShellResource, type OpenShellDuplex } from "./openshell-types.js";
 import type { SnapshotMount } from "./openshell-snapshot-types.js";
 import type { RuntimeSelection } from "../runtime-selection.js";
 
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
+/** The fixed, packaged enrichment validator entrypoint. It ships in `runtime-assets` and is copied into the worker image. */
+export const VALIDATOR_SCRIPT_PATH = fileURLToPath(new URL("../../runtime-assets/wren-worker/validator.py", import.meta.url));
+export const VALIDATOR_ARGV: readonly string[] = Object.freeze(["/usr/local/bin/python", "-I", "/opt/genbi/validator.py"]);
+export const DATA_WORKER_ARGV: readonly string[] = Object.freeze(["/usr/local/bin/python", "-I", "/opt/genbi/worker.py"]);
 const token = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/);
 const absolute = z.string().refine(path.isAbsolute);
 const configurationSchema = z.object({
@@ -18,7 +23,8 @@ const configurationSchema = z.object({
   model: z.object({ image: digest, policy: absolute, policyDigest: digest }).strict().optional(),
   pi: z.object({ image: digest, policy: absolute, policyDigest: digest, provider: token, profile: absolute, profileDigest: digest }).strict().optional(),
   dataPolicy: absolute.optional(), dataPolicyDigest: digest.optional(),
-  dataWorker: z.object({ image: digest, script: digest, wheel: digest, toolchain: digest, architecture: z.literal("linux-arm64"), protocol: z.literal("wren-governed/2") }).strict().optional(),
+  dataWorker: z.object({ image: digest, script: digest, wheel: digest, toolchain: digest, architecture: z.literal("linux-arm64"), protocol: z.literal("wren-governed/2"),
+    validator: z.object({ script: digest, protocol: z.literal("genbi-validate/1") }).strict().optional() }).strict().optional(),
   snapshotCapture: z.object({ executable: absolute, realpath: absolute, digest, helperDigest: digest, approvedFiles: z.array(z.string()).min(2).max(4094) }).strict().optional(),
 }).strict().refine((value) => !value.pi || (value.pi.image !== value.image && value.pi.image !== value.model?.image && value.pi.image !== value.dataWorker?.image), "The pi image must differ from every other configured image").refine((value) => [value.dataPolicy, value.dataPolicyDigest, value.snapshotCapture].every((item) => item === undefined)
   || [value.dataPolicy, value.dataPolicyDigest, value.snapshotCapture].every((item) => item !== undefined), "Snapshot configuration must be complete").refine(value => !value.dataWorker || !!value.snapshotCapture, "Data worker requires snapshot authority");
@@ -64,6 +70,13 @@ export class OpenShellCliDriver implements OpenShellDriver {
     this.dataIdentity = configuration.dataPolicy && configuration.dataPolicyDigest ? Object.freeze({ ...this.identity, image: configuration.dataWorker?.image ?? configuration.image, policy: configuration.dataPolicyDigest }) : undefined;
     this.environment = Object.freeze({ PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: configuration.home,
       XDG_CONFIG_HOME: configuration.configHome, XDG_STATE_HOME: configuration.stateHome, LANG: "en_US.UTF-8" });
+  }
+  /** The validator is usable only when the protected descriptor equals the packaged script. Unrelated to analysis readiness. */
+  validatorReady(): boolean {
+    try {
+      const validator = this.configuration.dataWorker?.validator;
+      return !!validator && !!this.dataIdentity && hash(readFileSync(VALIDATOR_SCRIPT_PATH)) === validator.script;
+    } catch { return false; }
   }
   private attest(): void {
     try {
@@ -111,13 +124,14 @@ export class OpenShellCliDriver implements OpenShellDriver {
     return pi && intent.identity.purpose === "model" && intent.identity.image === pi.image ? pi : undefined;
   }
   async create(intent: OpenShellIntent, signal: AbortSignal): Promise<OpenShellResource> {
-    const mount = intent.identity.purpose === "data" ? this.snapshotMount?.(intent) : undefined;
-    if (intent.identity.purpose === "data" && (!mount || !this.dataIdentity)) throw new OpenShellError("openshell_scope_invalid");
+    const mount = isSnapshotIdentity(intent.identity) ? this.snapshotMount?.(intent) : undefined;
+    if (isSnapshotIdentity(intent.identity) && (!mount || !this.dataIdentity)) throw new OpenShellError("openshell_scope_invalid");
+    if (intent.identity.purpose === "validate" && !this.validatorReady()) throw new OpenShellError("openshell_scope_invalid");
     const pi = this.piBlock(intent);
     if (intent.identity.purpose === "model_session" && this.configuration.pi && intent.identity.image === this.configuration.pi.image) throw new OpenShellError("openshell_scope_invalid");
     if (["model", "model_session"].includes(intent.identity.purpose) && !this.configuration.model && !pi) throw new OpenShellError("openshell_scope_invalid");
     if (this.configuration.pi && this.configuration.model && intent.identity.purpose === "model" && !pi && intent.identity.image !== this.configuration.model.image) throw new OpenShellError("openshell_scope_invalid");
-    await this.command(["sandbox", "create", "--name", intent.name, "--from", pi ? pi.image : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.image : intent.identity.purpose === "data" ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image, "--policy", pi ? pi.policy : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.policy : mount ? this.configuration.dataPolicy! : this.configuration.policy,
+    await this.command(["sandbox", "create", "--name", intent.name, "--from", pi ? pi.image : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.image : isSnapshotIdentity(intent.identity) ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image, "--policy", pi ? pi.policy : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.policy : mount ? this.configuration.dataPolicy! : this.configuration.policy,
       ...(mount ? ["--driver-config-json", JSON.stringify({ docker: { mounts: [{ type: "volume", source: mount.volume, target: "/opt/genbi-project", read_only: true }] } })] : []),
       "--no-auto-providers", ...(pi ? ["--provider", pi.provider] : []), "--approval-mode", "manual", "--detach", "--tty", "--cpu", "1", "--memory", "1Gi",
       "--label", `${OPEN_SHELL_OWNER_LABEL}=${intent.owner}`, "--", "/bin/sleep", "1800"], signal, 180_000);
@@ -149,10 +163,10 @@ export class OpenShellCliDriver implements OpenShellDriver {
       .safeParse(this.json(await this.docker(["inspect", ...ids])));
     if (!records.success) throw new OpenShellError("openshell_protocol_invalid");
     const owned = records.data.filter((row) => row.Name === `/${prefix}` || row.Name === `/${prefix}-supervisor`);
-    const snapshot = intent.identity.purpose === "data" ? this.snapshotMount?.(intent) : undefined;
-    if (intent.identity.purpose === "data" && !snapshot) throw new OpenShellError("openshell_scope_invalid");
+    const snapshot = isSnapshotIdentity(intent.identity) ? this.snapshotMount?.(intent) : undefined;
+    if (isSnapshotIdentity(intent.identity) && !snapshot) throw new OpenShellError("openshell_scope_invalid");
     if ((purpose === "runnable" && owned.length !== 2) || owned.length > 2 || owned.some((row) => row.Config.Labels?.["openshell.ai/sandbox-id"] !== resource.id
-      || row.Config.Labels?.["openshell.ai/sandbox-namespace"] !== this.configuration.dockerNamespace || row.Image !== (row.Name.endsWith("-supervisor") ? this.configuration.supervisorImage : this.piBlock(intent) ? this.piBlock(intent)!.image : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.image : intent.identity.purpose === "data" ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image)
+      || row.Config.Labels?.["openshell.ai/sandbox-namespace"] !== this.configuration.dockerNamespace || row.Image !== (row.Name.endsWith("-supervisor") ? this.configuration.supervisorImage : this.piBlock(intent) ? this.piBlock(intent)!.image : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.image : isSnapshotIdentity(intent.identity) ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image)
       || row.Mounts.some((mount) => mount.Type !== "volume" || !mount.Name || (!this.volumeNames(resource.id).includes(mount.Name)
         && !(snapshot && !row.Name.endsWith("-supervisor") && mount.Name === snapshot.volume && mount.Destination === "/opt/genbi-project" && mount.RW === false)))
       || (snapshot && !row.Name.endsWith("-supervisor") && row.Mounts.filter((mount) => mount.Name === snapshot.volume).length !== 1))) throw new OpenShellError("openshell_identity_mismatch");
@@ -188,8 +202,11 @@ export class OpenShellCliDriver implements OpenShellDriver {
   async duplex(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex> {
     const pi = this.piBlock(intent) !== undefined && argv.length === 2 && argv[0] === "/usr/local/bin/node" && argv[1] === "/opt/genbi/pi-worker.mjs";
     const model = !this.piBlock(intent) && ["model", "model_session"].includes(intent.identity.purpose) && this.modelIdentity && argv.length === 2 && argv[0] === "/usr/local/bin/node" && (argv[1] === "/opt/genbi/claude-worker.mjs" || (intent.identity.purpose === "model_session" && argv[1] === "/opt/genbi/claude-session-step.mjs"));
-    const data = intent.identity.purpose === "data" && this.configuration.dataWorker && argv.length === 3 && argv[0] === "/usr/local/bin/python" && argv[1] === "-I" && argv[2] === "/opt/genbi/worker.py";
-    if ((!model && !data && !pi) || !this.openDuplex) throw new OpenShellError("openshell_scope_invalid");
+    const sameArgv = (expected: readonly string[]) => argv.length === expected.length && expected.every((value, index) => argv[index] === value);
+    const data = intent.identity.purpose === "data" && !!this.configuration.dataWorker && sameArgv(DATA_WORKER_ARGV);
+    // The validator argv is admitted only for the validate purpose, and only against a verified protected descriptor.
+    const validate = intent.identity.purpose === "validate" && this.validatorReady() && sameArgv(VALIDATOR_ARGV);
+    if ((!model && !data && !pi && !validate) || !this.openDuplex) throw new OpenShellError("openshell_scope_invalid");
     this.attest(); await this.inspect(intent); signal.throwIfAborted();
     const stream = await this.openDuplex(intent, argv, signal);
     try { await this.inspect(intent); signal.throwIfAborted(); this.attest(); return stream; }

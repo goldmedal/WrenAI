@@ -28,6 +28,7 @@ import { RuntimeHost } from "../server/runtime-host/local.js";
 import { streamTurn, effectiveRouteOptions, type TurnDeps } from "../server/turn.js";
 import { createApp } from "../server/app.js";
 import { resolveRuntimeSelection } from "../server/runtime-selection.js";
+import { resolveEnrichmentBinding } from "../server/enrichment.js";
 const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude" });
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -35,19 +36,39 @@ afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await c
 const digest = "sha256:" + "a".repeat(64);
 const sql = "SELECT COUNT(*) AS n FROM orders";
 const expected = { accountUuid: "11111111-1111-4111-8111-111111111111", organizationUuid: "22222222-2222-4222-8222-222222222222", email: "synthetic@example.test", subscription: "pro" as const };
+/** When set, the draft stage's peer emits the inert telemetry real Claude Code interleaves and a fenced-JSON terminal. */
+let noisyDraft = false;
+const draftPrompts: string[] = [];
+const descriptionProposal = { enrichment_proposal: { operation: { relative_sink: "models/orders/metadata.yml", changeKind: "description_append", summary: "Describe orders",
+  recommended_yaml: "description: \"One row per order.\"\ncolumns:\n  id: \"Order identifier.\"\n" } } };
+const enrichmentProposal = { enrichment_proposal: { operations: [{ relative_sink: "knowledge/rules/orders.md", changeKind: "knowledge_append", summary: "Document orders", recommended_yaml: "An order is one purchase." }] } };
 const frame = (request_id: string, message: unknown) => ({ type: "control_request", request_id, request: { subtype: "mcp_message", server_name: "component", message } });
 
 /** Synthetic peer speaks the actual direct SDK wire; no SDK query or broker handler is mocked. */
 function peer(model: string, receipt: { calls: number; replies: number; streams: number; initializations: number; prompts: number; lists: number; listErrors: number }, expectedToolCount: () => number, change?: () => void, native = false): OpenShellDuplex {
-  receipt.streams++; let cwd = "/sandbox";
+  receipt.streams++; let cwd = "/sandbox"; let promptText = "";
   let wake: (() => void) | undefined, closed = false, boot = false, prompted = false, listed = false, started = false, pending = "";
   let tools: { name: string; inputSchema: Record<string, unknown> }[] = [];
   let resolveDone!: (code: number) => void;
   const chunks: Buffer[] = [];
   const emit = (value: unknown) => { chunks.push(Buffer.from(JSON.stringify(value) + "\n")); wake?.(); wake = undefined; };
-  const finish = () => emit({ type: "result", subtype: "success", uuid: "result", session_id: "synthetic-worker", is_error: false,
-    result: JSON.stringify({ columns: ["n"], rows: [{ n: 999999 }], verified: true, definition: { sql } }), permission_denials: [],
+  const noisy = () => {
+    if (!noisyDraft || !promptText.includes("Draft the enrichment proposal")) return;
+    const base = { session_id: "synthetic-worker" };
+    emit({ type: "system", subtype: "status", uuid: "noise-status", ...base, status: "requesting" });
+    emit({ type: "system", subtype: "api_retry", uuid: "noise-retry", ...base, attempt: 1, max_retries: 3, retry_delay_ms: 100, error_status: 529, error: "overloaded" });
+    emit({ type: "system", subtype: "thinking_tokens", uuid: "noise-thinking", ...base, estimated_tokens: 12, estimated_tokens_delta: 12 });
+    emit({ type: "rate_limit_event", uuid: "noise-rate", ...base, rate_limit_info: { status: "allowed", utilization: 0.4 } });
+    emit({ type: "assistant", uuid: "noise-assistant", ...base, parent_tool_use_id: null, message: { content: [{ type: "thinking", thinking: "synthetic reasoning" }] } });
+    emit({ type: "system", subtype: "session_state_changed", uuid: "noise-state", ...base, state: "idle" });
+    for (let index = 0; index < 650; index++) emit({ type: "system", subtype: "thinking_tokens", uuid: `burst-${index}`, ...base, estimated_tokens: index + 1, estimated_tokens_delta: 1 });
+  };
+  const finish = () => { noisy(); emit({ type: "result", subtype: "success", uuid: "result", session_id: "synthetic-worker", is_error: false,
+    result: promptText.includes("Draft the enrichment proposal") ? (noisyDraft ? "```json\n" + JSON.stringify(descriptionProposal) + "\n```" : JSON.stringify(enrichmentProposal)) : JSON.stringify({ columns: ["n"], rows: [{ n: 999999 }], verified: true, definition: { sql } }), permission_denials: [],
     modelUsage: { [model]: { webSearchRequests: 0, inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }, usage: { input_tokens: 1, output_tokens: 1 } });
+    // Real Claude Code reports the idle session state after the result; it must be ignored, never change the result.
+    if (noisyDraft && promptText.includes("Draft the enrichment proposal")) emit({ type: "system", subtype: "session_state_changed", uuid: "post-result-idle", session_id: "synthetic-worker", state: "idle" });
+  };
   const begin = () => {
     if (!prompted || !listed || started) return; started = true;
     emit({ type: "system", subtype: "init", uuid: "init", session_id: "synthetic-worker", claude_code_version: "2.1.259", cwd, model, apiKeySource: "none",
@@ -74,7 +95,7 @@ function peer(model: string, receipt: { calls: number; replies: number; streams:
           emit(frame("mcp-init", { jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "claude-code", version: "2.1.259" } } }));
         } else if (value.type === "control_request" && value.request.subtype === "interrupt") {
           emit({ type: "control_response", response: { subtype: "success", request_id: value.request_id, response: {} } });
-        } else if (value.type === "user") { receipt.prompts++; prompted = true; begin(); }
+        } else if (value.type === "user") { receipt.prompts++; promptText = JSON.stringify(value); if (promptText.includes("Draft the enrichment proposal")) draftPrompts.push(promptText); prompted = true; begin(); }
         else if (value.type === "control_response") {
           if (value.response.request_id === "mcp-init") { emit(frame("notify", { jsonrpc: "2.0", method: "notifications/initialized" })); emit(frame("mcp-list", { jsonrpc: "2.0", id: 1, method: "tools/list" })); }
           if (value.response.request_id === "mcp-list") {
@@ -141,6 +162,7 @@ async function fixture(change?: (store: Store) => void, failureMode?: "query" | 
   const driver: OpenShellDriver = { version: "synthetic", identity, modelIdentity: identity, probe: async () => {}, create: async intent => { const resource = { id: intent.id, name: intent.name, workspace: "default", labels: { "genbi-lifecycle-owner": intent.owner } }; resources.set(intent.name, resource); return resource; }, list: async intent => [...resources.values()].filter(resource => resource.name === intent.name), inspect: async intent => resources.get(intent.name)!, remove: async intent => { resources.delete(intent.name); }, assertAbsent: async intent => { expect(resources.has(intent.name)).toBe(false); }, exec: async (_intent, argv) => { if (argv[1] !== "/opt/genbi/claude-step-control.mjs") throw Error("no live runtime"); if (argv[2] === "--baseline") return JSON.stringify({ type: "genbi.session.baseline", version: 1, processes: [] }); if (argv[2] === "--check") return JSON.stringify({ type: "genbi.session.checked", version: 1, remaining: 0 }); if (controls.helperFailure && observedQuery) throw Error("synthetic uncertain model cleanup"); return JSON.stringify({ ...JSON.parse(argv[2]!).receipt, type: "genbi.step.cleaned", remaining: 0 }); }, duplex: async intent => { if (intent.identity.purpose !== "model" && intent.identity.purpose !== "model_session") throw Error("not a model step"); const stream = peer(intent.identity.purpose === "model" ? intent.identity.model : "synthetic-model", receipt, () => expectedTools, change ? () => change(store) : undefined, intent.identity.purpose === "model_session"); streams.push(stream); return stream; } };
   const composition = await createOpenShellRuntimeCompositionForTesting({ env: { GENBI_OPENSHELL_CONFIG: config }, selection: openshellClaude, store, stateRoot: path.join(root, "lifecycle"), driver, claude: { vault, duplex: driver.duplex! } });
   Object.defineProperty(composition, "dataWorkerAvailable", { value: true });
+  vi.spyOn(composition, "applyInventory").mockReturnValue({ approvedFiles: ["knowledge/rules/orders.md", "models/orders/metadata.yml", "target/mdl.json", "wren_project.yml"], preserveProjectConfig: true });
   // Credential-free synthetic data peer exercises the production bounded adapter.
   // Actual Linux/OpenShell execution is a separate container acceptance gate.
   vi.spyOn(composition, "bindDataContext").mockImplementation((_context, check) => async (_scope, signal) => {
@@ -158,7 +180,7 @@ async function fixture(change?: (store: Store) => void, failureMode?: "query" | 
   const producer = await resolveWarbleBinary();
   const profileSource = path.join(application, "profiles/genbi-default");
   const timing=createStructuredTimingRecorder({role:"utility"});timing.beginSession(1);const diagnostics=createStructuredTimingObserver(timing);
-  const provisioner = createOpenShellStructuredProvisioner({ composition, store, diagnostics, ...(controls.componentLimits ? { componentLimits: controls.componentLimits } : {}), producerBinary: producer, wrenBinary: wren, profileSource, hostHome: root, sourceWrenHome: () => home, getBinding: () => store.getEnrichmentBinding(), modelsFor: settings => resolveStructuredClaudeModels(settings, () => "synthetic-model"), assertConfigurationCurrent() {} });
+  const provisioner = createOpenShellStructuredProvisioner({ composition, store, diagnostics, ...(controls.componentLimits ? { componentLimits: controls.componentLimits } : {}), producerBinary: producer, wrenBinary: wren, profileSource, enrichmentProfileSource: path.join(application, "profiles/genbi-enrich-context"), hostHome: root, sourceWrenHome: () => home, getBinding: () => store.getEnrichmentBinding(), modelsFor: settings => resolveStructuredClaudeModels(settings, () => "synthetic-model"), assertConfigurationCurrent() {} });
   if (controls.cleanupProofFailure) provisioner.assertSessionCleaned = () => { throw Error("synthetic owned cleanup remains uncertain"); };
   const phases: string[] = []; const capturedLimits: (ComponentLimits | undefined)[] = [];
   const realBindings = componentRuntime.createNativeComponentRuntimeBindings;
@@ -172,7 +194,7 @@ async function fixture(change?: (store: Store) => void, failureMode?: "query" | 
     catch (error) { phases.push("prepare:" + String(error)); throw error; }
   };
   const local = vi.fn(async () => { throw Error("local fallback forbidden"); });
-  const runtime = new StructuredRuntime({ diagnostics, selection: openshellClaude, localRoute: local, localSetupFor: () => undefined, adapters: { claude: createOpenShellStructuredAdapter(provisioner,diagnostics) }, onRevoke: composition.revokeRuntime });
+  const runtime = new StructuredRuntime({ diagnostics, selection: openshellClaude, localRoute: local, localSetupFor: () => undefined, adapters: { claude: createOpenShellStructuredAdapter(provisioner,diagnostics,"claude",{ available: () => true, validate: async request => ({ status: "validated" as const, review: { version: 1, binding: { generation: request.binding.generation, revision: request.binding.revision, projectIdentity: request.binding.identity }, snapshot: { digest: `sha256:${"a".repeat(64)}`, files: [] }, diff: [], diffSha256: `sha256:${"d".repeat(64)}`, receipt: {} } as never }) }) }, onRevoke: composition.revokeRuntime });
   const deps = { store, structuredRuntime: runtime, route: local, baseRouteOptions: { ...(controls.componentLimits ? { componentLimits: controls.componentLimits } : {}), authChoice: { mode: "subscription", provider: "claude" }, profileSource, userProject: project, question: "count orders" } } as TurnDeps;
   const native = new OpenShellNativeSessions({ store, provisioner, runtime: () => runtime, getBinding: () => store.getEnrichmentBinding(), routeOptions: () => effectiveRouteOptions(deps) });
   const nativeService = new NativeSessionService({ store, openShellNative: native, workspaceRoot: root, terminalManager: async () => { throw Error("no terminal"); }, getBinding: () => store.getEnrichmentBinding(), warbleBin: producer, irPaths: { analysis: path.join(profileSource, "ir.golden.json"), setup: undefined, context_enrichment: undefined }, nativeHome: root, sourceWrenHome: () => home, runtimeHost: new RuntimeHost({ selected: "openshell", deployment: "development", localAvailable: () => false, vendorProbes: { openshell: composition.probe } }) });
@@ -373,3 +395,37 @@ it("gateway runtime selection cannot launch a scoped Claude Native sandbox or pe
   expect(f.store.listNativeSessions()).toHaveLength(0); expect(f.store.listOpenShellIntents()).toHaveLength(0);
   expect(f.receipt.streams).toBe(0); expect(f.resources.size).toBe(0); expect(f.local).not.toHaveBeenCalled();
 }, 120_000);
+
+async function enrichmentRoundtrip(noisy: boolean) {
+  noisyDraft = noisy;
+  const f = await fixture(); const project = (f.deps.baseRouteOptions as { userProject: string }).userProject;
+  mkdirSync(path.join(project, "target"), { recursive: true }); writeFileSync(path.join(project, "target", "mdl.json"), '{"models":[{"name":"orders"}]}');
+  f.store.setSetupSteps(f.store.getSetupSteps().map(step => step.key === "bind" ? { ...step, state: "done" } : step));
+  const binding = f.store.activateEnrichmentBinding(resolveEnrichmentBinding(project));
+  const verify = vi.fn(async () => { throw Error("the host ladder must not run on an OpenShell proposal"); });
+  const app = createApp({ ...f.deps, verifyEnrichmentProposal: verify, enrichmentRunner: { draft: vi.fn(async () => { throw Error("local runner forbidden"); }) } } as TurnDeps);
+  const before = await hashDirectory(project);
+  expect(await (await app.request("/api/structured-runtime/readiness")).json()).toMatchObject({ claude: { backend: "openshell", enrich: true } });
+  const response = await app.request("/api/context/enrichment/start", { method: "POST", body: JSON.stringify({ mode: "grill" }) });
+  const body = await response.clone().text();
+  expect(response.status, body + JSON.stringify(f.phases)).toBe(201);
+  const run = JSON.parse(body) as { id: string; status: string; projectRevision: string; operations: { sink: string }[] };
+  expect(run).toMatchObject({ status: "awaiting_decision", projectRevision: binding.revision, operations: [{ sink: noisy ? "models/orders/metadata.yml" : "knowledge/rules/orders.md" }] });
+  expect(f.store.listEnrichmentOperations(run.id)).toEqual([expect.objectContaining({ state: "awaiting_decision", decision: null })]);
+  expect(f.store.listEnrichmentOperations(run.id)[0]!.changeKind).toBe(noisy ? "description_append" : "knowledge_append");
+  expect(verify).not.toHaveBeenCalled(); expect(f.local).not.toHaveBeenCalled();
+  expect(f.receipt.streams).toBeGreaterThanOrEqual(2); expect(f.receipt.prompts).toBeGreaterThanOrEqual(2);
+  const draftPrompt = draftPrompts.at(-1) ?? "";
+  expect(draftPrompt).toContain("knowledge/rules/orders.md"); expect(draftPrompt).toContain("models/orders/metadata.yml");
+  expect(draftPrompt).not.toContain("target/mdl.json"); expect(draftPrompt).not.toContain("wren_project.yml");
+  expect(await hashDirectory(project)).toBe(before);
+  expect(f.resources.size).toBe(0); expect(f.store.listOpenShellIntents().every(intent => intent.phase === "cleaned")).toBe(true);
+  expect(f.store.listOpenShellIntents().some(intent => intent.identity.purpose === "model")).toBe(true);
+  f.composition.revokeRuntime(); expect(f.retained()).toBe(f.before);
+}
+it("OpenShell enrichment drafts through the model sandbox and governed data worker, records the proposal, validates it independently and leaves the project untouched", async () => {
+  await enrichmentRoundtrip(false);
+}, 180_000);
+it("OpenShell enrichment tolerates the inert thinking, rate-limit, status, retry and session-state events and a fenced-JSON terminal, reaching validation_pending then awaiting_decision", async () => {
+  try { await enrichmentRoundtrip(true); } finally { noisyDraft = false; }
+}, 180_000);
