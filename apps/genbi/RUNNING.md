@@ -377,7 +377,9 @@ statement, expression, saved query, sample value or row count is carried. The
 project's knowledge rules (`knowledge/rules/*.md`) are the one piece of free
 text on the card: they are carried in full under `## Knowledge rules` (private
 steps receive the same text after the snapshot), while `knowledge/sql/` confirmed
-queries stay off it. The
+queries stay off it. A rule file's
+front-matter may declare default rules that the governed query tool enforces (`MAINTAINING.md`,
+"Declared default rules"); the card shows the file as written and nothing is added to it for them. The
 card is deterministic (same project, same bytes), size-bounded (32 KiB by
 default, `capabilityCard.maxBytes`; trailing lines are dropped and a marker
 line plus a trace warning say so). With a `disclosure_policy` bound, the card

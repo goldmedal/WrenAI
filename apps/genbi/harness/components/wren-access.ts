@@ -6,6 +6,7 @@ import path from "node:path";
 import { z } from "zod";
 import { hashDirectory } from "../compile/fingerprint.js";
 import type { ComponentAccess } from "./broker.js";
+import { declaredDefaultIds } from "./knowledge-rules.js";
 import { redactForLog } from "./runner.js";
 import { dialectGuidance, readProjectSqlDialect } from "./sql-dialect.js";
 
@@ -15,7 +16,7 @@ import { dialectGuidance, readProjectSqlDialect } from "./sql-dialect.js";
  * (exception text, SQL, paths, credentials) can reach a model even if that process is stale
  * or compromised. `transport` is host-only: the channel itself failed or closed.
  */
-export const GOVERNED_ERROR_CLASSES = ["invalid_request", "model_not_found", "cube_not_queryable", "ungrounded_literal", "policy_rejected", "invalid_sql", "execution_failed",
+export const GOVERNED_ERROR_CLASSES = ["invalid_request", "model_not_found", "cube_not_queryable", "ungrounded_literal", "declared_default_missing", "policy_rejected", "invalid_sql", "execution_failed",
   "timeout", "datasource_unavailable", "result_too_large", "internal", "transport"] as const;
 export type GovernedErrorClass = (typeof GOVERNED_ERROR_CLASSES)[number];
 const GOVERNED_ERROR_TEXT: Readonly<Record<GovernedErrorClass, string>> = Object.freeze({
@@ -23,6 +24,7 @@ const GOVERNED_ERROR_TEXT: Readonly<Record<GovernedErrorClass, string>> = Object
   model_not_found: "The query references a table that is not a model in the bound semantic context; query only the models it defines.",
   cube_not_queryable: "The query reads a cube as if it were a table. A cube is a semantic definition (a base model plus measure and dimension expressions), not a SQL table; query the cube's base model instead and compute the measure from the cube definition's expression over the base model's columns.",
   ungrounded_literal: "The query reads no bound model, so the values it returns are literals typed into the query, not data. A value must come from an executed query over the bound models: cite the earlier query that already produced it by its query_id, or compute it in one SELECT over the models.",
+  declared_default_missing: "The query does not apply a default rule that the bound project declares for the models it reads, so it was not executed. Apply the rule named below (its wording is in the project's knowledge rules), then run the query again.",
   policy_rejected: "The read-only analytical policy rejected the query: use one SELECT over the bound models with standard analytical functions only.",
   invalid_sql: "The SQL could not be parsed or planned against the semantic context.",
   execution_failed: "The data source rejected the query at execution time, for example an unknown column or a type mismatch.",
@@ -33,19 +35,39 @@ const GOVERNED_ERROR_TEXT: Readonly<Record<GovernedErrorClass, string>> = Object
   transport: "Governed Wren operation is unavailable.",
 });
 const LOGGED_SQL_LIMIT = 2000;
+/** Why a governed channel is unavailable, when the host knows: a fixed code, never wire text or a rule id. */
+export type GovernedUnavailableReason = "governed_declarations_mismatch";
+/** The suffix naming the declared rules a refused query missed; empty without ids. */
+export function declaredDefaultRuleSuffix(ruleIds: readonly string[]): string {
+  return ruleIds.length > 0 ? ` Rule: ${ruleIds.join(", ")}` : "";
+}
 export class GovernedWrenError extends Error {
   /** The wire's own message, for the server log only: it never reaches `message`, a frame or a model. */
   wireMessage?: string;
-  constructor(readonly errorClass: GovernedErrorClass, dialect?: string) {
-    super(`Governed Wren query failed [${errorClass}]: ${GOVERNED_ERROR_TEXT[errorClass]}${errorClass === "policy_rejected" && dialect ? ` ${dialectGuidance(dialect)}` : ""}`);
+  /** The declared rules a `declared_default_missing` refusal names: only ids the host's own catalog declares. */
+  readonly ruleIds: readonly string[];
+  /** Set only on a channel the host refused to trust (`transport`). */
+  readonly reason?: GovernedUnavailableReason;
+  constructor(readonly errorClass: GovernedErrorClass, dialect?: string, detail: { readonly ruleIds?: readonly string[]; readonly reason?: GovernedUnavailableReason } = {}) {
+    const ruleIds = errorClass === "declared_default_missing" ? Object.freeze([...(detail.ruleIds ?? [])]) : Object.freeze([]);
+    super(`Governed Wren query failed [${errorClass}]: ${GOVERNED_ERROR_TEXT[errorClass]}${errorClass === "policy_rejected" && dialect ? ` ${dialectGuidance(dialect)}` : ""}${declaredDefaultRuleSuffix(ruleIds)}`);
     this.name = "GovernedWrenError";
+    this.ruleIds = ruleIds;
+    if (detail.reason !== undefined) this.reason = detail.reason;
   }
 }
-/** Only the class crosses; a message from the wire is never forwarded, and an unknown class is `internal`. */
-function governedError(wire: string | { class: string }, dialect?: string): GovernedWrenError {
+/**
+ * Only the class crosses; a message from the wire is never forwarded, and an unknown class is `internal`.
+ * The ids of a `declared_default_missing` refusal are kept only if the host's own catalog declares them.
+ */
+function governedError(wire: string | { class: string; rule_ids?: readonly string[] | undefined }, dialect?: string, declared: ReadonlySet<string> = new Set()): GovernedWrenError {
   const named = typeof wire === "string" ? undefined : wire.class;
   const known = GOVERNED_ERROR_CLASSES.find((candidate) => candidate === named && candidate !== "transport");
-  const error = new GovernedWrenError(known ?? "internal", dialect);
+  const ruleIds = known === "declared_default_missing" && typeof wire !== "string" ? [...new Set((wire.rule_ids ?? []).filter((id) => declared.has(id)))] : [];
+  const error = new GovernedWrenError(known ?? "internal", dialect, { ruleIds });
+  // A producer that names rules the host's catalog does not declare is visible in the log (counts only); rendering is unchanged.
+  if (known === "declared_default_missing" && typeof wire !== "string" && (wire.rule_ids?.length ?? 0) > 0 && ruleIds.length === 0)
+    console.error(`[component-failure] ${JSON.stringify({ site: "governed_frame", code: "declared_rules_not_in_catalog", dropped: wire.rule_ids!.length })}`);
   if (typeof wire !== "string" && "message" in wire && typeof wire.message === "string") error.wireMessage = wire.message;
   return error;
 }
@@ -56,9 +78,25 @@ function logRejectedQuery(sql: unknown, error: GovernedWrenError): void {
     ...(error.wireMessage ? { wire: redactForLog(error.wireMessage) } : {}) };
   console.error(`[component-failure] ${JSON.stringify(fields)}`);
 }
-const PROTOCOLS = ["wren-governed/1", "wren-governed/2"] as const;
-const reply = z.object({ id: z.number().int().nonnegative(), protocol: z.enum(PROTOCOLS).optional(), result: z.unknown().optional(),
-  error: z.union([z.string(), z.object({ class: z.string().min(1).max(64), message: z.string().max(1024) }).strict()]).optional() }).strict();
+const PROTOCOLS = ["wren-governed/1", "wren-governed/2", "wren-governed/3"] as const;
+// `declared_defaults` is checked apart from the frame shape so that every way a hello can disagree with the host's
+// catalog (absent, malformed, over the cap, a different set) is one named refusal.
+const reply = z.object({ id: z.number().int().nonnegative(), protocol: z.enum(PROTOCOLS).optional(), declared_defaults: z.unknown().optional(), result: z.unknown().optional(),
+  error: z.union([z.string(), z.object({ class: z.string().min(1).max(64), message: z.string().max(1024), rule_ids: declaredDefaultIds.optional() }).strict()]).optional() }).strict();
+
+/**
+ * Protocol 3 announces the project's declared default rules and exists only for a project that declares some (an empty list is refused); every
+ * earlier protocol announces none. Either way the announcement must equal the host catalog's set: a client that
+ * enforces rules the host does not know of, or one that enforces fewer, is not trusted to run the project.
+ */
+function helloMatchesDeclarations(value: z.infer<typeof reply>, declared: readonly string[]): boolean {
+  if (value.protocol !== "wren-governed/3") return Object.keys(value).length === 2 && declared.length === 0;
+  if (Object.keys(value).length !== 3) return false;
+  const announced = declaredDefaultIds.safeParse(value.declared_defaults);
+  if (!announced.success || announced.data.length === 0 || new Set(announced.data).size !== announced.data.length || announced.data.length !== declared.length) return false;
+  const expected = new Set(declared);
+  return announced.data.every((id) => expected.has(id));
+}
 
 export interface WrenAccessIdentity {
   readonly environment: Readonly<NodeJS.ProcessEnv>;
@@ -94,12 +132,16 @@ export async function openWrenComponentAccess(options: {
   readonly signal: AbortSignal;
   readonly environment?: NodeJS.ProcessEnv;
   readonly identity?: WrenAccessIdentity;
+  /** The ids of the default rules the project's catalog declares; the governed process must announce exactly this set. Empty when omitted. */
+  readonly declaredDefaults?: readonly string[];
   /** Server-only native executable checkpoint, immediately before spawn. */
   assertExecutableCurrent?(): void;
 }): Promise<ComponentAccess> {
   options.signal.throwIfAborted();
   const identity = options.identity ?? await captureWrenAccessIdentity(options.project, options.environment);
   const dialect = await readProjectSqlDialect(options.project);
+  const declaredDefaults = [...(options.declaredDefaults ?? [])];
+  const declared: ReadonlySet<string> = new Set(declaredDefaults);
   const assertProject = async () => {
     await identity.assertCurrent();
     if (await hashDirectory(options.project) !== options.fingerprint) throw new Error("Component project changed");
@@ -117,7 +159,8 @@ export async function openWrenComponentAccess(options: {
   let buffer = Buffer.alloc(0);
   let nextId = 1;
   let pending: { id: number; resolve(value: unknown): void; reject(error: Error): void } | undefined;
-  const unavailable = () => new GovernedWrenError("transport");
+  let unavailableReason: GovernedUnavailableReason | undefined;
+  const unavailable = () => new GovernedWrenError("transport", undefined, unavailableReason ? { reason: unavailableReason } : {});
   const ready = new Promise<void>((resolve, reject) => { pending = { id: 0, resolve: () => resolve(), reject }; });
   const signalGroup = (value: NodeJS.Signals) => {
     if (!child.pid) return;
@@ -169,10 +212,18 @@ export async function openWrenComponentAccess(options: {
       const value = reply.parse(JSON.parse(buffer.subarray(0, newline).toString("utf8")));
       buffer = buffer.subarray(newline + 1);
       if (buffer.length || !pending || value.id !== pending.id) throw unavailable();
-      if (value.id === 0 ? value.protocol === undefined || Object.keys(value).length !== 2
-        : value.protocol !== undefined || (Object.hasOwn(value, "result") === Object.hasOwn(value, "error"))) throw unavailable();
+      if (value.id === 0) {
+        if (value.protocol === undefined || value.result !== undefined || value.error !== undefined) throw unavailable();
+        if (!helloMatchesDeclarations(value, declaredDefaults)) {
+          unavailableReason = "governed_declarations_mismatch";
+          console.error(`[component-failure] ${JSON.stringify({ site: "governed_hello", code: unavailableReason, declared: declaredDefaults.length })}`);
+          throw unavailable();
+        }
+      } else if (value.protocol !== undefined || value.declared_defaults !== undefined || (Object.hasOwn(value, "result") === Object.hasOwn(value, "error"))) throw unavailable();
+      // `rule_ids` names declared rules, so it belongs to that one class; on any other it is a contract violation.
+      if (typeof value.error === "object" && value.error.rule_ids !== undefined && value.error.class !== "declared_default_missing") throw unavailable();
       const waiter = pending; pending = undefined;
-      if (value.error !== undefined) waiter.reject(governedError(value.error, dialect)); else waiter.resolve(value.result);
+      if (value.error !== undefined) waiter.reject(governedError(value.error, dialect, declared)); else waiter.resolve(value.result);
     } catch { abort(); }
   });
   if (options.signal.aborted) abort();

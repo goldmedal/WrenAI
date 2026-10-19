@@ -22,9 +22,10 @@ export function fakeWrenWorkspace(): { root: string; wren: string; project: stri
 }
 
 /** A host query service backed by governed access through the `wren` stand-in. */
-export function openTestHostService(wren: string, project: string): Promise<HostQueryService> {
+export function openTestHostService(wren: string, project: string, declaredDefaults?: readonly string[]): Promise<HostQueryService> {
   return openHostQueryService({
-    openAccess: async (signal) => openWrenComponentAccess({ executable: wren, project, fingerprint: await hashDirectory(project), signal }),
+    openAccess: async (signal) => openWrenComponentAccess({ executable: wren, project, fingerprint: await hashDirectory(project), signal,
+      ...(declaredDefaults ? { declaredDefaults } : {}) }),
   });
 }
 

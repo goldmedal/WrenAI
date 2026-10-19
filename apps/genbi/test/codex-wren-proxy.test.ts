@@ -86,6 +86,34 @@ describe("codex:local Wren MCP proxy", () => {
     expect(service.observations()).toHaveLength(0);
   });
 
+  it("names the declared default rules a refused query missed, keeping only ids the host's catalog declares", async () => {
+    const { wren, project } = await setup();
+    const environment = { declared: process.env.FAKE_WREN_DECLARED, ids: process.env.FAKE_WREN_RULE_IDS };
+    process.env.FAKE_WREN_DECLARED = "exclude-test-accounts,fx-at-transaction-date";
+    process.env.FAKE_WREN_RULE_IDS = "exclude-test-accounts,undeclared-rule";
+    try {
+      const declaring = await openTestHostService(wren, project, ["fx-at-transaction-date", "exclude-test-accounts"]);
+      cleanups.push(() => declaring.close());
+      const client = proxy(["--credential-file", declaring.credentialFile], wren, project);
+      const refused = await client.call("tools/call", { name: "run_sql", arguments: { sql: `${ORDERS_SQL} /*declared*/` } });
+      const text = (refused.result?.content as { text: string }[])[0]!.text;
+      expect(refused.result?.isError).toBe(true);
+      expect(text).toMatch(/^Governed Wren query failed \[declared_default_missing\]: The query does not apply a default rule that the bound project declares/);
+      expect(text.endsWith(" Rule: exclude-test-accounts")).toBe(true);
+      expect(text).not.toContain("undeclared-rule");
+      expect(declaring.observations()).toHaveLength(0);
+      // A host whose catalog declares nothing cannot run this project at all: the announced set differs.
+      const unaware = await openTestHostService(wren, project);
+      cleanups.push(() => unaware.close());
+      const blocked = await proxy(["--credential-file", unaware.credentialFile], wren, project).call("tools/call", { name: "run_sql", arguments: { sql: ORDERS_SQL } });
+      expect(blocked.result).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("[transport]") }] });
+    } finally {
+      for (const [key, value] of [["FAKE_WREN_DECLARED", environment.declared], ["FAKE_WREN_RULE_IDS", environment.ids]] as const) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+
   it("refuses a symlinked credential file, even one pointing at the turn's real credential", async () => {
     const { wren, project, root, service } = await setup();
     const link = path.join(root, "linked-credential.json");

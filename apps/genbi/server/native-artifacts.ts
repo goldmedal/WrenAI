@@ -9,6 +9,7 @@ import path from "node:path";
 import { newId, type NativeSessionRow, type NativeStructuredAnswerRow, type Store } from "./db.js";
 import type { EnrichmentBinding } from "./enrichment.js";
 import type { ComponentAccess } from "../harness/components/broker.js";
+import { declaredDefaultRuleSuffix } from "../harness/components/wren-access.js";
 import type { RenderEnvelope } from "../harness/render/envelope.js";
 import { createHostQueryRecorder, type HostQueryOutcome, type HostQueryRecorder } from "../harness/route/host-query.js";
 import { groundOnHostEvidence } from "./host-evidence-grounding.js";
@@ -265,6 +266,7 @@ const NATIVE_QUERY_ERROR_TEXT: Readonly<Record<string, string>> = {
   invalid_request: "The request did not match the query contract: pass a non-empty sql string and an optional positive integer limit.",
   model_not_found: "The query references a table that is not a model in the bound semantic context; query only the models it defines.",
   cube_not_queryable: "The query reads a cube as if it were a table. A cube is a semantic definition (a base model plus measure and dimension expressions), not a SQL table; query the cube's base model instead and compute the measure from the cube definition's expression over the base model's columns.",
+  declared_default_missing: "The query does not apply a default rule that the bound project declares for the models it reads, so it was not executed. Apply the rule named below (its wording is in the project's knowledge rules), then run the query again.",
   ungrounded_literal: "The query reads no bound model, so the values it returns are literals typed into the query, not data. A value must come from an executed query over the bound models: cite the earlier query that already produced it by its query_id, or compute it in one SELECT over the models.",
   policy_rejected: "The read-only analytical policy rejected the query: use one SELECT over the bound models with standard analytical functions only.",
   invalid_sql: "The SQL could not be parsed or planned against the semantic context.",
@@ -510,7 +512,7 @@ export class NativeArtifactService {
       this.queryRecorders.set(session.id, recorder);
     }
     const outcome: HostQueryOutcome = await recorder.execute(args.sql, args.limit);
-    if ("error" in outcome) return { isError: true, text: `Governed Wren query failed [${outcome.error}]: ${NATIVE_QUERY_ERROR_TEXT[outcome.error] ?? NATIVE_QUERY_ERROR_TEXT.internal}` };
+    if ("error" in outcome) return { isError: true, text: `Governed Wren query failed [${outcome.error}]: ${NATIVE_QUERY_ERROR_TEXT[outcome.error] ?? NATIVE_QUERY_ERROR_TEXT.internal}${outcome.error === "declared_default_missing" ? declaredDefaultRuleSuffix(outcome.ruleIds ?? []) : ""}` };
     return { isError: false, text: JSON.stringify(outcome.result), result: outcome.result };
   }
 

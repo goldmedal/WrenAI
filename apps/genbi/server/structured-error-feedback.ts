@@ -13,6 +13,7 @@ const queryMessages: Readonly<Record<GovernedErrorClass, string>> = Object.freez
   model_not_found: "The requested table is unavailable in the current dataset. Use the tables in its semantic context.",
   cube_not_queryable: "The query read a semantic definition as if it were a table. Use the base model of that definition and compute the measure from its columns.",
   ungrounded_literal: "The query returned values typed into it rather than data from the dataset. Compute the value from the dataset's tables in one query.",
+  declared_default_missing: "The query skipped a default rule that the project declares for this dataset. Apply the project's default rule and run the query again.",
   policy_rejected: "The query was rejected by the read-only policy. Use a read-only analytical query.",
   invalid_sql: "The query could not be planned against the current dataset. Check the SQL and required columns.",
   execution_failed: "The current dataset could not execute the query. Check that the required columns exist and their types match the query.",
@@ -92,6 +93,10 @@ export function structuredDataRefusal(code?: string | null): { readonly reason: 
   if (code === "query.ungrounded_literal") return {
     reason: "I could not answer this question because the query returned values typed into it rather than data from the dataset.",
     fix: "Ask the question again so the answer is computed from the dataset's tables, or rephrase it using the dataset's available fields.",
+  };
+  if (code === "query.declared_default_missing") return {
+    reason: "I could not answer this question because the query did not apply a declared default rule of the project.",
+    fix: "Ask the question again so the answer is computed with the project's default rules applied, or rephrase it using the dataset's available fields.",
   };
   return undefined;
 }

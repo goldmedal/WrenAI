@@ -28,6 +28,7 @@ const ERROR_TEXT: Readonly<Record<string, string>> = {
   invalid_request: "The request did not match the governed run_sql contract: pass a non-empty sql string and an optional positive integer limit.",
   model_not_found: "The query references a table that is not a model in the bound semantic context; query only the models it defines.",
   cube_not_queryable: "The query reads a cube as if it were a table. A cube is a semantic definition (a base model plus measure and dimension expressions), not a SQL table; query the cube's base model instead and compute the measure from the cube definition's expression over the base model's columns.",
+  declared_default_missing: "The query does not apply a default rule that the bound project declares for the models it reads, so it was not executed. Apply the rule named below (its wording is in the project's knowledge rules), then run the query again.",
   ungrounded_literal: "The query reads no bound model, so the values it returns are literals typed into the query, not data. A value must come from an executed query over the bound models: cite the earlier query that already produced it by its query_id, or compute it in one SELECT over the models.",
   policy_rejected: "The read-only analytical policy rejected the query: use one SELECT over the bound models with standard analytical functions only.",
   invalid_sql: "The SQL could not be parsed or planned against the semantic context.",
@@ -40,10 +41,12 @@ const ERROR_TEXT: Readonly<Record<string, string>> = {
   internal: "The governed query failed for an unclassified reason.",
   transport: "The host query service is unavailable.",
 };
+const RULE_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const MAX_RULE_IDS = 8;
 const NO_CREDENTIAL = "run_sql is unavailable: no valid host query credential was provided for this turn.";
 
 export interface Credential { readonly socket: string; readonly token: string }
-export interface HostOutcome { readonly result?: unknown; readonly error?: string }
+export interface HostOutcome { readonly result?: unknown; readonly error?: string; readonly ruleIds?: readonly string[] }
 
 /**
  * Accepts only an absolute, regular, user-owned file no one else can read or write. The file is
@@ -124,11 +127,18 @@ export class HostConnection {
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf("\n");
         try {
-          const frame = JSON.parse(line) as { id?: unknown; result?: unknown; error?: { class?: unknown } };
+          const frame = JSON.parse(line) as { id?: unknown; result?: unknown; error?: { class?: unknown; rule_ids?: unknown } };
           const waiter = typeof frame.id === "number" ? this.pending.get(frame.id) : undefined;
           if (!waiter || typeof frame.id !== "number") continue;
           this.pending.delete(frame.id);
-          if (frame.error !== undefined) waiter({ error: typeof frame.error?.class === "string" ? frame.error.class : "internal" });
+          if (frame.error !== undefined) {
+            const errorClass = typeof frame.error?.class === "string" ? frame.error.class : "internal";
+            const ids = frame.error?.rule_ids;
+            // The host already filtered the ids to its catalog; only their shape is re-checked before they reach a model.
+            const ruleIds = errorClass === "declared_default_missing" && Array.isArray(ids) && ids.length <= MAX_RULE_IDS
+              && ids.every((id): id is string => typeof id === "string" && RULE_ID.test(id)) ? ids : [];
+            waiter(ruleIds.length > 0 ? { error: errorClass, ruleIds } : { error: errorClass });
+          }
           else waiter({ result: frame.result });
         } catch {
           socket.destroy();
@@ -189,7 +199,8 @@ function main(): void {
     const outcome = await host.request(sql, typeof limit === "number" ? limit : undefined);
     if (outcome.error !== undefined) {
       const known = outcome.error in ERROR_TEXT ? outcome.error : "internal";
-      toolResult(id, `Governed Wren query failed [${known}]: ${ERROR_TEXT[known]}`, true);
+      const rules = known === "declared_default_missing" && outcome.ruleIds?.length ? ` Rule: ${outcome.ruleIds.join(", ")}` : "";
+      toolResult(id, `Governed Wren query failed [${known}]: ${ERROR_TEXT[known]}${rules}`, true);
       return;
     }
     toolResult(id, JSON.stringify(outcome.result), false, outcome.result);

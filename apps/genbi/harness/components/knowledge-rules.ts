@@ -17,6 +17,23 @@ export function knowledgeRulesOfCatalog(catalog: unknown): KnowledgeRuleFile[] {
   return parsed.success ? parsed.data : [];
 }
 
+/** The id shape and cap a project's declared default rules carry, on the catalog and on the governed wire alike. */
+export const DECLARED_DEFAULT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+export const DECLARED_DEFAULT_LIMIT = 8;
+export const declaredDefaultIds = z.array(z.string().regex(DECLARED_DEFAULT_ID)).max(DECLARED_DEFAULT_LIMIT);
+
+/**
+ * The ids of the default rules the bound project declares, in declaration order: the catalog's
+ * `declared_defaults`. Empty when the field is absent (a loader that predates it, or a project that
+ * declares nothing) or malformed, so a governed client that announces declarations the host does not
+ * know of is unavailable rather than trusted.
+ */
+export function declaredDefaultsOfCatalog(catalog: unknown): string[] {
+  if (typeof catalog !== "object" || catalog === null) return [];
+  const parsed = declaredDefaultIds.safeParse((catalog as Record<string, unknown>)["declared_defaults"]);
+  return parsed.success ? parsed.data : [];
+}
+
 /** The `## Knowledge rules` section, each file verbatim under its path. Empty (no lines) when there are no rules. */
 export function knowledgeRulesSection(files: readonly KnowledgeRuleFile[]): string {
   if (files.length === 0) return "";

@@ -152,6 +152,30 @@ refuses the governed tool: it fails closed, never a silent skip.
 rules rests on `planDigest(contexts)` plus the project fingerprint re-check (`checkProject()` before every
 step), not on `check-context`.
 
+### Declared default rules (governed protocol 3)
+
+A project may declare default rules in the front-matter of a `knowledge/rules/*.md` file; the Wren CLI
+(`wren governed-stdio`) then refuses, before execution, a query that skips one. The catalog lists the
+declared rule ids as `declared_defaults` (declaration order; omitted when there are none, and a catalog without
+the field means "declares nothing"). The host side lives in `harness/components/wren-access.ts`:
+
+- **Protocol.** `wren-governed/3` exists only for a declaring project, and its hello carries a third key,
+  `declared_defaults`. The host accepts the third key only together with protocol 3 and requires protocol 3 to
+  carry it. The announced ids must equal the catalog's set (order-insensitive, no repeats, at most 8, each
+  `^[a-z0-9][a-z0-9_-]{0,63}$`); any other hello is unavailable, with the fixed reason
+  `governed_declarations_mismatch` in the `governed_hello` server log line (ids are never logged or shown).
+  So a Wren CLI that predates declarations (a two-key hello) cannot silently run a declaring project, and a
+  project without declarations still gets exactly the two-key protocol 2 hello. Only the in-process route reads the catalog and passes
+  `declaredDefaults` to `openWrenComponentAccess`; every other caller passes none, so a declaring project is
+  unavailable there. The OpenShell data worker is pinned to protocol 2 and fails closed the same way.
+- **Error class.** `declared_default_missing` is one more member of `GOVERNED_ERROR_CLASSES`, with one fixed
+  sentence that every model-facing surface owns (the governed error, the host proxy, native session
+  artifacts) and a structured-data refusal. Its frame may carry `rule_ids`, and no other class may: `rule_ids`
+  on any other class, a malformed id or more than 8 ids is a contract violation that closes the channel.
+- **Id filter.** Only ids the catalog declares survive, in the order sent and without repeats; the rest are
+  dropped. The model sees the fixed sentence followed by ` Rule: <id>[, <id>]` (the sentence alone when no id
+  survives). Nothing else from the frame, the SQL or the declaration reaches a model.
+
 ### Distributing the context-loader generator
 
 `@wrenai/genbi` pins `@wrenai/context-loader` to one exact version. The package postinstall
