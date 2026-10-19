@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { GovernedWrenError } from "../harness/components/wren-access.js";
 import { openOpenShellWrenAccess, type WrenWorkerIdentity } from "../server/runtime-host/openshell-wren-access.js";
 import type { DataSnapshotLease } from "../server/runtime-host/openshell-project-snapshots.js";
 import type { OpenShellDuplex } from "../server/runtime-host/openshell-types.js";
@@ -59,6 +60,23 @@ describe("admitted OpenShell governed data transport", () => {
     };
     const call = kind === "substituted manifest" ? access.inspect(f.controller.signal) : access.query({ sql: "select id from orders", limit: 1 }, f.controller.signal);
     await expect(call).rejects.toThrow("Governed Wren"); await access.close(); expect(f.closed).toBe(1);
+  });
+  // The admitted data worker is pinned to protocol 2, which announces no declared rules and never sends `rule_ids`:
+  // the class is known, but a declaring project's protocol 3 hello or a frame naming rules is not trusted on this route.
+  it("renders a declared-default refusal from the pinned worker as the fixed sentence alone", async () => {
+    const f = fixture(), access = await f.open();
+    f.stream.write = bytes => f.push(Buffer.from(JSON.stringify({ id: JSON.parse(bytes.toString()).id, error: { class: "declared_default_missing", message: "x" } }) + "\n"));
+    const error = await access.query({ sql: "select id from orders", limit: 1 }, f.controller.signal).then(() => undefined as never, (reason: unknown) => reason as GovernedWrenError);
+    expect(error).toBeInstanceOf(GovernedWrenError); expect(error.errorClass).toBe("declared_default_missing");
+    expect(error.message).toContain("does not apply a default rule that the bound project declares"); expect(error.message).not.toContain("Rule:");
+    await access.close();
+  });
+  it("fails closed on rule ids from a worker pinned to protocol 2, and on a protocol 3 hello", async () => {
+    const f = fixture(), access = await f.open();
+    f.stream.write = bytes => f.push(Buffer.from(JSON.stringify({ id: JSON.parse(bytes.toString()).id, error: { class: "declared_default_missing", message: "x", rule_ids: ["a"] } }) + "\n"));
+    await expect(access.query({ sql: "select id from orders", limit: 1 }, f.controller.signal)).rejects.toThrow("Governed Wren"); await access.close(); expect(f.closed).toBe(1);
+    const declaring = fixture([expected, { id: 0, protocol: "wren-governed/3", declared_defaults: ["a"] }]);
+    await expect(declaring.open()).rejects.toThrow(); expect(declaring.writes).toBe(0); expect(declaring.closed).toBe(1);
   });
   it("a statement deadline during snapshot verification fences and cleans before any query write", async () => {
     const f = fixture(), access = await f.open(), parent = new AbortController();

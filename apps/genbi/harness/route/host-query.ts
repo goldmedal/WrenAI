@@ -43,7 +43,8 @@ export const HOST_QUERY_LIMITS = Object.freeze({
 /** Error classes a host query may return; each transport owns the sentence the model sees. */
 export type HostQueryErrorClass = GovernedErrorClass | "unauthorized" | "budget_exhausted";
 
-export type HostQueryOutcome = { readonly result: unknown } | { readonly error: HostQueryErrorClass };
+/** `ruleIds` accompanies only `declared_default_missing`: the declared rules the host's own catalog confirms. */
+export type HostQueryOutcome = { readonly result: unknown } | { readonly error: HostQueryErrorClass; readonly ruleIds?: readonly string[] };
 
 export interface HostQueryRecorderOptions {
   /** Opens governed access for this scope; called at most once, on the first query. */
@@ -90,7 +91,8 @@ export function createHostQueryRecorder(options: HostQueryRecorderOptions): Host
       const governed = await access;
       result = await governed.query({ sql, limit: rows + 1 }, AbortSignal.any([signal, AbortSignal.timeout(HOST_QUERY_LIMITS.timeoutMs)]));
     } catch (error) {
-      return { error: error instanceof GovernedWrenError ? error.errorClass : "transport" };
+      if (!(error instanceof GovernedWrenError)) return { error: "transport" };
+      return error.ruleIds.length > 0 ? { error: error.errorClass, ruleIds: error.ruleIds } : { error: error.errorClass };
     }
     if (closed) return { error: "transport" };
     if (typeof result !== "object" || result === null || Array.isArray(result)) return { error: "internal" };
@@ -200,7 +202,7 @@ export async function openHostQueryService(options: HostQueryServiceOptions): Pr
         tail = tail.then(async () => {
           const outcome = await recorder.execute(sql, limit);
           if (socket.destroyed) return;
-          socket.write(`${JSON.stringify("result" in outcome ? { id, result: outcome.result } : { id, error: { class: outcome.error } })}\n`);
+          socket.write(`${JSON.stringify("result" in outcome ? { id, result: outcome.result } : { id, error: { class: outcome.error, ...(outcome.ruleIds?.length ? { rule_ids: outcome.ruleIds } : {}) } })}\n`);
         }).catch(() => { socket.destroy(); });
       }
     });

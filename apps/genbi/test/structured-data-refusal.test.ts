@@ -30,7 +30,7 @@ function fixture(error: unknown, change?: (store: Store) => void) {
 }
 
 describe("normal host data-query refusal", () => {
-  it.each(["execution_failed", "invalid_sql", "model_not_found", "cube_not_queryable", "ungrounded_literal"] as const)("persists %s as an explanatory refusal and replays it without another route", async code => {
+  it.each(["execution_failed", "invalid_sql", "model_not_found", "cube_not_queryable", "ungrounded_literal", "declared_default_missing"] as const)("persists %s as an explanatory refusal and replays it without another route", async code => {
     const f = fixture(await queryFailure(code)); const frames: any[] = [];
     await streamTurn(f.deps, f.session.id, f.turn.id, async frame => { frames.push(frame); });
     expect(f.store.getTurn(f.turn.id)).toMatchObject({ resultKind: "refusal", errorCode: `query.${code}`, backend: null });
@@ -44,6 +44,17 @@ describe("normal host data-query refusal", () => {
     expect(replay).toEqual(frames); expect(f.ask).toHaveBeenCalledOnce(); expect(f.store.listEventsForTurn(f.turn.id)).toEqual(saved);
     const hydrated = getAskSessionData(f.store, f.session.id); expect(hydrated).not.toHaveProperty("error");
     expect(hydrated.events).toEqual(saved.map(event => event.payload));
+  });
+  it("explains a declared-default refusal without naming a rule id", async () => {
+    const explanation = structuredDataRefusal("query.declared_default_missing")!;
+    expect(explanation.reason).toContain("a declared default rule of the project");
+    expect(JSON.stringify(explanation)).not.toMatch(/exclude-test-accounts/);
+    const refused = new GovernedWrenError("declared_default_missing", undefined, { ruleIds: ["exclude-test-accounts"] });
+    const access = observeStructuredQueryAccess({ async query() { throw refused; }, async inspect() {}, async close() {} }, () => {});
+    await expect(access.query({ sql: "SELECT 1", limit: 1 }, new AbortController().signal)).rejects.toBe(refused);
+    const f = fixture(await queryFailure("declared_default_missing")); const frames: any[] = [];
+    await streamTurn(f.deps, f.session.id, f.turn.id, async frame => { frames.push(frame); });
+    expect(JSON.stringify(frames)).not.toMatch(/Rule:/);
   });
   it.each(["transport", "timeout", "datasource_unavailable", "internal"] as const)("keeps query %s as an error", async code => {
     const f = fixture(await queryFailure(code)); const frames: any[] = [];

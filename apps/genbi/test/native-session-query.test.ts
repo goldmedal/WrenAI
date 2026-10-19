@@ -10,6 +10,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 import { mkdtemp } from "node:fs/promises";
 import type { ComponentAccess } from "../harness/components/broker.js";
+import { GovernedWrenError } from "../harness/components/wren-access.js";
 import { resolveArtifactsDir, type RouteOptions, type RouteResult } from "../harness/index.js";
 import { createApp } from "../server/app.js";
 import { Store } from "../server/db.js";
@@ -28,6 +29,7 @@ function fakeAccess(): ComponentAccess & { close: ReturnType<typeof vi.fn> } {
   return {
     async query(request: { sql: string; limit: number }) {
       const { sql, limit } = request;
+      if (/declared_missing/.test(sql)) throw new GovernedWrenError("declared_default_missing", undefined, { ruleIds: ["exclude-test-accounts", "fx-at-transaction-date"] });
       if (/\bfrom\s+customers\b/i.test(sql)) {
         const count = Math.min(limit, 5);
         return { columns: ["id"], rows: Array.from({ length: count }, (_, index) => ({ id: index + 1 })), definition: { sql, source_tables: ["customers"], filters: [] } };
@@ -131,6 +133,16 @@ describe("native session query tool", () => {
     const bad = (await f.mcp(credential, "tools/call", { name: NATIVE_MCP_QUERY_TOOL_NAME, arguments: { sql: ORDERS_SQL, extra: 1 } })).body.result!;
     expect(bad.isError).toBe(true);
     expect(bad.structuredContent).toBeUndefined();
+  });
+
+  it("names the declared default rules a refused query missed, after the fixed sentence", async () => {
+    const f = createFixture();
+    const refused = await f.query(f.session("native-a"), "SELECT declared_missing FROM orders");
+    expect(refused.isError).toBe(true);
+    expect(refused.structuredContent).toBeUndefined();
+    const text = (refused as unknown as { content: { text: string }[] }).content[0]!.text;
+    expect(text).toMatch(/^Governed Wren query failed \[declared_default_missing\]: The query does not apply a default rule that the bound project declares/);
+    expect(text.endsWith(" Rule: exclude-test-accounts, fx-at-transaction-date")).toBe(true);
   });
 
   it("verifies a persisted answer citing this session's query, with the table rebuilt from the observation", async () => {

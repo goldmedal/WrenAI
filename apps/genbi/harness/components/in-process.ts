@@ -18,7 +18,7 @@ import { resolveWrenBinary } from "../tools/index.js";
 import { runAiComponentStep } from "./ai-step.js";
 import { createComponentBroker, snapshotSurfaceText, type ComponentAccess, type ContextSurface } from "./broker.js";
 import { buildCapabilityCard, type CapabilityCard } from "./capability-card.js";
-import { knowledgeRulesOfCatalog, withKnowledgeRules } from "./knowledge-rules.js";
+import { declaredDefaultsOfCatalog, knowledgeRulesOfCatalog, withKnowledgeRules } from "./knowledge-rules.js";
 import { verifyEgress } from "./egress.js";
 import { createModelJudge } from "./egress-judge.js";
 import { normalizeComponentEvidence } from "./normalize.js";
@@ -74,6 +74,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
     const snapshot: unknown = JSON.parse(await readFile(snapshotPath, "utf8"));
     const catalog: unknown = JSON.parse(await readFile(catalogPath, "utf8"));
     const rules = knowledgeRulesOfCatalog(catalog);
+    const declaredDefaults = declaredDefaultsOfCatalog(catalog);
     let card: CapabilityCard | undefined;
     if (zoneAware) {
       // The bound policy's shape limits go on the card, so the planner plans within what egress allows.
@@ -129,7 +130,8 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
           async query() { throw new Error("No query grant"); }, async inspect() { throw new Error("No context grant"); }, async close() {},
         };
         await resolveWrenBinary();
-        return openWrenComponentAccess({ executable: "wren", project, fingerprint, signal: parent, identity: accessIdentity });
+        return openWrenComponentAccess({ executable: "wren", project, fingerprint, signal: parent, identity: accessIdentity,
+          ...(declaredDefaults.length > 0 ? { declaredDefaults } : {}) });
       },
       // Public-zone steps never see the prepared snapshot; they get the card. Private steps get the snapshot as before.
       ...(card ? { contextSurface: (component, run): ContextSurface | undefined => {

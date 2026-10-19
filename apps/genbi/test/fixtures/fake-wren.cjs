@@ -6,11 +6,18 @@ const [mode, sub] = process.argv.slice(2);
 const write = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 
 if (mode === "governed-stdio") {
-  write({ id: 0, protocol: "wren-governed/2" });
+  // FAKE_WREN_DECLARED: comma-separated declared default rule ids; set, the hello is protocol 3 and a `/*declared*/` query is
+  // refused with FAKE_WREN_RULE_IDS (comma-separated; unset sends no `rule_ids`).
+  const declared = process.env.FAKE_WREN_DECLARED?.split(",").filter(Boolean) ?? [];
+  write(declared.length ? { id: 0, protocol: "wren-governed/3", declared_defaults: declared } : { id: 0, protocol: "wren-governed/2" });
   readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const request = JSON.parse(line);
     const sql = String(request.sql ?? "");
     if (request.operation !== "query") return write({ id: request.id, error: { class: "invalid_request", message: "x" } });
+    if (sql.includes("/*declared*/")) {
+      const ruleIds = process.env.FAKE_WREN_RULE_IDS?.split(",").filter(Boolean);
+      return write({ id: request.id, error: { class: "declared_default_missing", message: "x", ...(ruleIds ? { rule_ids: ruleIds } : {}) } });
+    }
     if (sql.includes("/*lax*/")) {
       // A host that failed to refuse a query reading no table: the definition proves no source.
       return write({ id: request.id, result: { columns: ["n"], rows: [{ n: 424 }], definition: { sql, source_tables: [], filters: [] } } });
