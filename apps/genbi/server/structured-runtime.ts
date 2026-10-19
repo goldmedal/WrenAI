@@ -3,6 +3,8 @@ import { enforceCompliance, type AuthChoice, type RouteOptions, type RouteResult
 import type { RuntimeBackendReadiness } from "./runtime-host/types.js";
 import type { OpenShellModelSession } from "./runtime-host/openshell-model-session.js";
 import { authOffer, BACKENDS, inProcessAuthOffer, inProcessAuthViaBackend, localModeAuthOffer, type BackendName, type RuntimeSelection } from "./runtime-selection.js";
+import type { EnrichmentBinding, EnrichmentMode, EnrichmentProposal } from "./enrichment.js";
+import type { ValidatedReview, ValidationFailure } from "./enrichment-validation.js";
 
 export type StructuredVendor = "codex" | "claude" | "pi";
 export type StructuredBackend = "local" | "codex-app-server" | "claude-sandbox-runtime" | "openshell";
@@ -16,10 +18,29 @@ export interface StructuredScope {
   assertCurrent(): void;
 }
 export class StructuredRuntimeError extends Error {
-  constructor(readonly code: "unavailable" | "unsupported" | "stale" | "cancelled" | "failed" | "cleanup" | "timeout") {
+  /** `detail` is host-authored (a contract refusal's own message), never sandbox or model text; only the `contract` code carries one. */
+  constructor(readonly code: "unavailable" | "unsupported" | "stale" | "cancelled" | "failed" | "cleanup" | "timeout" | "contract", readonly detail?: string) {
     super(`Structured runtime ${code}.`);
   }
 }
+/** One context-enrichment draft request: the server pins profile, stages and sinks, never the caller. */
+export type EnrichOptions = Omit<RouteOptions, "question" | "onEvent" | "profileSource" | "agentId"> & {
+  readonly mode: EnrichmentMode;
+  readonly projectRevision: string;
+};
+/** The untrusted proposal document; the host still canonicalizes it before any ledger write. */
+export interface EnrichResult { readonly backend: "openshell"; readonly draft: unknown }
+/** An independent validation request for an already recorded (canonical) proposal. */
+export interface EnrichmentValidationRequest {
+  readonly authChoice: RouteOptions["authChoice"];
+  readonly deployment?: RouteOptions["deployment"];
+  readonly proposal: EnrichmentProposal;
+  readonly binding: EnrichmentBinding;
+}
+/** `failed` is a verdict with sanitized evidence; cancel, stale state, timeout and cleanup uncertainty throw instead and can never be `validated`. */
+export type EnrichmentValidationResult = { readonly status: "validated"; readonly review: ValidatedReview } | { readonly status: "failed"; readonly failure: ValidationFailure };
+/** Operations a server-selected backend can be asked to run; `local_enrichment` has no OpenShell realization. */
+export type StructuredOperation = "ask" | "setup" | "native" | "enrich" | "local_enrichment";
 export interface StructuredAdapter {
   readonly vendor: StructuredVendor;
   readonly backend: Exclude<StructuredBackend, "local">;
@@ -27,6 +48,10 @@ export interface StructuredAdapter {
   probe(): Promise<RuntimeBackendReadiness>;
   ask?(options: RouteOptions, scope: StructuredScope): Promise<RouteResult>;
   setup?(options: SetupStepRunOptions, scope: StructuredScope): Promise<SetupStepRunResult>;
+  enrich?(options: EnrichOptions, scope: StructuredScope): Promise<EnrichResult>;
+  /** Independent sandbox validation of a recorded proposal; absent or unavailable means enrichment drafts are refused (fail closed). */
+  validateEnrichment?(request: EnrichmentValidationRequest, scope: StructuredScope): Promise<EnrichmentValidationResult>;
+  enrichmentValidationAvailable?(): boolean;
 }
 interface Options {
   readonly diagnostics?: StructuredDiagnosticObserver;
@@ -68,12 +93,25 @@ export class StructuredRuntime {
     return candidate?.vendor === vendor && candidate.backend === this.backendFor(vendor) ? candidate : undefined;
   }
   /** Pure gate used before operation-owned durable writes. */
-  assertOperationSupported(auth: AuthChoice, operation: "ask" | "setup" | "native"): void {
+  assertOperationSupported(auth: AuthChoice, operation: StructuredOperation): void {
     this.assertActive();
     if (!authOffer(this.options.selection, auth).offered) throw new StructuredRuntimeError("unavailable");
     const vendor = this.vendorFor(auth);
     if (vendor !== undefined && this.backendFor(vendor) === "openshell"
-      && (operation === "setup" || operation === "ask" && !this.adapter(vendor)?.ask || operation === "native" && !this.adapter(vendor)?.nativeSessions)) throw new StructuredRuntimeError("unsupported");
+      && (operation === "setup" || operation === "local_enrichment" || operation === "ask" && !this.adapter(vendor)?.ask
+        || operation === "native" && !this.adapter(vendor)?.nativeSessions || operation === "enrich" && !this.adapter(vendor)?.enrich)) throw new StructuredRuntimeError("unsupported");
+  }
+  /** True when the server selected OpenShell for this auth; enrichment must then never use a host-local runner. Subscription Claude only. */
+  usesOpenShell(auth: AuthChoice): boolean { return auth.mode === "subscription" && this.backendFor(auth.provider) === "openshell"; }
+  /** Live enrichment availability for an OpenShell-selected auth, else undefined (the local runner reports its own). */
+  async enrichmentReadiness(auth: AuthChoice): Promise<{ readonly available: boolean; readonly reason?: string } | undefined> {
+    if (!this.usesOpenShell(auth) || auth.mode !== "subscription") return undefined;
+    const adapter = this.adapter(auth.provider);
+    if (!adapter?.enrich) return { available: false, reason: "openshell_enrichment_unsupported" };
+    if (!adapter.validateEnrichment || adapter.enrichmentValidationAvailable?.() !== true) return { available: false, reason: "openshell_validator_unavailable" };
+    let probe: RuntimeBackendReadiness | undefined;
+    try { probe = await adapter.probe(); } catch { /* reported as not ready below */ }
+    return !this.lifetime.signal.aborted && probe?.state === "ready" ? { available: true } : { available: false, reason: "openshell_not_ready" };
   }
   private notOffered(reason: string | undefined, extra: Record<string, unknown> = {}) {
     return { offered: false, state: "not_offered", ask: false, setup: false, reason: reason ?? "Not offered.", ...extra } as const;
@@ -95,7 +133,8 @@ export class StructuredRuntime {
       const ready = !this.lifetime.signal.aborted && probe?.state === "ready";
       return [name, { offered: true, backend, state: ready ? "ready" : "unavailable", ask: ready && !!adapter?.ask, setup: ready && !!adapter?.setup,
         reason: !adapter ? "Selected vendor backend is not configured." : !ready ? "Selected vendor backend is not ready." : "Only explicitly supported operations are available.",
-        ...(backend === "openshell" ? { modelExecution: "openshell", queryExecution: "openshell", supportedAgents: ["answer_query"] } : {}),
+        ...(backend === "openshell" ? { modelExecution: "openshell", queryExecution: "openshell", enrich: ready && !!adapter?.enrich,
+          supportedAgents: ["answer_query", ...(adapter?.enrich ? ["inspect_context", "draft_enrichment"] : [])] } : {}),
         ...(probe && probe.state !== "ready" ? { code: probe.code } : {}) }] as const;
     }));
     const backends = Object.fromEntries(entries) as Record<BackendName, (typeof entries)[number][1]>;
@@ -127,6 +166,18 @@ export class StructuredRuntime {
       const result = await adapter.setup(request, guarded);
       return { finalText: result.finalText };
     });
+  }
+  async enrich(options: EnrichOptions, scope: StructuredScope): Promise<EnrichResult> {
+    return this.run(options.authChoice, scope, async (adapter, guarded) => {
+      if (!adapter?.enrich) throw new StructuredRuntimeError("unsupported");
+      return adapter.enrich({ ...options, signal: guarded.signal! }, guarded);
+    }, options.deployment);
+  }
+  async validateEnrichment(request: EnrichmentValidationRequest, scope: StructuredScope): Promise<EnrichmentValidationResult> {
+    return this.run(request.authChoice, scope, async (adapter, guarded) => {
+      if (!adapter?.validateEnrichment || adapter.enrichmentValidationAvailable?.() !== true) throw new StructuredRuntimeError("unavailable");
+      return adapter.validateEnrichment(request, guarded);
+    }, request.deployment);
   }
   private run<T>(auth: AuthChoice, scope: StructuredScope, operation: (adapter: StructuredAdapter | undefined, scope: StructuredScope) => Promise<T>, deployment: RouteOptions["deployment"] = "personal"): Promise<T> {
     const controller = new AbortController(); this.controllers.add(controller);

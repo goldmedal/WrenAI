@@ -82,7 +82,7 @@ function providerWithQuery(options: ProviderOptions, sdkQuery: ClaudeComponentRu
           admitStep(value) { assertExecutableCurrent(); if (value.signal.aborted || value.tier !== tier) throw new ClaudeProtocolFault("protocol"); if (run) throw new ClaudeProtocolFault("protocol"); run = value; protocol = new ClaudeRawProtocol({ run, model, cwd, check: assertCurrent, secret: account.accessCredential() });
             if (timing) { const originalWorker = protocol.worker; protocol.worker = function(value) { const result = Reflect.apply(originalWorker, this, [value]); recordAdmittedTimingResult(timing, value); return result; }; } },
           claimTool(name, input) { if (!protocol) throw new ClaudeProtocolFault("protocol"); protocol.claim(name, input); },
-          assertSettled() { protocol?.settled(); }, assertCurrent, close,
+          assertSettled() { protocol?.settled(); }, faultSite: () => process?.faultSite, faultCounts: () => process?.faultCounts, assertCurrent, close,
           spawn(spawn) {
             assertCurrent(); assertExecutableCurrent(); if (process || !run || !protocol) throw new ClaudeProtocolFault("protocol"); admitSpawn(spawn, model, run, cwd, env);
             const boot = Buffer.from(JSON.stringify({ protocol: 1, scope: step, generation: account.credentialGeneration, expiresAt: account.expiresAt, access: account.accessCredential(), argv: spawn.args }));

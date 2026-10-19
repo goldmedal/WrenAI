@@ -36,7 +36,8 @@
  */
 import type { AgentEvent, AuthChoice } from "../harness/index.js";
 import { resolveDefaultEnrichIrPath, runDispatchedDefault } from "../harness/index.js";
-import { EnrichmentContractError, type EnrichmentMode, type EnrichmentRunner, type EnrichmentRunnerReadiness } from "./enrichment.js";
+import { sinkInRuntimeScope, validPath } from "./enrichment-candidate.js";
+import { EnrichmentContractError, isEnrichmentSink, sinkMatchesKind, type EnrichmentMode, type EnrichmentRunner, type EnrichmentRunnerReadiness } from "./enrichment.js";
 
 /**
  * The one live refusal condition `readiness()` and `defaultDispatch` share --
@@ -204,15 +205,69 @@ export function composeInspectPrompt(mode: EnrichmentMode): string {
  * what draft.md already tells the model — restating it here would be
  * redundant, not additive.
  */
-export function composeDraftPrompt(mode: EnrichmentMode, projectRevision: string, gapInventory: string): string {
-  const changeKinds = "knowledge_append, new_cube, new_view, new_relationship, mdl_metric, calculated_column, conflict, ambiguous";
+export const OPENSHELL_CHANGE_KINDS = ["knowledge_append", "description_append", "new_relationship"] as const;
+export const OPENSHELL_DRAFT_NOTE =
+  "This project runs under a restricted runtime. You may only extend files that already exist in the project; never propose a file that does not exist yet, " +
+  "and never add new columns, cubes, views or calculated columns. Every operation MUST carry a \"changeKind\", and it must be exactly one of: knowledge_append, description_append, new_relationship. " +
+  "knowledge_append: \"recommended_yaml\" is only the text to add at the end of the named existing knowledge file; the host appends it. " +
+  "description_append: \"recommended_yaml\" is only the descriptions to add to the named existing model metadata file (models/<name>/metadata.yml), never the file itself: a YAML mapping with an optional \"description\" (the model) and an optional \"columns\" mapping of column name to description, " +
+  "no other keys, every description a double-quoted single-line string of at most 500 characters, and every column name exactly as it appears in the file; the host merges them into the file and refuses a column the file does not have. " +
+  "new_relationship: add entries to the existing relationships.yml and return the complete updated file.";
+
+/** Existing project files an OpenShell draft may extend, by the change kind each permits. Host-derived, project-relative, sorted. */
+export interface EditableFiles {
+  readonly knowledge: readonly string[];
+  readonly metadata: readonly string[];
+  readonly relationships: readonly string[];
+}
+const MAX_EDITABLE_FILES = 50;
+const MAX_EDITABLE_CHARS = 4_000;
+
+/**
+ * Selects the editable existing files from the host's approved snapshot file list with the same predicates the candidate check uses
+ * (`validPath`, `isEnrichmentSink`, `sinkInRuntimeScope`, `sinkMatchesKind`). Never derived from model output or gap text.
+ */
+export function selectEditableFiles(approvedFiles: readonly string[]): EditableFiles {
+  const knowledge: string[] = [], metadata: string[] = [], relationships: string[] = [];
+  let chars = 0, count = 0;
+  for (const file of [...new Set(approvedFiles)].sort()) {
+    if (count >= MAX_EDITABLE_FILES) break;
+    if (!validPath(file) || !isEnrichmentSink(file) || !sinkInRuntimeScope(file)) continue;
+    const bucket = sinkMatchesKind("knowledge_append", file) ? knowledge : sinkMatchesKind("description_append", file) ? metadata : sinkMatchesKind("new_relationship", file) ? relationships : undefined;
+    if (!bucket) continue;
+    chars += JSON.stringify(file).length + 2;
+    if (chars > MAX_EDITABLE_CHARS) break;
+    bucket.push(file); count += 1;
+  }
+  return { knowledge, metadata, relationships };
+}
+export const hasEditableFiles = (files: EditableFiles): boolean => files.knowledge.length + files.metadata.length > 0 || files.relationships.length > 0;
+
+/** The example `description_append` payload; `amount_minor` is a neutral placeholder the model must replace with a column name from the file. */
+export const DESCRIPTION_EXAMPLE_PAYLOAD = "description: \"One row per order.\"\ncolumns:\n  amount_minor: \"Order amount in minor units.\"\n";
+function openShellExample(files: EditableFiles): string {
+  const operation = files.knowledge.length > 0
+    ? { changeKind: "knowledge_append", relative_sink: files.knowledge[0], summary: "Document revenue", recommended_yaml: "Revenue is net of refunds." }
+    : { changeKind: "description_append", relative_sink: files.metadata[0] ?? files.relationships[0], summary: "Describe the model", recommended_yaml: DESCRIPTION_EXAMPLE_PAYLOAD };
+  return JSON.stringify({ enrichment_proposal: { operation } });
+}
+function openShellEditableNote(files: EditableFiles): string {
+  const list = (label: string, entries: readonly string[]) => entries.length > 0 ? ` ${label}: ${JSON.stringify(entries)}.` : "";
+  return "The only files you may extend are these existing files; \"relative_sink\" must be exactly one of the listed paths, and each path only permits the kind named for it." +
+    list("knowledge_append", files.knowledge) + list("description_append", files.metadata) + list("new_relationship", files.relationships) +
+    ` Return exactly one operation, in this exact final shape (this example is ${files.knowledge.length > 0 ? "knowledge_append" : "description_append"}): ${openShellExample(files)}.`;
+}
+
+export function composeDraftPrompt(mode: EnrichmentMode, projectRevision: string, gapInventory: string, options: { readonly runtime?: "openshell"; readonly editableFiles?: EditableFiles } = {}): string {
+  const openShell = options.runtime === "openshell";
+  const changeKinds = openShell ? OPENSHELL_CHANGE_KINDS.join(", ") : "knowledge_append, new_cube, new_view, new_relationship, mdl_metric, calculated_column, conflict, ambiguous";
   return (
     `Draft the enrichment proposal now for project revision "${projectRevision}", run mode "${mode}". ` +
     `In addition to the fields your own instructions already describe, every operation object must also carry ` +
     `a "changeKind" field set to exactly one of: ${changeKinds}; and a "summary" field: a short, one-line, ` +
     `human-readable description of the change with no raw excerpts or credentials. Do not invent or claim a ` +
     `hash, digest, id, or risk label for any operation — the host computes and independently verifies all of ` +
-    `those and will discard any you include. Gap inventory from the inspection step:\n${gapInventory}`
+    `those and will discard any you include. ${openShell ? `${OPENSHELL_DRAFT_NOTE} ${openShellEditableNote(options.editableFiles ?? { knowledge: [], metadata: [], relationships: [] })} ` : ""}Gap inventory from the inspection step:\n${gapInventory}`
   );
 }
 
@@ -270,7 +325,14 @@ export function translateDraftTerminal(finalText: string): unknown {
   const root = record(parsed);
   const proposal = root ? record(root["enrichment_proposal"]) : undefined;
   if (!proposal) throw new EnrichmentContractError("draft turn's terminal did not contain an enrichment_proposal object");
-  const rawOperations: readonly unknown[] = Array.isArray(proposal["operations"]) ? (proposal["operations"] as readonly unknown[]) : [proposal];
+  const singular = Object.hasOwn(proposal, "operation"), plural = Object.hasOwn(proposal, "operations");
+  if (singular && plural) throw new EnrichmentContractError("draft turn's enrichment_proposal named both operation and operations");
+  let rawOperations: readonly unknown[];
+  if (singular) {
+    const only = record(proposal["operation"]);
+    if (!only) throw new EnrichmentContractError("draft turn's enrichment_proposal operation was not an object");
+    rawOperations = [only];
+  } else rawOperations = Array.isArray(proposal["operations"]) ? (proposal["operations"] as readonly unknown[]) : [proposal];
   const operations = rawOperations.map((rawOperation) => {
     const op = record(rawOperation) ?? {};
     return {
@@ -282,6 +344,19 @@ export function translateDraftTerminal(finalText: string): unknown {
     };
   });
   return { operations };
+}
+
+const SHAPE_KEYS = ["operation", "operations", "relative_sink", "sink", "recommended_yaml", "draft", "changeKind", "change_kind", "summary", "confidence", "decision", "decisions", "project_revision", "projectRevision",
+  "impact", "requires_approval", "autopilot_eligible", "evidence", "evidence_locators", "hash", "id", "risk"] as const;
+const closedKeys = (value: Record<string, unknown>) => { const names = Object.keys(value); return { keys: SHAPE_KEYS.filter((key) => Object.hasOwn(value, key)), other: Math.min(99, names.filter((name) => !(SHAPE_KEYS as readonly string[]).includes(name)).length) }; };
+/** Closed-vocabulary description of a draft terminal's structure for a refusal log: allowlisted key names and an `other` count, never values. */
+export function describeDraftShape(finalText: string): { readonly proposal?: ReturnType<typeof closedKeys>; readonly operations: readonly ReturnType<typeof closedKeys>[] } {
+  let parsed: unknown;
+  try { parsed = parseDraftTerminalJson(finalText); } catch { return { operations: [] }; }
+  const root = record(parsed); const proposal = root ? record(root["enrichment_proposal"]) : undefined;
+  if (!proposal) return { operations: [] };
+  const candidates = Array.isArray(proposal["operations"]) ? (proposal["operations"] as unknown[]) : proposal["operation"] !== undefined ? [proposal["operation"]] : [proposal];
+  return { proposal: closedKeys(proposal), operations: candidates.slice(0, 20).map((candidate) => closedKeys(record(candidate) ?? {})) };
 }
 
 /**

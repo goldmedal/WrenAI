@@ -1,7 +1,7 @@
 import type { ComponentLimits } from "../harness/components/runner.js";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { createComponentBroker, type ComponentBrokerOptions } from "../harness/components/broker.js";
+import { createComponentBroker, type BrokerPurpose, type ComponentBrokerOptions } from "../harness/components/broker.js";
 import { HOST_FEATURES, planDigest } from "../harness/components/plan.js";
 import type { NativeComponentIdentity, NativeComponentPreparation } from "./native-components.js";
 
@@ -32,6 +32,8 @@ export interface NativeComponentBindings {
   readonly step: ComponentBrokerOptions["step"];
   readonly normalize: ComponentBrokerOptions["normalize"];
   readonly persistRoot?: ComponentBrokerOptions["persistRoot"];
+  /** Enrichment-only proposal sink. Analysis preparation refuses bindings that carry it. */
+  readonly propose?: ComponentBrokerOptions["propose"];
   readonly onEvent?: ComponentBrokerOptions["onEvent"];
   /** The host's component run budget, carried onto the preparation for the admission's runner. */
   readonly componentLimits?: ComponentLimits;
@@ -62,14 +64,27 @@ export function prepareStructuredAskComponentHost(irDocument: string, scope: Rea
   return prepared;
 }
 
-function prepareHost(irDocument: string, scope: Readonly<Record<string, unknown>>, bindings: NativeComponentBindings, direct: boolean): NativeComponentPreparation | undefined {
+const ENRICHMENT_STAGES = ["inspect_context", "draft_enrichment"] as const;
+
+/** The two enrichment roots, pinned one at a time; only `draft_enrichment` may carry the proposal sink. */
+export function prepareStructuredEnrichComponentHost(irDocument: string, scope: Readonly<Record<string, unknown>>, bindings: NativeComponentBindings): NativeComponentPreparation {
+  if (bindings.identity.vendor !== "claude") throw new Error("Structured OpenShell enrichment requires Claude");
+  const entry = z.object({ kind: z.literal("agent"), verb: z.enum(ENRICHMENT_STAGES), prompt: z.string() }).strict().parse(scope.entry);
+  if (bindings.persistRoot || (bindings.propose !== undefined && (entry.verb !== "draft_enrichment" || bindings.propose.component !== entry.verb))) throw new Error("Invalid enrichment write grant");
+  const prepared = prepareHost(irDocument, { ...scope, entry }, bindings, true, "enrichment");
+  if (!prepared || Object.keys(prepared.hostRoots).length !== 1) throw new Error("Structured enrichment requires one entry");
+  return prepared;
+}
+
+function prepareHost(irDocument: string, scope: Readonly<Record<string, unknown>>, bindings: NativeComponentBindings, direct: boolean, purpose: BrokerPurpose = "analysis"): NativeComponentPreparation | undefined {
+  if (purpose === "analysis" && bindings.propose) throw new Error("Analysis preparation cannot carry a proposal grant");
   bindings.assertCurrent();
   const identity = freeze(structuredClone(bindings.identity));
   const contexts = freeze(structuredClone(bindings.contexts));
   const assertCurrent = bindings.assertCurrent.bind(bindings);
   const currentIdentity = bindings.currentIdentity.bind(bindings);
   const prepare = bindings.prepare, step = bindings.step, normalize = bindings.normalize;
-  const persistRoot = bindings.persistRoot, onEvent = bindings.onEvent, verifierBinary = bindings.verifierBinary;
+  const persistRoot = bindings.persistRoot, propose = bindings.propose, onEvent = bindings.onEvent, verifierBinary = bindings.verifierBinary;
   const componentLimits = bindings.componentLimits;
   const check = () => {
     assertCurrent();
@@ -131,9 +146,9 @@ function prepareHost(irDocument: string, scope: Readonly<Record<string, unknown>
       const brokerIdentity = { session: identity.session_id, vendor: identity.vendor, account: identity.auth_identity,
         generation: identity.runtime_generation, project: identity.binding.project_identity, bindingRevision: identity.binding.revision,
         contextDigest: planDigest(rootContexts), planDigest: plan.identity };
-      return createComponentBroker({ plan, contexts: rootContexts, verifierBinary,
+      return createComponentBroker({ plan, contexts: rootContexts, verifierBinary, purpose,
         identity: brokerIdentity, currentIdentity: () => { check(); return signal.aborted ? undefined : brokerIdentity; },
-        prepare, step, normalize, ...(persistRoot ? { persistRoot } : {}), ...(onEvent ? { onEvent } : {}),
+        prepare, step, normalize, ...(persistRoot ? { persistRoot } : {}), ...(propose ? { propose } : {}), ...(onEvent ? { onEvent } : {}),
       });
     },
   });

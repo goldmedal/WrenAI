@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, lstatSync } from "node:fs";
+import { mkdirSync, rmSync, lstatSync, openSync, closeSync, fstatSync, readSync, constants } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { Store } from "../db.js";
 import { resolveEnrichmentBinding } from "../enrichment.js";
 import { OpenShellLifecycle, type OpenShellPermit, type OpenShellEffectLease, type OpenShellLease, type OpenShellOwnedResources } from "./openshell-lifecycle.js";
-import { OpenShellError, type OpenShellIdentity, type OpenShellIntent } from "./openshell-types.js";
+import { OpenShellError, isSnapshotIdentity, type OpenShellIdentity, type OpenShellIntent } from "./openshell-types.js";
+import { VALIDATOR_ARGV } from "./openshell-driver.js";
 import { snapshotCanonical, snapshotHash, safeSnapshotPath, type SnapshotCaptureRequest, type SnapshotVolumeDriver } from "./openshell-snapshot-driver.js";
 import type { SnapshotJournal, SnapshotManifest, SnapshotMount, SnapshotPublication } from "./openshell-snapshot-types.js";
 
@@ -13,6 +14,9 @@ export interface PublicationPermit { readonly expiresAt: number; release(): void
 export interface PublishedSnapshot { readonly id: string; readonly digest: string }
 export interface DeliveryPermit { readonly expiresAt: number; release(): void }
 export interface DataSnapshotLease { readonly id: string; readonly reference: string; assertActive(): void; openGoverned(): Promise<import("./openshell-types.js").OpenShellDuplex>; verify(): Promise<SnapshotManifest>; read(relative: string): Promise<Buffer>; close(): Promise<void> }
+/** The validator lease can run the fixed validator and nothing else: no governed access, no file read. */
+export interface ValidatorSnapshotLease { readonly id: string; readonly reference: string; /** Aborts when the owned sandbox is revoked, cancelled or cleaned. */ readonly signal: AbortSignal; assertActive(): void; openValidator(): Promise<import("./openshell-types.js").OpenShellDuplex>; verify(): Promise<SnapshotManifest>; close(): Promise<void> }
+type SnapshotKind = "data" | "validate";
 type LifecycleScope = Extract<OpenShellIdentity, { purpose: "lifecycle" }>;
 interface PublicationGrant { permit: OpenShellPermit; request: SnapshotCaptureRequest; scope: LifecycleScope; consumed: boolean }
 interface DeliveryGrant { permit: OpenShellPermit; publication: SnapshotPublication; request: SnapshotCaptureRequest; identity: OpenShellIdentity; consumed: boolean }
@@ -116,17 +120,22 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
     this.pending.add(operation); try { return await operation; } finally { this.pending.delete(operation); }
   }
   prepareDelivery(handle: PublishedSnapshot, scope: LifecycleScope, current: () => OpenShellIdentity | undefined, signal?: AbortSignal): Promise<DeliveryPermit> {
-    return this.track(this.prepareDeliveryOwned(handle, scope, current, signal));
+    return this.track(this.prepareDeliveryOwned(handle, scope, current, signal, "data"));
   }
-  private async prepareDeliveryOwned(handle: PublishedSnapshot, scope: LifecycleScope, current: () => OpenShellIdentity | undefined, signal?: AbortSignal): Promise<DeliveryPermit> {
+  prepareValidatorDelivery(handle: PublishedSnapshot, scope: LifecycleScope, current: () => OpenShellIdentity | undefined, signal?: AbortSignal): Promise<DeliveryPermit> {
+    return this.track(this.prepareDeliveryOwned(handle, scope, current, signal, "validate"));
+  }
+  private async prepareDeliveryOwned(handle: PublishedSnapshot, scope: LifecycleScope, current: () => OpenShellIdentity | undefined, signal: AbortSignal | undefined, kind: SnapshotKind): Promise<DeliveryPermit> {
     const captured = this.handles.get(handle), backend = this.options.lifecycle.dataIdentity;
     if (!captured || !backend) throw new OpenShellError("openshell_scope_invalid");
     this.checkSource(captured.request, scope); this.checkScope(scope, captured.request);
     const row = this.row(handle.id);
     if (row.phase !== "ready" || row.manifest?.digest !== handle.digest) throw new OpenShellError("openshell_scope_invalid");
     const reference = randomUUID();
-    const asData = (value: OpenShellIdentity | undefined): OpenShellIdentity | undefined => value?.purpose === "lifecycle" ? { ...value, ...backend,
-      purpose: "data", operation: "read", snapshot: handle.digest, publication: handle.id, reference } : undefined;
+    if (kind === "validate" && !this.options.lifecycle.validatorReady) throw new OpenShellError("openshell_scope_invalid");
+    const asData = (value: OpenShellIdentity | undefined): OpenShellIdentity | undefined => value?.purpose !== "lifecycle" ? undefined : kind === "data"
+      ? { ...value, ...backend, purpose: "data", operation: "read", snapshot: handle.digest, publication: handle.id, reference }
+      : { ...value, ...backend, purpose: "validate", operation: "check", snapshot: handle.digest, publication: handle.id, reference };
     const identity = asData(scope)!;
     // Verification and whole-source recheck are authorized by a consumed effect permit,
     // and delivery admission is issued only afterwards with the final immutable digest.
@@ -143,13 +152,29 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
       this.deliveries.set(result, { permit, publication: row, request: captured.request, identity, consumed: false }); return result;
     } finally { effect.release(); this.activeEffects.delete(effect); if (lstatExists(scratch)) rmSync(scratch, { recursive: true, force: true }); }
   }
-  deliver(permit: DeliveryPermit): Promise<DataSnapshotLease> { return this.track(this.deliverOwned(permit)); }
-  private async deliverOwned(permit: DeliveryPermit): Promise<DataSnapshotLease> {
+  deliver(permit: DeliveryPermit): Promise<DataSnapshotLease> {
+    return this.track(this.deliverOwned(permit, "data", ({ worker, reference, verify, publication, close }) => Object.freeze({ id: worker.id, reference, verify, assertActive: () => worker.assertActive(),
+      openGoverned: () => worker.duplex(["/usr/local/bin/python", "-I", "/opt/genbi/worker.py"]),
+      read: async (relative: string) => {
+        const entry = publication.manifest!.files.find((file) => file.path === relative);
+        if (!entry || entry.size > 262_144 || !safeSnapshotPath(relative)) throw new OpenShellError("openshell_scope_invalid");
+        await verify();
+        const raw = await worker.exec(["/usr/local/bin/python", "-I", "-c", "import pathlib,base64;print(base64.b64encode(pathlib.Path('/opt/genbi-project').joinpath(__import__('sys').argv[1]).read_bytes()).decode())", relative]);
+        const bytes = Buffer.from(raw.trim(), "base64");
+        if (bytes.length !== entry.size || snapshotHash(bytes).slice(7) !== entry.sha256) throw new OpenShellError("openshell_identity_mismatch"); return bytes;
+      }, close })));
+  }
+  /** Delivery of the credential-less enrichment validator sandbox: its own reservation, argv and lease type. */
+  deliverValidator(permit: DeliveryPermit): Promise<ValidatorSnapshotLease> {
+    return this.track(this.deliverOwned(permit, "validate", ({ worker, reference, verify, close }) => Object.freeze({ id: worker.id, reference, signal: worker.signal, verify, assertActive: () => worker.assertActive(),
+      openValidator: () => worker.duplex(VALIDATOR_ARGV), close })));
+  }
+  private async deliverOwned<T>(permit: DeliveryPermit, kind: SnapshotKind, build: (base: { worker: OpenShellLease; reference: string; verify(): Promise<SnapshotManifest>; publication: SnapshotPublication; close(): Promise<void> }) => T): Promise<T> {
     const grant = this.deliveries.get(permit);
-    if (!grant || grant.consumed || grant.identity.purpose !== "data") throw new OpenShellError("openshell_scope_invalid");
+    if (!grant || grant.consumed || !isSnapshotIdentity(grant.identity) || grant.identity.purpose !== kind) throw new OpenShellError("openshell_scope_invalid");
     // Opaque delivery is claimed synchronously before ref mutation. Validate its
     // retained lifecycle permit immediately before the durable acquire/create.
-    const effect = this.options.lifecycle.reserveDataLaunch(grant.permit); this.activeEffects.add(effect);
+    const effect = kind === "data" ? this.options.lifecycle.reserveDataLaunch(grant.permit) : this.options.lifecycle.reserveValidatorLaunch(grant.permit); this.activeEffects.add(effect);
     grant.consumed = true;
     const identity = grant.identity;
     const reference = { id: identity.reference, publication: identity.publication, identity, phase: "pending" as const, interrupted: false };
@@ -177,17 +202,8 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
         if (snapshotCanonical(manifest) !== snapshotCanonical(grant.publication.manifest)) throw new OpenShellError("openshell_identity_mismatch"); return manifest;
       };
       await verify(); worker.assertActive();
-      return Object.freeze({ id: worker.id, reference: reference.id, verify, assertActive: () => worker!.assertActive(),
-        openGoverned: () => worker!.duplex(["/usr/local/bin/python", "-I", "/opt/genbi/worker.py"]),
-        read: async (relative: string) => {
-          const entry = grant.publication.manifest!.files.find((file) => file.path === relative);
-          if (!entry || entry.size > 262_144 || !safeSnapshotPath(relative)) throw new OpenShellError("openshell_scope_invalid");
-          await verify();
-          const raw = await worker!.exec(["/usr/local/bin/python", "-I", "-c", "import pathlib,base64;print(base64.b64encode(pathlib.Path('/opt/genbi-project').joinpath(__import__('sys').argv[1]).read_bytes()).decode())", relative]);
-          const bytes = Buffer.from(raw.trim(), "base64");
-          if (bytes.length !== entry.size || snapshotHash(bytes).slice(7) !== entry.sha256) throw new OpenShellError("openshell_identity_mismatch"); return bytes;
-        }, close: async () => { await worker!.close(); this.activeRefs.delete(reference.id); },
-      });
+      const leased = worker;
+      return build({ worker: leased, reference: reference.id, verify, publication: grant.publication, close: async () => { await leased.close(); this.activeRefs.delete(reference.id); } });
     } catch (error) {
       this.failure = true;
       if (worker) await worker.close().catch(() => {});
@@ -197,7 +213,7 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
     } finally { effect.release(); this.activeEffects.delete(effect); }
   }
   mount(intent: OpenShellIntent): SnapshotMount {
-    if (intent.identity.purpose !== "data") throw new OpenShellError("openshell_scope_invalid");
+    if (!isSnapshotIdentity(intent.identity)) throw new OpenShellError("openshell_scope_invalid");
     const identity = intent.identity;
     const ref = this.options.journal.listSnapshotReferences().find((row) => row.id === identity.reference);
     const publication = this.row(identity.publication);
@@ -205,11 +221,41 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
     return { volume: publication.volume, owner: publication.owner, digest: identity.snapshot };
   }
   async workerCleaned(intent: OpenShellIntent): Promise<void> {
-    if (intent.identity.purpose !== "data") return;
+    if (!isSnapshotIdentity(intent.identity)) return;
     const identity = intent.identity;
     const ref = this.options.journal.listSnapshotReferences().find((row) => row.id === identity.reference);
     if (!ref || ref.workerId !== intent.id) throw new OpenShellError("openshell_journal_failed");
     this.options.journal.saveSnapshotReference({ ...ref, phase: "released" }); this.activeRefs.delete(ref.id);
+  }
+  /** The per-file manifest the published snapshot was captured with; the review record retains it for source-drift checks. */
+  manifest(handle: PublishedSnapshot): SnapshotManifest {
+    const row = this.row(handle.id);
+    if (row.phase !== "ready" || row.manifest?.digest !== handle.digest) throw new OpenShellError("openshell_scope_invalid");
+    return structuredClone(row.manifest);
+  }
+  /**
+   * Bytes of one snapshot file for host-side review, read from the captured source root and accepted only when they equal
+   * the manifest entry (path symlinks refused, `O_NOFOLLOW`, regular file, size and sha256 checked). Content authority is the
+   * manifest hash, so a swapped ancestor can only serve identical bytes. `undefined` = the path is not in the snapshot.
+   */
+  readSource(handle: PublishedSnapshot, relative: string, maxBytes: number): Buffer | undefined {
+    const captured = this.handles.get(handle);
+    if (!captured || !safeSnapshotPath(relative)) throw new OpenShellError("openshell_scope_invalid");
+    const entry = this.manifest(handle).files.find((file) => file.path === `project/${relative}`);
+    if (!entry) return undefined;
+    if (entry.size > maxBytes) throw new OpenShellError("openshell_scope_invalid");
+    let current = captured.request.root;
+    for (const part of relative.split("/")) { current = path.join(current, part); if (lstatSync(current).isSymbolicLink()) throw new OpenShellError("openshell_ownership_mismatch"); }
+    const fd = openSync(current, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = fstatSync(fd);
+      if (!info.isFile() || info.size !== entry.size) throw new OpenShellError("openshell_identity_mismatch");
+      const bytes = Buffer.alloc(entry.size + 1); let length = 0;
+      while (length < bytes.length) { const read = readSync(fd, bytes, length, bytes.length - length, null); if (!read) break; length += read; }
+      const data = bytes.subarray(0, length);
+      if (data.length !== entry.size || snapshotHash(data).slice(7) !== entry.sha256) throw new OpenShellError("openshell_identity_mismatch");
+      return Buffer.from(data);
+    } finally { closeSync(fd); }
   }
   remove(id: string): Promise<void> {
     const pending = this.removals.get(id); if (pending) return pending;

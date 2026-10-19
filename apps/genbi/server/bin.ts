@@ -6,6 +6,8 @@ import { createCodexStructuredAdapter } from "./codex-structured-ask.js";
 import { createOpenShellRuntimeComposition, selectNativeRuntimeBackend } from "./openshell-runtime-composition.js";
 import { inProcessAuthViaBackend, isBackendOffered, localTerminalAvailable, resolveRuntimeSelection, RuntimeSelectionError, type RuntimeSelection } from "./runtime-selection.js";
 import { createOpenShellStructuredAdapter } from "./openshell-structured-ask.js";
+import { createOpenShellEnrichmentValidator } from "./openshell-enrichment-validation.js";
+import { createOpenShellEnrichmentApplier } from "./enrichment-apply.js";
 import { createOpenShellStructuredProvisioner, resolveStructuredClaudeModels } from "./openshell-structured-provisioner.js";
 import { resolveOpenShellClaudeModel } from "./runtime-host/openshell-claude-boot.js";
 import { StructuredRuntime } from "./structured-runtime.js";
@@ -693,7 +695,7 @@ async function main(): Promise<void> {
   const openshellComposition = await createOpenShellRuntimeComposition({ env: process.env, selection: runtimeSelection, store, stateRoot: nativeMaterializationState.root, currentProject: getUserProject });
   const openshellProvisioner = createOpenShellStructuredProvisioner({
     composition: openshellComposition, store, producerBinary: producerExecutable?.executable ?? "", wrenBinary: nativeWrenExecutable?.executable ?? "",
-    profileSource, hostHome: nativeHome, sourceWrenHome: nativeSourceWrenHome, getBinding: currentInteractiveBinding,
+    profileSource, enrichmentProfileSource: harnessProfileSources.context_enrichment, hostHome: nativeHome, sourceWrenHome: nativeSourceWrenHome, getBinding: currentInteractiveBinding,
     getComponentLimits,
     assertConfigurationCurrent() { const boot = openshellComposition.claudeBoot ?? openshellComposition.piBoot; if (!boot) throw new Error("OpenShell model configuration unavailable"); boot.assertCurrent(); },
     modelsFor(settings) {
@@ -704,8 +706,11 @@ async function main(): Promise<void> {
     },
   });
   const piOnOpenShell = runtimeSelection.runtime === "openshell" && isBackendOffered(runtimeSelection, "pi");
-  const openshellStructured = createOpenShellStructuredAdapter(openshellProvisioner, undefined, piOnOpenShell ? "pi" : "claude");
   const claudeOnOpenShell = runtimeSelection.runtime === "openshell" && isBackendOffered(runtimeSelection, "claude");
+  const openshellValidator = createOpenShellEnrichmentValidator({ composition: openshellComposition, getBinding: currentInteractiveBinding,
+    scratchRoot: path.join(nativeMaterializationState.root, "enrichment-drafts"),
+    assertConfigurationCurrent() { if (!openshellComposition.claudeBoot) throw new Error("OpenShell model configuration unavailable"); openshellComposition.claudeBoot.assertCurrent(); } });
+  const openshellStructured = createOpenShellStructuredAdapter(openshellProvisioner, undefined, piOnOpenShell ? "pi" : "claude", openshellValidator);
   const nativeRuntimeHost = new RuntimeHost({
     selected: () => selectNativeRuntimeBackend({ selection: runtimeSelection, codexBackend: codexConfiguration.selected }),
     deployment: process.env["NODE_ENV"] === "production" ? "production" : "development",
@@ -778,6 +783,15 @@ async function main(): Promise<void> {
     onRevoke: openshellComposition.revokeRuntime,
     localRoute: route, localSetupFor: (choice) => setupRunnerFor?.(choice) ?? setupRunner,
   });
+  // Apply-all/Discard for OpenShell-validated reviews. Recovery runs before the server accepts requests: an interrupted apply is rolled back
+  // (or stopped at reconcile_required) and is never resumed.
+  const openShellEnrichmentApply = createOpenShellEnrichmentApplier({
+    store, getBinding: currentInteractiveBinding, inventory: () => openshellComposition.applyInventory(),
+    account: () => { const status = openshellComposition.claudeVault?.status(); return status?.state === "verified" ? status.fingerprint : undefined; },
+    onBindingAdvanced: (revokedNativeSessionIds) => { nativeSessions.revokeBindingCapabilities(revokedNativeSessionIds); structuredRuntime.revoke(); invalidateBundleAgentIdsCache(deps); },
+  });
+  const recovered = openShellEnrichmentApply.recover();
+  if (recovered.rolledBack || recovered.reconcileRequired) console.error(`[enrichment] startup recovery: ${recovered.rolledBack} apply rolled back, ${recovered.reconcileRequired} need operator reconciliation`);
   deps = {
     store,
     structuredRuntime,
@@ -788,6 +802,7 @@ async function main(): Promise<void> {
       validatePiRuntimeBindings(settings, bundleTiers, boot.descriptor.models, boot.descriptor.auth);
     } } } : {}),
     nativeSessions,
+    openShellEnrichmentApply,
     nativeArtifacts,
     profileRegistry,
     route,

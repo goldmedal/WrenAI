@@ -1,0 +1,1 @@
+{"status":"failed","checks":[{"check":"additivity","status":"fail","code":"unsupported_by_runtime","message":"This runtime only accepts additions to existing knowledge, model descriptions and relationships; new files, cubes, views and calculated columns are not supported."}]}

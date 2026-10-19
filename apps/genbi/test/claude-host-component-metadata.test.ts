@@ -66,7 +66,7 @@ it.each([{estimated_tokens:-1},{estimated_tokens_delta:-1},{estimated_tokens:NaN
  await expect(runClaudeComponentStep(test.runtime,run)).rejects.toThrow("Claude component protocol");expect(echo).not.toHaveBeenCalled();expect(test.resources.size).toBe(0);
 });
 it.each(["pre-init","replay","revocation","cap","error-result"])("host progress cannot evade %s fence",async kind=>{
- const events:unknown[]=kind==="pre-init"?[progress,init,result]:kind==="replay"?[init,progress,progress,result]:kind==="cap"?[init,...Array.from({length:512},(_,i)=>({...progress,uuid:"p"+i})),result]:[init,progress,result];
+ const events:unknown[]=kind==="pre-init"?[progress,init,result]:kind==="replay"?[init,progress,progress,result]:kind==="cap"?[init,...Array.from({length:8200},(_,i)=>({...progress,uuid:"p"+i})),result]:[init,progress,result];
  const test=await setup(events),{run,echo}=step();
  if(kind==="revocation")events.splice(1,0,()=>test.revoke());
  if(kind==="error-result")events[2]={...result,is_error:true};
@@ -80,7 +80,7 @@ it.each(["allowed","allowed_warning","rejected"])("host skips %s rate metadata a
  await expect(runClaudeComponentStep(test.runtime,run)).resolves.toEqual({value:"synthetic",usage:{inputTokens:1,outputTokens:1}});expect(echo).not.toHaveBeenCalled();expect(test.resources.size).toBe(0);
 });
 it.each(["pre-init","replay","revocation","cap","error-result","unknown","nested","identity"])("rate metadata cannot evade host %s fence",async kind=>{
- const events:unknown[]=kind==="pre-init"?[rate,init,result]:kind==="replay"?[init,rate,rate,result]:kind==="cap"?[init,...Array.from({length:512},(_,i)=>({...rate,uuid:"r"+i})),result]:[init,rate,result];
+ const events:unknown[]=kind==="pre-init"?[rate,init,result]:kind==="replay"?[init,rate,rate,result]:kind==="cap"?[init,...Array.from({length:8200},(_,i)=>({...rate,uuid:"r"+i})),result]:[init,rate,result];
  if(kind==="unknown")events[1]={...rate,rate_limit_info:{status:"allowed",scope:"forged"}};
  if(kind==="nested")events[1]={...rate,rate_limit_info:{status:"allowed",unifiedWindows:{five_hour:{utilization:1,resetsAt:2,scope:"forged"}}}};
  if(kind==="identity")events[1]={...rate,uuid:"x".repeat(129)};

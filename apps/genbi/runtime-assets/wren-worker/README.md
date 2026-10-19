@@ -34,3 +34,20 @@ the admitted snapshot digest and the host-observed data image/policy before writ
 Cleanup uncertainty blocks a successful answer.
 
 The fixed worker sets a 512 MB memory discovery hint and one CPU discovery hint using DuckDB's documented source-supported SLURM resource overrides. These values are owned by the entrypoint and ignore caller/project/environment input; they are not OS hard limits. They leave memory headroom within the sandbox's 1 GiB limit and avoid reading inaccessible cgroup resource metadata; the filesystem and network policy remains unchanged.
+
+## Enrichment validator (separate entrypoint, same image and policy)
+
+`validator.py` is a second fixed entrypoint (`/usr/local/bin/python -I /opt/genbi/validator.py`, no arguments) used only by the host's
+enrichment validation. It runs in a fresh sandbox with the same digest-pinned image, the same empty-network data policy (unchanged) and the
+published project snapshot mounted read-only, with no model credential, Claude login or environment. Protocol `genbi-validate/1`: it prints one
+identity line, reads one bounded JSON candidate line, applies exactly that candidate to a scratch copy, re-checks the sink allowlist and
+additivity, runs the library equivalents of `context validate`, `context build`, `dry-plan` and (for cubes) cube SQL generation plus `dry-run`
+against the snapshot DuckDB, and prints one bounded JSON result with the change set it applied and the regenerated MDL with its sha256. The
+host never trusts it: it requires the change set to be byte-equal to its own candidate.
+
+**Rebuild requirement.** An image built before this entrypoint existed has no `/opt/genbi/validator.py`. Copy `validator.py` into the build
+context next to `worker.py` (the Dockerfile now does), rebuild, and record `dataWorker.validator = { script: <sha256 of validator.py>,
+protocol: "genbi-validate/1" }` in the protected host descriptor next to the image/script/wheel/toolchain digests. The host accepts the
+validator only when that digest equals the digest of the `validator.py` packaged with the application; otherwise enrichment validation is
+unavailable (drafting is refused before any model call, a run that loses validation ends `validation_failed`). Governed data access and
+analysis keep working with an image that has no validator. This slice does not rebuild or re-pin the production image.

@@ -8,7 +8,7 @@ import { generatePreparedContext } from "../harness/compile/context-loader.js";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
 import { captureWrenAccessIdentity } from "../harness/components/wren-access.js";
 import { prepareCodexDirectTools, type CodexSessionTools } from "./runtime-host/codex-direct-tools.js";
-import { prepareNativeComponentHost, prepareStructuredAskComponentHost, type NativeComponentBindings } from "./native-component-preparation.js";
+import { prepareNativeComponentHost, prepareStructuredAskComponentHost, prepareStructuredEnrichComponentHost, type NativeComponentBindings } from "./native-component-preparation.js";
 import { createNativeComponentRuntimeBindings, type NativeComponentRuntimeOptions } from "./native-component-runtime.js";
 import type { NativeComponentPreparation } from "./native-components.js";
 
@@ -28,7 +28,7 @@ export async function prepareCapturedNativeComponentHost(
   irDocument: string, scope: Readonly<Record<string, unknown>>, options: NativeComponentContextOptions,
 ): Promise<NativeComponentPreparation | undefined> {
   const capturedScope = structuredClone(scope);
-  const bindings = await captureBindings(irDocument, options);
+  const bindings = await captureBindings(irDocument, analysisOnly(options));
   return prepareNativeComponentHost(irDocument, capturedScope, bindings);
 }
 
@@ -38,8 +38,18 @@ export async function prepareCapturedStructuredAskHost(
 ): Promise<NativeComponentPreparation> {
   if ((options.vendor.vendor !== "claude" && options.vendor.vendor !== "pi") || options.identity.vendor !== options.vendor.vendor) throw new Error("Structured OpenShell Ask requires Claude or pi");
   const capturedScope = structuredClone(scope);
-  const bindings = await captureBindings(irDocument, options);
+  const bindings = await captureBindings(irDocument, analysisOnly(options));
   return observeStructured(options.diagnostics, "host_admission", () => prepareStructuredAskComponentHost(irDocument, capturedScope, bindings));
+}
+
+/** Same captured authority for one enrichment stage; the purpose is fixed here, never taken from the caller's options. */
+export async function prepareCapturedStructuredEnrichHost(
+  irDocument: string, scope: Readonly<Record<string, unknown>>, options: NativeComponentContextOptions,
+): Promise<NativeComponentPreparation> {
+  if (options.vendor.vendor !== "claude" || options.identity.vendor !== "claude" || options.persistRoot) throw new Error("Structured OpenShell enrichment requires Claude");
+  const capturedScope = structuredClone(scope);
+  const bindings = await captureBindings(irDocument, { ...options, purpose: "enrichment" });
+  return observeStructured(options.diagnostics, "host_admission", () => prepareStructuredEnrichComponentHost(irDocument, capturedScope, bindings));
 }
 
 /** Direct-session variant shares the same captured project/credential provenance. */
@@ -49,9 +59,15 @@ export async function prepareCapturedCodexDirectTools(irDocument: string, scope:
   if (options.vendor.vendor !== "codex" || options.identity.vendor !== "codex") throw new Error("Direct session requires Codex");
   const capturedScope = structuredClone(scope);
   const accountEmail = options.vendor.accountEmail;
-  const bindings = await captureBindings(irDocument, options);
+  const bindings = await captureBindings(irDocument, analysisOnly(options));
   return prepareCodexDirectTools({ irDocument, scope: capturedScope, bindings, producerBinary: options.producerBinary,
     accountEmail, expiresAt: options.expiresAt, signal: options.signal });
+}
+
+/** Analysis, native and direct-session captures can never carry the enrichment-only proposal sink. */
+function analysisOnly(options: NativeComponentContextOptions): NativeComponentContextOptions {
+  if (options.propose || options.purpose === "enrichment") throw new Error("Analysis preparation cannot carry a proposal grant");
+  return options;
 }
 
 async function captureBindings(irDocument: string, options: NativeComponentContextOptions): Promise<NativeComponentBindings> {

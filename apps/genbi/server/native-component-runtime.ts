@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
 import type { ComponentAccess } from "../harness/components/broker.js";
 import { normalizeComponentEvidence } from "../harness/components/normalize.js";
+import { normalizeEnrichmentEvidence } from "../harness/components/normalize-enrichment.js";
 import { openWrenComponentAccess, type WrenAccessIdentity } from "../harness/components/wren-access.js";
 import type { NativeComponentBindings } from "./native-component-preparation.js";
 import { deriveClaudeNativeRuntime } from "./runtime-host/openshell-claude-provider.js";
@@ -32,7 +33,9 @@ export type NativeComponentVendor = {
 });
 
 export interface NativeComponentRuntimeOptions extends Pick<NativeComponentBindings,
-  "identity" | "contexts" | "verifierBinary" | "currentIdentity" | "assertCurrent" | "persistRoot" | "onEvent" | "componentLimits"> {
+  "identity" | "contexts" | "verifierBinary" | "currentIdentity" | "assertCurrent" | "persistRoot" | "propose" | "onEvent" | "componentLimits"> {
+  /** Defaults to analysis. Only the enrichment purpose may carry `propose`, and it then normalizes host-typed documents. */
+  readonly purpose?: "analysis" | "enrichment";
   readonly vendor: NativeComponentVendor;
   /** Optional cheap scope guard; integrity remains mandatory at protected operations. */
   assertLive?(): void;
@@ -57,6 +60,9 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
   const open = provider.open.bind(provider);
   const wren = { ...options.wren, ...(options.assertExecutableCurrent ? { assertExecutableCurrent: options.assertExecutableCurrent } : {}) };
   const persistRoot = options.persistRoot;
+  const enrichment = options.purpose === "enrichment";
+  const propose = options.propose;
+  if (propose && (!enrichment || persistRoot)) throw new Error("Proposal grant requires the enrichment purpose");
   const used = new WeakSet<object>();
   const assertBindingLive = options.assertLive?.bind(options) ?? assertBinding;
   const assertVendorLive = provider.assertLive?.bind(provider) ?? assertVendor;
@@ -75,7 +81,9 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
   return {
     identity, contexts, verifierBinary: options.verifierBinary, currentIdentity, assertCurrent: check,
     ...(options.componentLimits ? { componentLimits: options.componentLimits } : {}),
-    ...(persistRoot ? { persistRoot: async (...args: Parameters<NonNullable<NativeComponentBindings["persistRoot"]>>) => { await checkAccess(args[2]); await persistRoot(...args); } } : {}), ...(options.onEvent ? { onEvent: options.onEvent } : {}),
+    ...(persistRoot ? { persistRoot: async (...args: Parameters<NonNullable<NativeComponentBindings["persistRoot"]>>) => { await checkAccess(args[2]); await persistRoot(...args); } } : {}),
+    ...(propose ? { propose: { component: propose.component, persist: async (...args: Parameters<typeof propose.persist>) => { await checkAccess(args[2]); await propose.persist(...args); } } } : {}),
+    ...(options.onEvent ? { onEvent: options.onEvent } : {}),
     async prepare(component, _identity, signal): Promise<ComponentAccess> {
       await checkAccess(signal);
       if (component.steps.some((step) => !models[step.tier])) throw new Error("Missing native component tier binding");
@@ -115,6 +123,6 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
         throw new Error("Native component vendor mismatch");
       } finally { await close(); }
     },
-    async normalize(component, evidence, signal, context) { await checkAccess(signal); return normalizeComponentEvidence(component, evidence, context); },
+    async normalize(component, evidence, signal, context) { await checkAccess(signal); return enrichment ? normalizeEnrichmentEvidence(component, evidence) : normalizeComponentEvidence(component, evidence, context); },
   };
 }

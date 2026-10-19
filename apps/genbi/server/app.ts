@@ -7,7 +7,11 @@
  */
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { StructuredRuntimeError } from "./structured-runtime.js";
+import { StructuredRuntimeError, type StructuredOperation } from "./structured-runtime.js";
+import { runtimeFailure } from "./enrichment-validation.js";
+import type { ApplyCode, ApplyOutcome } from "./enrichment-apply.js";
+import { readOpenShellEnrichmentResult } from "./openshell-enrichment.js";
+import { captureEnrichmentScope } from "./structured-scope.js";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
@@ -517,6 +521,25 @@ function contextShowErrorResponse(err: unknown): { message: string; status: 404 
   return undefined;
 }
 
+const APPLY_MESSAGES: Record<ApplyCode, string> = {
+  run_not_found: "enrichment run not found", not_openshell: "this run was not drafted under OpenShell", run_not_appliable: "the run is not awaiting a decision, or was already resolved",
+  validation_missing: "the run has no validated review to apply", capability_invalid: "the apply capability is missing, wrong, already used or expired", capability_expired: "the apply capability expired",
+  review_mismatch: "the review changed or does not match the capability", reconcile_required: "a previous apply on this project needs operator reconciliation before another can run",
+  recovery_pending: "a previous apply on this project has not been recovered yet", unsupported_by_runtime: "the change set is outside what this runtime supports", binding_changed: "the project binding changed since the review",
+  account_changed: "the model account changed since the review", manifest_drift: "a project file changed since the review", target_changed: "a target file changed since the review", symlink: "a project path is a link or not a regular file",
+  mdl_invalid: "the validated MDL does not match its receipt", too_large: "a project file exceeds the apply limits", source_unreadable: "a project file could not be read; mint a new capability and retry",
+  inventory_unavailable: "the governed snapshot file list is not configured", apply_failed: "the apply did not complete and was rolled back or needs reconciliation", applied: "applied", discarded: "discarded", not_discardable: "the run can no longer be discarded", minted: "minted",
+};
+
+/** Apply evidence for an OpenShell run: the journal state, the sanitized refusal/failure code and, once applied, the receipt. */
+function publicEnrichmentApply(deps: TurnDeps, run: { readonly id: string; readonly backend: "local" | "openshell" }) {
+  if (run.backend !== "openshell") return {};
+  const journal = deps.store.getEnrichmentApplyJournal(run.id);
+  const evidence = deps.store.listEnrichmentEvents(run.id).filter((event) => ["apply_refused", "apply_failed", "apply_reconcile_required"].includes(event.kind)).at(-1);
+  if (!journal && !evidence) return {};
+  return { apply: { ...(journal ? { state: journal.state } : {}), ...(evidence ? { code: evidence.message } : {}), ...(journal?.state === "applied" && journal.receipt ? { receipt: journal.receipt } : {}) } };
+}
+
 function publicEnrichmentRun(deps: TurnDeps, runId: string) {
   const run = deps.store.getEnrichmentRun(runId);
   if (!run) return undefined;
@@ -546,7 +569,23 @@ function publicEnrichmentRun(deps: TurnDeps, runId: string) {
       }),
     },
     ...(run.errorMessage ? { error: redactEnrichmentText(run.errorMessage) } : {}),
+    backend: run.backend,
+    ...publicEnrichmentValidation(deps, run),
+    ...publicEnrichmentApply(deps, run),
   };
+}
+
+/** The bounded review (diff, validator receipt) of a validated run, or the sanitized evidence of a failed one. Never the snapshot's file list. */
+function publicEnrichmentValidation(deps: TurnDeps, run: { readonly id: string; readonly backend: "local" | "openshell" }) {
+  if (run.backend !== "openshell") return {};
+  const validation = deps.store.getEnrichmentValidation(run.id);
+  if (!validation) return {};
+  if (validation.outcome === "failed") {
+    const { stage, code, message, path, checks } = validation.failure;
+    return { validation: { stage, code, message, ...(path ? { path } : {}), ...(checks ? { checks } : {}) } };
+  }
+  const { diff, diffSha256, receipt, binding, snapshot } = validation.review;
+  return { review: { diff, diffSha256, receipt, binding, snapshot: { digest: snapshot.digest } } };
 }
 
 type PublicEnrichmentCapability = { available: true } | { available: false; reason: string };
@@ -571,9 +610,12 @@ function capabilityFromRunner(runner: object | undefined): PublicEnrichmentCapab
 }
 
 /** Callback readiness is public, but implementation/provider identity is not. */
-function publicEnrichmentCapabilities(deps: TurnDeps) {
+async function publicEnrichmentCapabilities(deps: TurnDeps) {
+  // In OpenShell mode the draft capability is the OpenShell adapter's own live answer; the host-local runner's
+  // presence says nothing about whether a draft can run there.
+  const openShell = await deps.structuredRuntime?.enrichmentReadiness(resolveAuthChoice(deps));
   return {
-    draft: capabilityFromRunner(deps.enrichmentRunner),
+    draft: openShell ? (openShell.available ? { available: true as const } : { available: false as const, reason: openShell.reason ?? "callback_unavailable" }) : capabilityFromRunner(deps.enrichmentRunner),
     apply: capabilityFromRunner(deps.enrichmentApplyRunner),
     approval: capabilityFromRunner(deps.enrichmentApprovalProvider),
     reconcile: capabilityFromRunner(deps.enrichmentApplyRunner),
@@ -584,6 +626,19 @@ function publicActiveEnrichmentRun(deps: TurnDeps, runId: string) {
   const run = deps.store.getEnrichmentRun(runId);
   if (!run) return undefined;
   try { const binding = currentEnrichmentBinding(deps); return binding && runMatchesBinding(run, binding) ? publicEnrichmentRun(deps, runId) : undefined; } catch { return undefined; }
+}
+
+/**
+ * The latest run for the status poll. An applied OpenShell run is the one run whose own Apply moved the binding on (generation + 1,
+ * same project), so it would otherwise vanish the moment it succeeded; it stays visible, read-only, until the binding moves again.
+ * This only widens what the poll returns: every action route still compares the run with the current binding itself.
+ */
+function publicLatestEnrichmentRun(deps: TurnDeps, runId: string) {
+  const active = publicActiveEnrichmentRun(deps, runId);
+  if (active) return active;
+  const run = deps.store.getEnrichmentRun(runId);
+  if (!run || run.backend !== "openshell" || run.status !== "applied") return undefined;
+  try { const binding = currentEnrichmentBinding(deps); return binding && run.projectPath === binding.path && run.projectIdentity === binding.identity && binding.generation === run.bindingGeneration + 1 ? publicEnrichmentRun(deps, runId) : undefined; } catch { return undefined; }
 }
 
 /**
@@ -647,10 +702,24 @@ function validatedApprovalAttestation(
   return attestation as EnrichmentApprovalAttestation;
 }
 
+const PENDING_VALIDATION_MESSAGE = "enrichment proposal awaits sandbox validation and cannot be decided, approved or applied yet";
+const FAILED_VALIDATION_MESSAGE = "enrichment proposal failed sandbox validation and can never be decided, approved or applied";
+const OPENSHELL_APPLY_MESSAGE = "an enrichment proposal drafted under OpenShell is applied as one unit with its one-use apply capability, never operation by operation";
+const OPENSHELL_UNIT_MESSAGE = "an OpenShell enrichment review is applied or discarded as one unit; per-operation decisions, approvals and retries are not part of this flow";
+const OPENSHELL_EDIT_MESSAGE = "an OpenShell-validated enrichment proposal cannot be edited until it can be validated again";
+/** Why a run that has not (or never will have) passed independent validation may not be decided, approved or applied. */
+function validationRefusal(run: { readonly status: string }): string | undefined {
+  return run.status === "validation_pending" ? PENDING_VALIDATION_MESSAGE : run.status === "validation_failed" ? FAILED_VALIDATION_MESSAGE : undefined;
+}
+
 async function applyEnrichmentOperation(deps: TurnDeps, runId: string, operationId: string, requiredVersion?: number): Promise<{ error?: string }> {
   const run = deps.store.getEnrichmentRun(runId);
   const operation = deps.store.getEnrichmentOperation(runId, operationId);
   if (!run || !operation || operation.completed) return { error: "enrichment operation is missing or has already been applied" };
+  // Applying anything drafted under OpenShell needs its own one-use capability, a source manifest check and a durable journal; until that exists no host apply path may touch it.
+  if (run.backend === "openshell") return { error: OPENSHELL_APPLY_MESSAGE };
+  const refusal = validationRefusal(run) ?? (operation.state === "validation_pending" ? PENDING_VALIDATION_MESSAGE : operation.state === "validation_failed" ? FAILED_VALIDATION_MESSAGE : undefined);
+  if (refusal) return { error: refusal };
   if (requiredVersion !== undefined && run.version !== requiredVersion) return { error: "enrichment operation snapshot is stale" };
   let activeBinding: EnrichmentBinding | undefined;
   try { activeBinding = currentEnrichmentBinding(deps); } catch (error) { return { error: error instanceof Error ? error.message : "bound project is unavailable" }; }
@@ -719,7 +788,7 @@ type EnrichmentDraftOutcome =
  * extracted from -- this function's job is to be called from both places,
  * not to behave differently for either one.
  */
-async function settleEnrichmentDraft(deps: TurnDeps, run: EnrichmentRunRow, binding: EnrichmentBinding, draftProducer: () => Promise<unknown>): Promise<EnrichmentDraftOutcome> {
+async function settleEnrichmentDraft(deps: TurnDeps, run: EnrichmentRunRow, binding: EnrichmentBinding, draftProducer: () => Promise<unknown>, validation: "host" | "pending" = "host"): Promise<EnrichmentDraftOutcome> {
   try {
     const draft = await draftProducer();
     // The draft producer may be asynchronous (a model turn can run for
@@ -734,12 +803,16 @@ async function settleEnrichmentDraft(deps: TurnDeps, run: EnrichmentRunRow, bind
       return { kind: "stale", message };
     }
     const proposal = canonicalizeProposal(draft, binding.revision);
+    // `description_append` is realized only by the OpenShell materialization and validator; the host-local ladder and apply never see it.
+    if (validation === "host" && proposal.operations.some((operation) => operation.changeKind === "description_append")) throw new EnrichmentContractError("enrichment operation kind is not available on this runtime");
 
     // Refute before offering. The person approving cannot be expected to
     // read every drafted document, so anything a machine can decide must be
     // decided here rather than after they have already accepted it.
-    const verdict = await (deps.verifyEnrichmentProposal ?? verifyProposal)(proposal, binding);
-    if (verdict.status !== "verified") {
+    // An OpenShell-produced proposal is never run through the host shadow ladder (it shells out to a bare-PATH
+    // `wren`); it is recorded validation-pending for the sandbox validator and is not decidable or appliable yet.
+    const verdict = validation === "pending" ? undefined : await (deps.verifyEnrichmentProposal ?? verifyProposal)(proposal, binding);
+    if (verdict && verdict.status !== "verified") {
       const message =
         verdict.status === "refuted"
           ? `enrichment draft was refuted at ${verdict.refutation.step}: ${verdict.refutation.reason}`
@@ -749,7 +822,7 @@ async function settleEnrichmentDraft(deps: TurnDeps, run: EnrichmentRunRow, bind
       return verdict.status === "refuted" ? { kind: "refuted", message, refutation: verdict.refutation } : { kind: "unavailable", message };
     }
 
-    if (!deps.store.finalizeEnrichmentDraft({ runId: run.id, expectedVersion: run.version, proposalId: proposal.id, proposalHash: proposal.hash, operations: proposal.operations })) {
+    if (!deps.store.finalizeEnrichmentDraft({ runId: run.id, expectedVersion: run.version, proposalId: proposal.id, proposalHash: proposal.hash, operations: proposal.operations, ...(validation === "pending" ? { pendingValidation: true } : {}) })) {
       // Only reachable if something else already resolved this run out of
       // 'drafting' (e.g. a restart's reconcile sweep) between creation and
       // here. Report the run's actual current state rather than pretending
@@ -765,9 +838,69 @@ async function settleEnrichmentDraft(deps: TurnDeps, run: EnrichmentRunRow, bind
     const message = error instanceof Error ? redactEnrichmentText(error.message) : "enrichment draft failed";
     const fresh = deps.store.getEnrichmentRun(run.id);
     if (fresh && fresh.status === "drafting") deps.store.failEnrichmentRun({ runId: run.id, expectedVersion: fresh.version, message });
-    console.error(`[enrichment] run ${run.id} failed: ${message}`);
+    console.error(`[enrichment] run ${run.id} failed: ${message}${error instanceof EnrichmentContractError && error.diagnostic ? ` ${JSON.stringify(error.diagnostic)}` : ""}`);
     return error instanceof EnrichmentContractError ? { kind: "contract_error", message } : { kind: "runtime_error", message };
   }
+}
+
+const VALIDATION_REASONS: Record<string, { readonly code: string; readonly message: string; readonly status: 409 | 422 | 503 }> = {
+  unavailable: { code: "validator_unavailable", message: "The sandbox validator is unavailable, so the proposal could not be validated.", status: 503 },
+  unsupported: { code: "validator_unavailable", message: "The sandbox validator is unavailable, so the proposal could not be validated.", status: 503 },
+  stale: { code: "stale", message: "Validation was abandoned because the project binding, runtime settings or run state changed.", status: 409 },
+  cancelled: { code: "cancelled", message: "Validation was cancelled.", status: 409 },
+  timeout: { code: "timeout", message: "Validation timed out.", status: 503 },
+  cleanup: { code: "cleanup", message: "The validation sandbox could not be confirmed cleaned up.", status: 503 },
+  failed: { code: "failed", message: "Validation could not be completed.", status: 503 },
+};
+
+/**
+ * Runs the independent sandbox validation of a just-recorded OpenShell proposal and settles the run exactly once: `awaiting_decision`
+ * with its review record, or terminal `validation_failed` with sanitized evidence. Cancel, stale state, timeout, cleanup uncertainty and an
+ * unavailable validator are all `validation_failed`; none of them can ever produce `awaiting_decision`.
+ */
+async function validateOpenShellRun(deps: TurnDeps, runId: string, binding: EnrichmentBinding, signal: AbortSignal | undefined): Promise<{ readonly kind: "validated" } | { readonly kind: "failed"; readonly status: 409 | 422 | 503; readonly message: string }> {
+  const pending = deps.store.getEnrichmentRun(runId);
+  if (!pending || pending.status !== "validation_pending" || pending.backend !== "openshell" || !deps.structuredRuntime) return { kind: "failed", status: 409, message: "enrichment run is not awaiting validation" };
+  const settle = (outcome: Parameters<Store["settleEnrichmentValidation"]>[0]["outcome"]) => deps.store.settleEnrichmentValidation({ runId, expectedVersion: pending.version, outcome });
+  /** The failure settle can itself fail (a busy or failing database). It retries against the live version and never throws out of a failure path, so no failure leaves the run `validation_pending`. */
+  const settleFailure = (failure: Extract<Parameters<Store["settleEnrichmentValidation"]>[0]["outcome"], { kind: "failed" }>["failure"]): void => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const live = deps.store.getEnrichmentRun(runId);
+        if (!live || live.status !== "validation_pending") return;
+        if (deps.store.settleEnrichmentValidation({ runId, expectedVersion: live.version, outcome: { kind: "failed", failure } })) return;
+      } catch { console.error(`[enrichment] run ${runId} could not record its validation failure (attempt ${attempt})`); }
+    }
+  };
+  const proposal = { id: pending.proposalId, hash: pending.proposalHash, projectRevision: pending.projectRevision, operations: deps.store.listEnrichmentOperations(runId) };
+  try {
+    const { authChoice, deployment } = effectiveRouteOptions(deps);
+    const scope = captureEnrichmentScope(deps.store, pending, () => resolveUserProject(deps), signal, "validation_pending");
+    const result = await deps.structuredRuntime.validateEnrichment({ authChoice, ...(deployment ? { deployment } : {}), proposal, binding }, scope);
+    if (result.status === "validated") {
+      if (!settle({ kind: "validated", review: result.review })) return { kind: "failed", status: 409, message: "enrichment run changed while it was being validated" };
+      console.log(`[enrichment] run ${runId} validated`);
+      return { kind: "validated" };
+    }
+    settleFailure(result.failure);
+    console.error(`[enrichment] run ${runId} failed validation: ${result.failure.stage}/${result.failure.code}`);
+    return { kind: "failed", status: 422, message: result.failure.message };
+  } catch (error) {
+    const reason = VALIDATION_REASONS[error instanceof StructuredRuntimeError ? error.code : "failed"] ?? VALIDATION_REASONS["failed"]!;
+    settleFailure(runtimeFailure(reason.code, reason.message));
+    console.error(`[enrichment] run ${runId} validation ended: ${reason.code}`);
+    return { kind: "failed", status: reason.status, message: reason.message };
+  }
+}
+
+/**
+ * The structured operation a gated path needs. Enrichment entry points are named explicitly so they can never
+ * ride the generic `native` admission: the host PTY terminals have no OpenShell realization at all.
+ */
+function openShellOperationFor(pathname: string): StructuredOperation {
+  if (pathname === "/api/context/enrichment/start") return "enrich";
+  if (pathname.startsWith("/api/context/terminal/")) return "local_enrichment";
+  return pathname.includes("/setup/") ? "setup" : pathname.includes("/turns") ? "ask" : "native";
 }
 
 export function createApp(deps: TurnDeps) {
@@ -776,7 +909,7 @@ export function createApp(deps: TurnDeps) {
   app.use("/api/*", async (c, next) => {
     const pathname = new URL(c.req.url).pathname;
     if (c.req.method === "POST" && (openShellOperations.has(pathname) || /^\/api\/sessions\/[^/]+\/turns$/.test(pathname))) {
-      try { deps.structuredRuntime?.assertOperationSupported(resolveAuthChoice(deps), pathname.includes("/setup/") ? "setup" : pathname.includes("/turns") ? "ask" : "native"); }
+      try { deps.structuredRuntime?.assertOperationSupported(resolveAuthChoice(deps), openShellOperationFor(pathname)); }
       catch (error) { if (error instanceof StructuredRuntimeError) return c.json({ error: error.message, code: error.code }, 503); throw error; }
     }
     await next();
@@ -1298,6 +1431,9 @@ export function createApp(deps: TurnDeps) {
         return c.json({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(persisted) }], structuredContent: persisted } });
       }
       if (nativeSession.purpose === "context_enrichment" && request.params.name === NATIVE_ENRICHMENT_SUBMIT_MCP_TOOL_NAME) {
+        // A host-local submission has no OpenShell realization: refuse before any ledger write.
+        try { deps.structuredRuntime?.assertOperationSupported(resolveAuthChoice(deps), "local_enrichment"); }
+        catch (error) { if (error instanceof StructuredRuntimeError) return c.json({ jsonrpc: "2.0", id, error: { code: -32000, message: error.message } }, 503); throw error; }
         if (!isEnrichmentFoundationReady(deps)) return c.json({ jsonrpc: "2.0", id, error: { code: -32000, message: "enrichment is available only after Compile & bind succeeds" } }, 409);
         let binding: EnrichmentBinding;
         try {
@@ -1344,10 +1480,11 @@ export function createApp(deps: TurnDeps) {
 
   // Optional post-bind enrichment is separate from setup/context. It has its
   // own durable state and cannot change the Ask gate.
-  app.get("/api/context/enrichment", (c) => {
+  app.get("/api/context/enrichment", async (c) => {
     const latest = deps.store.getLatestEnrichmentRun();
     const foundationReady = isEnrichmentFoundationReady(deps);
-    return c.json({ available: foundationReady, foundationReady, capabilities: publicEnrichmentCapabilities(deps), run: latest ? publicActiveEnrichmentRun(deps, latest.id) : undefined });
+    const backend = deps.structuredRuntime?.usesOpenShell(resolveAuthChoice(deps)) === true ? "openshell" : "local";
+    return c.json({ available: foundationReady, foundationReady, backend, capabilities: await publicEnrichmentCapabilities(deps), run: latest ? publicLatestEnrichmentRun(deps, latest.id) : undefined });
   });
 
   app.get("/api/context/enrichment/:id", (c) => {
@@ -1363,8 +1500,13 @@ export function createApp(deps: TurnDeps) {
     if (!isEnrichmentFoundationReady(deps)) return c.json({ error: "enrichment is available only after Compile & bind succeeds" }, 409);
     const body = await c.req.json().catch(() => ({})) as { mode?: unknown };
     if (body.mode !== "grill" && body.mode !== "autopilot") return c.json({ error: "enrichment mode must be grill or autopilot" }, 400);
+    // The server selects the backend: under OpenShell a draft runs only through the OpenShell adapter and never
+    // falls back to the host-local runner. Readiness is proven before any durable run row exists.
+    const auth = resolveAuthChoice(deps);
+    const openShell = deps.structuredRuntime?.usesOpenShell(auth) === true;
     const runner = deps.enrichmentRunner;
-    if (!runner) return c.json({ error: "enrichment runtime is unavailable until a compatible draft runner is configured" }, 503);
+    if (!openShell && !runner) return c.json({ error: "enrichment runtime is unavailable until a compatible draft runner is configured" }, 503);
+    if (openShell && !(await deps.structuredRuntime!.enrichmentReadiness(auth))?.available) return c.json({ error: "Structured runtime unavailable.", code: "unavailable" }, 503);
     let binding: EnrichmentBinding;
     try {
       const current = currentEnrichmentBinding(deps);
@@ -1379,16 +1521,32 @@ export function createApp(deps: TurnDeps) {
     // terminal status (`finalizeEnrichmentDraft` or `failEnrichmentRun`) --
     // never leave it at 'drafting' -- the same discipline `executeTurn`
     // applies to every turn result.
-    const run = deps.store.createDraftingEnrichmentRun({ id: newId("enrichment"), mode: body.mode as EnrichmentMode, binding });
+    const run = deps.store.createDraftingEnrichmentRun({ id: newId("enrichment"), mode: body.mode as EnrichmentMode, binding, ...(openShell ? { backend: "openshell" as const } : {}) });
     console.log(`[enrichment] run ${run.id} started (mode=${body.mode}, revision=${binding.revision})`);
-    const outcome = await settleEnrichmentDraft(deps, run, binding, () => runner.draft({ projectPath: binding.path, mode: body.mode as EnrichmentMode, projectRevision: binding.revision }));
+    const mode = body.mode as EnrichmentMode;
+    const openShellDraft = async () => {
+      const { profileSource: _profile, agentId: _agent, ...options } = effectiveRouteOptions(deps);
+      const scope = captureEnrichmentScope(deps.store, run, () => resolveUserProject(deps), c.req.raw.signal);
+      try { return readOpenShellEnrichmentResult(await deps.structuredRuntime!.enrich({ ...options, mode, projectRevision: binding.revision }, scope)).draft; }
+      catch (error) {
+        // A draft the host contract rejects is a 400 contract_error, exactly as on the local path, not a runtime failure.
+        if (error instanceof StructuredRuntimeError && error.code === "contract") throw new EnrichmentContractError(error.detail ?? "enrichment draft was rejected by the host contract");
+        throw error;
+      }
+    };
+    const outcome = await settleEnrichmentDraft(deps, run, binding, openShell ? openShellDraft : () => runner!.draft({ projectPath: binding.path, mode, projectRevision: binding.revision }), openShell ? "pending" : "host");
     if (outcome.kind === "stale" || outcome.kind === "finalize_conflict") return c.json({ error: outcome.message }, 409);
     if (outcome.kind === "contract_error") return c.json({ error: outcome.message }, 400);
     if (outcome.kind === "refuted" || outcome.kind === "unavailable") return c.json({ error: outcome.message }, 422);
     if (outcome.kind === "runtime_error") return c.json({ error: outcome.message }, 503);
+    // An OpenShell proposal is recorded `validation_pending`; it reaches review only through the independent sandbox validator.
+    if (openShell) {
+      const validation = await validateOpenShellRun(deps, run.id, binding, c.req.raw.signal);
+      if (validation.kind === "failed") return c.json({ error: validation.message, code: "validation_failed", runId: run.id }, validation.status);
+    }
     // Autopilot may progress only one low-risk operation at a time; every
     // other risk remains a typed approval pause.
-    if (body.mode === "autopilot") {
+    if (body.mode === "autopilot" && !openShell) {
       // Continue through an initial low-risk append-only sequence, stopping
       // at the first escalation. Never silently skip past a high/conflict/
       // ambiguous operation to reach a later low-risk one.
@@ -1408,6 +1566,8 @@ export function createApp(deps: TurnDeps) {
     const body = await c.req.json().catch(() => ({})) as { operationId?: unknown; decision?: unknown; proposalHash?: unknown; projectRevision?: unknown; expectedVersion?: unknown };
     if (!run) return c.json({ error: "enrichment run not found" }, 404);
     if (run.status === "cancelled" || run.status === "completed") return c.json({ error: "enrichment run cannot be changed" }, 409);
+    { const refusal = validationRefusal(run); if (refusal) return c.json({ error: refusal }, 409); }
+    if (run.backend === "openshell") return c.json({ error: OPENSHELL_UNIT_MESSAGE }, 409);
     let binding: EnrichmentBinding | undefined;
     try { binding = currentEnrichmentBinding(deps); } catch { return c.json({ error: "enrichment run is stale because the active project is unavailable" }, 409); }
     if (!binding || !runMatchesBinding(run, binding)) return c.json({ error: "enrichment run is stale because the active binding or revision changed" }, 409);
@@ -1435,6 +1595,8 @@ export function createApp(deps: TurnDeps) {
     const body = await c.req.json().catch(() => ({})) as { operationId?: unknown; sink?: unknown; changeKind?: unknown; summary?: unknown; draft?: unknown; expectedVersion?: unknown };
     const expectedVersion = expectedEnrichmentVersion(body.expectedVersion);
     if (!run || typeof body.operationId !== "string" || expectedVersion === undefined) return c.json({ error: "stale or malformed enrichment edit" }, 409);
+    { const refusal = validationRefusal(run); if (refusal) return c.json({ error: refusal }, 409); }
+    if (run.backend === "openshell") return c.json({ error: OPENSHELL_EDIT_MESSAGE }, 409);
     let binding: EnrichmentBinding | undefined;
     try { binding = currentEnrichmentBinding(deps); } catch { return c.json({ error: "enrichment run is stale because the active project is unavailable" }, 409); }
     if (!binding || !runMatchesBinding(run, binding) || run.version !== expectedVersion) return c.json({ error: "enrichment run is stale because the active binding or version changed" }, 409);
@@ -1456,10 +1618,33 @@ export function createApp(deps: TurnDeps) {
     }
   });
 
+  // OpenShell apply-all: mint a one-use capability (explicit host action), then Apply with it, or Discard. Responses never carry source bytes.
+  const applyResponse = (c: Context, runId: string, outcome: ApplyOutcome) => {
+    c.header("Cache-Control", "no-store");
+    if (!outcome.ok) return c.json({ error: APPLY_MESSAGES[outcome.code], code: outcome.code, ...(outcome.terminal !== undefined ? { terminal: outcome.terminal } : {}), ...(outcome.rolledBack !== undefined ? { rolledBack: outcome.rolledBack } : {}), runId, ...(publicEnrichmentRun(deps, runId) ? { run: publicEnrichmentRun(deps, runId) } : {}) }, outcome.status);
+    return c.json({ code: outcome.code, ...(outcome.capability ? { capability: outcome.capability, expiresAt: outcome.expiresAt, reviewSha256: outcome.reviewSha256, changeSetSha256: outcome.changeSetSha256 } : {}),
+      ...(outcome.receipt ? { receipt: outcome.receipt, replay: outcome.replay === true } : {}), ...(outcome.revocationPending ? { revocationPending: true } : {}), runId, run: publicEnrichmentRun(deps, runId) }, outcome.status);
+  };
+  const applier = (c: Context) => deps.openShellEnrichmentApply ? undefined : c.json({ error: "enrichment apply is unavailable until the OpenShell apply host is configured", code: "apply_unavailable" }, 503);
+  app.post("/api/context/enrichment/:id/apply/authorize", (c) => {
+    const unavailable = applier(c); if (unavailable) return unavailable;
+    return applyResponse(c, c.req.param("id"), deps.openShellEnrichmentApply!.mint(c.req.param("id")));
+  });
+  app.post("/api/context/enrichment/:id/discard", (c) => {
+    const unavailable = applier(c); if (unavailable) return unavailable;
+    return applyResponse(c, c.req.param("id"), deps.openShellEnrichmentApply!.discard(c.req.param("id")));
+  });
+
   app.post("/api/context/enrichment/:id/apply", async (c) => {
-    const run = deps.store.getEnrichmentRun(c.req.param("id")); const body = await c.req.json().catch(() => ({})) as { operationId?: unknown; expectedVersion?: unknown };
+    const run = deps.store.getEnrichmentRun(c.req.param("id")); const body = await c.req.json().catch(() => ({})) as { operationId?: unknown; expectedVersion?: unknown; capability?: unknown; reviewSha256?: unknown };
+    if (run?.backend === "openshell") {
+      { const refusal = validationRefusal(run); if (refusal) return c.json({ error: refusal }, 409); }
+      const unavailable = applier(c); if (unavailable) return unavailable;
+      return applyResponse(c, run.id, deps.openShellEnrichmentApply!.apply(run.id, { capability: body.capability, reviewSha256: body.reviewSha256 }));
+    }
     const expectedVersion = expectedEnrichmentVersion(body.expectedVersion);
     if (!run || typeof body.operationId !== "string" || expectedVersion === undefined) return c.json({ error: "stale or malformed enrichment apply" }, 409);
+    { const refusal = validationRefusal(run); if (refusal) return c.json({ error: refusal }, 409); }
     let binding: EnrichmentBinding | undefined; try { binding = currentEnrichmentBinding(deps); } catch { return c.json({ error: "enrichment run is stale because the active project is unavailable" }, 409); }
     if (!binding || !runMatchesBinding(run, binding) || run.version !== expectedVersion) return c.json({ error: "enrichment run is stale because the active binding or version changed" }, 409);
     const result = await applyEnrichmentOperation(deps, run.id, body.operationId, expectedVersion);
@@ -1472,6 +1657,9 @@ export function createApp(deps: TurnDeps) {
     const body = await c.req.json().catch(() => ({})) as { operationId?: unknown; proposalHash?: unknown; projectRevision?: unknown; expectedVersion?: unknown };
     const expectedVersion = expectedEnrichmentVersion(body.expectedVersion);
     if (!run || typeof body.operationId !== "string" || expectedVersion === undefined || body.proposalHash !== run.proposalHash || body.projectRevision !== run.projectRevision) return c.json({ error: "stale or malformed enrichment approval" }, 409);
+    { const refusal = validationRefusal(run); if (refusal) return c.json({ error: refusal }, 409); }
+    // Approval is not part of the OpenShell flow (the apply capability is): it must never move an OpenShell operation to `ready`.
+    if (run.backend === "openshell") return c.json({ error: OPENSHELL_UNIT_MESSAGE }, 409);
     const operation = deps.store.getEnrichmentOperation(runId, body.operationId);
     if (!operation || operation.decision !== "accept" || operation.completed) return c.json({ error: "enrichment approval cannot be applied" }, 409);
     if (!deps.enrichmentApprovalProvider) return c.json({ error: "enrichment approval is unavailable until a trusted host approval provider is configured" }, 503);
@@ -1513,6 +1701,7 @@ export function createApp(deps: TurnDeps) {
     const run = deps.store.getEnrichmentRun(c.req.param("id")); const body = await c.req.json().catch(() => ({})) as { expectedVersion?: unknown };
     const expectedVersion = expectedEnrichmentVersion(body.expectedVersion);
     if (!run || expectedVersion === undefined) return c.json({ error: "stale or malformed enrichment reconciliation" }, 409);
+    if (run.backend === "openshell") return c.json({ error: OPENSHELL_UNIT_MESSAGE }, 409);
     let binding: EnrichmentBinding | undefined; try { binding = currentEnrichmentBinding(deps); } catch { return c.json({ error: "enrichment run is stale because the active project is unavailable" }, 409); }
     if (!binding || !runMatchesBinding(run, binding) || run.version !== expectedVersion) return c.json({ error: "enrichment run is stale because the active binding or version changed" }, 409);
     const operation = deps.store.listEnrichmentOperations(run.id).find((row) => row.state === "reconcile_required");
@@ -1532,6 +1721,7 @@ export function createApp(deps: TurnDeps) {
     const run = deps.store.getEnrichmentRun(c.req.param("id")); const body = await c.req.json().catch(() => ({})) as { operationId?: unknown; expectedVersion?: unknown };
     const expectedVersion = expectedEnrichmentVersion(body.expectedVersion);
     if (!run || typeof body.operationId !== "string" || expectedVersion === undefined) return c.json({ error: "stale or malformed enrichment reapply" }, 409);
+    if (run.backend === "openshell") return c.json({ error: OPENSHELL_UNIT_MESSAGE }, 409);
     let binding: EnrichmentBinding | undefined; try { binding = currentEnrichmentBinding(deps); } catch { return c.json({ error: "enrichment run is stale because the active project is unavailable" }, 409); }
     const operation = deps.store.getEnrichmentOperation(run.id, body.operationId);
     if (!binding || !runMatchesBinding(run, binding) || run.version !== expectedVersion || operation?.state !== "ready_to_reapply") return c.json({ error: "enrichment operation is not safely ready to reapply" }, 409);

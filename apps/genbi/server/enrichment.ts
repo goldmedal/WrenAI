@@ -12,22 +12,16 @@ import path from "node:path";
 export type EnrichmentMode = "grill" | "autopilot";
 export type EnrichmentRisk = "low" | "high" | "conflict" | "ambiguous";
 export type EnrichmentDecision = "accept" | "edit" | "skip";
-export type EnrichmentRunStatus = "drafting" | "awaiting_decision" | "awaiting_approval" | "ready" | "completed" | "cancelled" | "reconcile_required" | "failed";
+export type EnrichmentRunStatus = "drafting" | "validation_pending" | "validation_failed" | "awaiting_decision" | "awaiting_approval" | "ready" | "completed" | "cancelled" | "reconcile_required" | "failed"
+  /** OpenShell apply-all lifecycle: in flight, done, refused with evidence, rolled back, or discarded by the user. */
+  | "applying" | "applied" | "apply_refused" | "apply_failed" | "discarded";
 /**
- * Deliberately has no kind for "append a description to a model" (a change
- * that targets the same `models/<name>/metadata.yml` sink as `mdl_metric`
- * and `calculated_column`, but is neither). Adding one is not a host-only
- * change: `apply_enrichment` (the warble component that applies an approved
- * operation) already has to know a distinct per-`changeKind` merge shape for
- * every kind that shares that sink, and a description append would be a
- * third, different shape into the same file. That component's guardrails
- * are locked and out of scope here, so until it grows the case, a
- * model-description append has no valid `changeKind` and is refused by
- * `canonicalizeProposal` like any other invalid draft — not silently
- * reclassified as `mdl_metric`/`calculated_column`, which would misroute it.
+ * `description_append` adds or extends a `description` in an existing `models/<name>/metadata.yml`. It is OpenShell-only: the model returns a
+ * closed payload of descriptions (never the file), the host merges it line by line into the published snapshot's bytes, and the host-local
+ * ladder refuses the kind because only the OpenShell materialization and validator realize it.
  */
-export type EnrichmentChangeKind = "knowledge_append" | "new_cube" | "new_view" | "new_relationship" | "mdl_metric" | "calculated_column" | "conflict" | "ambiguous";
-export type EnrichmentOperationState = "awaiting_decision" | "awaiting_approval" | "ready" | "ready_to_reapply" | "applying" | "applied" | "skipped" | "reconcile_required";
+export type EnrichmentChangeKind = "knowledge_append" | "description_append" | "new_cube" | "new_view" | "new_relationship" | "mdl_metric" | "calculated_column" | "conflict" | "ambiguous";
+export type EnrichmentOperationState = "validation_pending" | "validation_failed" | "awaiting_decision" | "awaiting_approval" | "ready" | "ready_to_reapply" | "applying" | "applied" | "skipped" | "reconcile_required";
 /**
  * Model-authored confidence is display-only. It never participates in risk,
  * approval, or Auto-pilot eligibility. Numbers remain accepted internally so
@@ -144,7 +138,9 @@ export interface EnrichmentApprovalAttestation {
 
 export interface EnrichmentApprovalProvider { attest(input: EnrichmentApprovalRequest): Promise<EnrichmentApprovalAttestation>; }
 
-export class EnrichmentContractError extends Error {}
+/** Closed-vocabulary description of why a draft was refused; never carries model text. */
+export interface ProposalDiagnostic { readonly operations: number; readonly items: readonly { readonly fields: readonly string[]; readonly kind: string; readonly kind_length: string; readonly sink: string }[] }
+export class EnrichmentContractError extends Error { diagnostic?: ProposalDiagnostic; }
 
 /**
  * Identifies a project directory without requiring it to be built. This is
@@ -207,7 +203,10 @@ export function computeBoundProjectRevision(projectPath: string): string {
 // real `wren context init` produced, not a hand-written string, so this cannot drift again
 // unnoticed.
 const KNOWLEDGE_CATEGORIES = ["rules", "glossary", "metrics", "caveats", "sql"] as const;
-const SINKS: Record<EnrichmentChangeKind, RegExp> = { knowledge_append: new RegExp(`^knowledge/(?:${KNOWLEDGE_CATEGORIES.join("|")})/[a-z0-9_-]+\\.md$`, "i"), new_cube: /^cubes\/[a-z0-9_-]+\/metadata\.yml$/, new_view: /^views\/[a-z0-9_-]+\/metadata\.yml$/, new_relationship: /^relationships\.yml$/, mdl_metric: /^models\/[a-z0-9_-]+\/metadata\.yml$/, calculated_column: /^models\/[a-z0-9_-]+\/metadata\.yml$/, conflict: /^(?:models|views|cubes|knowledge)\/|^relationships\.yml$/, ambiguous: /^(?:models|views|cubes|knowledge)\/|^relationships\.yml$/ };
+const SINKS: Record<EnrichmentChangeKind, RegExp> = { knowledge_append: new RegExp(`^knowledge/(?:${KNOWLEDGE_CATEGORIES.join("|")})/[a-z0-9_-]+\\.md$`, "i"), new_cube: /^cubes\/[a-z0-9_-]+\/metadata\.yml$/, new_view: /^views\/[a-z0-9_-]+\/metadata\.yml$/, new_relationship: /^relationships\.yml$/, mdl_metric: /^models\/[a-z0-9_-]+\/metadata\.yml$/, description_append: /^models\/[a-z0-9_-]+\/metadata\.yml$/, calculated_column: /^models\/[a-z0-9_-]+\/metadata\.yml$/, conflict: /^(?:models|views|cubes|knowledge)\/|^relationships\.yml$/, ambiguous: /^(?:models|views|cubes|knowledge)\/|^relationships\.yml$/ };
+const FILE_SINK_KINDS: readonly EnrichmentChangeKind[] = ["knowledge_append", "description_append", "new_cube", "new_view", "new_relationship", "mdl_metric", "calculated_column"];
+/** True when `sink` is a file an applicable (non conflict/ambiguous) enrichment change may write. The host re-checks this before materializing. */
+export function isEnrichmentSink(sink: string): boolean { return FILE_SINK_KINDS.some((kind) => SINKS[kind].test(sink)); }
 function riskFor(kind: EnrichmentChangeKind): EnrichmentRisk { if (kind === "conflict") return "conflict"; if (kind === "ambiguous") return "ambiguous"; return kind === "knowledge_append" ? "low" : "high"; }
 
 const MAX_OPERATIONS = 20;
@@ -259,7 +258,34 @@ export function hashEnrichmentOperation(operation: Pick<EnrichmentOperation, "id
   return `sha256:${createHash("sha256").update(JSON.stringify([operation.id, operation.sink, operation.risk, operation.changeKind, operation.summary, operation.draft])).digest("hex")}`;
 }
 
+const DIAGNOSTIC_FIELDS = ["sink", "changeKind", "summary", "draft", "confidence", "id", "hash", "risk"] as const;
+const KNOWN_KINDS = ["knowledge_append", "description_append", "new_cube", "new_view", "new_relationship", "mdl_metric", "calculated_column", "conflict", "ambiguous"] as const;
+/** Likely model inventions, matched exactly (lowercased) so a hostile string can only ever map to `other`. */
+const LIKELY_KINDS = ["description", "column_description", "description_update", "description_add", "model_description", "add_description", "metadata", "mdl_description", "mdl_column", "new_column", "column", "model", "metric",
+  "relationship", "cube", "view", "knowledge", "append", "update", "edit", "add", "mdl_update", "mdl_append"] as const;
+const bucket = (length: number): string => length === 0 ? "0" : length <= 16 ? "1-16" : length <= 32 ? "17-32" : length <= 64 ? "33-64" : "65+";
+/** Maps a refused draft onto fixed vocabularies only: present field names, the kind through an allowlist (else `other`), length buckets and a sink class. */
+export function diagnoseProposalDraft(draft: unknown): ProposalDiagnostic {
+  const operations = record(draft) && Array.isArray((draft as { operations?: unknown }).operations) ? (draft as { operations: unknown[] }).operations : [];
+  return { operations: Math.min(operations.length, 1000), items: operations.slice(0, MAX_OPERATIONS).map((raw) => {
+    const operation = record(raw) ?? {};
+    const kind = operation.changeKind;
+    const lowered = typeof kind === "string" ? kind.toLowerCase() : "";
+    const sink = typeof operation.sink === "string" ? operation.sink : "";
+    return { fields: DIAGNOSTIC_FIELDS.filter((field) => operation[field] !== undefined),
+      kind: kind === undefined ? "missing" : typeof kind !== "string" ? "non_string" : (KNOWN_KINDS as readonly string[]).includes(kind) ? kind : (LIKELY_KINDS as readonly string[]).includes(lowered) ? lowered : "other",
+      kind_length: typeof kind === "string" ? bucket(kind.length) : "0",
+      sink: !sink ? "missing" : /\.\.|^\//.test(sink) ? "traversal" : /^knowledge\//.test(sink) ? "knowledge" : /^models\//.test(sink) ? "models" : /^views\//.test(sink) ? "views" : /^cubes\//.test(sink) ? "cubes" : sink === "relationships.yml" ? "relationships" : "other" };
+  }) };
+}
+/** True when `sink` is the file shape this change kind is allowed to write. */
+export function sinkMatchesKind(kind: EnrichmentChangeKind, sink: string): boolean { return Object.hasOwn(SINKS, kind) && SINKS[kind].test(sink); }
+
 export function canonicalizeProposal(draft: unknown, revision: string): EnrichmentProposal {
+  try { return canonicalizeProposalUnchecked(draft, revision); }
+  catch (error) { if (error instanceof EnrichmentContractError && !error.diagnostic) error.diagnostic = diagnoseProposalDraft(draft); throw error; }
+}
+function canonicalizeProposalUnchecked(draft: unknown, revision: string): EnrichmentProposal {
   const input = record(draft);
   if (!input || !Array.isArray(input.operations)) throw new EnrichmentContractError("enrichment proposal must be an object with an operations array");
   if (input.operations.length === 0) throw new EnrichmentContractError("enrichment proposal has no operations");

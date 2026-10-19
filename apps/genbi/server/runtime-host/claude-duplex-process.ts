@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { Readable, Writable } from "node:stream";
 import type { SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 import type { OpenShellDuplex } from "./openshell-types.js";
-import { ClaudeLineFrames, ClaudeProtocolFault, CLAUDE_TRANSPORT_LIMITS as L, type ClaudeRawProtocol } from "./claude-protocol.js";
+import { ClaudeLineFrames, ClaudeProtocolFault, CLAUDE_INERT_FRAME_CAP, faultSiteOf, isInertShape, type ClaudeFaultSite, type ClaudeFrameCounts, CLAUDE_TRANSPORT_LIMITS as L, type ClaudeRawProtocol } from "./claude-protocol.js";
 
 /** Local bounded admission; OpenShell write has no upstream drain. EOF is unsupported. */
 export class ClaudeDuplexProcess extends EventEmitter implements SpawnedProcess {
@@ -12,6 +12,10 @@ export class ClaudeDuplexProcess extends EventEmitter implements SpawnedProcess 
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   private active = true;
+  /** First rule the stream broke; internal diagnostics only. */
+  faultSite: ClaudeFaultSite | undefined;
+  faultCounts: ClaudeFrameCounts | undefined;
+  private inertFrames = 0;
   private admitted = 0;
   private outputBytes = 0;
   private frames = 0;
@@ -26,7 +30,7 @@ export class ClaudeDuplexProcess extends EventEmitter implements SpawnedProcess 
     super();
     this.on("error", () => {}); this.stdout.on("error", () => {});
     this.stdin = new Writable({ highWaterMark: 65536, write: (chunk: Buffer, _encoding, callback) => {
-      void this.ready.then(() => { this.check(); for (const frame of this.input.feed(chunk)) { if (++this.frames > L.frames) throw new ClaudeProtocolFault("overload"); this.options.protocol.host(frame.value); this.options.protocol.secretSafe(frame.bytes); for (let offset = 0; offset < frame.bytes.length; offset += L.chunk) this.stream!.write(frame.bytes.subarray(offset, offset + L.chunk)); } }).then(() => callback(), () => { this.fail("protocol"); callback(new ClaudeProtocolFault("protocol")); });
+      void this.ready.then(() => { this.check(); for (const frame of this.input.feed(chunk)) { if (isInertShape(frame.value) ? ++this.inertFrames > CLAUDE_INERT_FRAME_CAP : ++this.frames > L.frames) throw new ClaudeProtocolFault("overload"); this.options.protocol.host(frame.value); this.options.protocol.secretSafe(frame.bytes); for (let offset = 0; offset < frame.bytes.length; offset += L.chunk) this.stream!.write(frame.bytes.subarray(offset, offset + L.chunk)); } }).then(() => callback(), (error: unknown) => { this.fail("protocol", faultSiteOf(error)); callback(new ClaudeProtocolFault("protocol")); });
     }, final: (callback) => { this.fail("cancelled"); callback(); } });
     this.stdin.on("error", () => {});
     // Admission happens before Writable's own queue, including producers ignoring write(false).
@@ -68,7 +72,7 @@ export class ClaudeDuplexProcess extends EventEmitter implements SpawnedProcess 
         if (event.stream === "stderr") continue;
         if (this.stdout.readableLength + this.output.bufferedBytes + event.data.length > L.unread) throw new ClaudeProtocolFault("overload");
         for (const frame of this.output.feed(event.data)) {
-          if (++this.frames > L.frames) throw new ClaudeProtocolFault("overload");
+          if (isInertShape(frame.value) ? ++this.inertFrames > CLAUDE_INERT_FRAME_CAP : ++this.frames > L.frames) throw new ClaudeProtocolFault("overload");
           if (!prelude) { this.options.admitPrelude!(frame.value); prelude = true; continue; }
           this.options.protocol.secretSafe(frame.bytes); this.options.protocol.worker(frame.value);
           if (this.stdout.readableLength + frame.bytes.length > L.unread) throw new ClaudeProtocolFault("overload");
@@ -76,10 +80,11 @@ export class ClaudeDuplexProcess extends EventEmitter implements SpawnedProcess 
         }
       }
       if (!exited || await stream.done !== 0) throw new ClaudeProtocolFault("protocol");
-    } catch (error) { this.fail(error instanceof ClaudeProtocolFault ? error.code : "protocol"); }
+    } catch (error) { this.fail(error instanceof ClaudeProtocolFault ? error.code : "protocol", faultSiteOf(error)); }
   }
-  private fail(code: ClaudeProtocolFault["code"]): void {
+  private fail(code: ClaudeProtocolFault["code"], site?: ClaudeFaultSite): void {
     if (!this.active) return;
+    if (this.faultSite === undefined) { this.faultSite = site ?? (code === "protocol" ? "unspecified" : code); this.faultCounts = this.options.protocol.frameCounts?.(); }
     this.active = false; this.killed = true; this.controller.abort(); this.stream?.close();
     this.emit("error", new ClaudeProtocolFault(code)); this.stdout.destroy(new ClaudeProtocolFault(code)); this.stdin.destroy(new ClaudeProtocolFault(code));
     void this.close().catch(() => {});

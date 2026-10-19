@@ -226,6 +226,8 @@ export interface TurnDeps {
   /** Optional post-bind enrichment seams; absence is an intentional fail-closed runtime wall. */
   readonly enrichmentRunner?: EnrichmentRunner;
   readonly enrichmentApplyRunner?: EnrichmentApplyRunner;
+  /** Apply-all and Discard for OpenShell-validated enrichment reviews (one-use capability, journal, recovery). Absent: those routes answer 503. */
+  readonly openShellEnrichmentApply?: import("./enrichment-apply.js").EnrichmentApplier;
   readonly enrichmentApprovalProvider?: EnrichmentApprovalProvider;
   /**
    * Points every subsequent `wren` CLI subprocess (via `harness/exec/local.ts`'s
