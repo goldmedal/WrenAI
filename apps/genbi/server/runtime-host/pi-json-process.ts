@@ -27,7 +27,9 @@ export class PiStepChannel {
   private rejectFinished!: (error: unknown) => void;
   private readonly ready: Promise<void>;
   constructor(private readonly options: { signal: AbortSignal; protocol: PiStepProtocol; bootstrap: Buffer; connect(signal: AbortSignal): Promise<OpenShellDuplex>; check(): void;
-    cleanup(reason: PiCleanupReason): Promise<void>; onCall(call: PiToolCall): void; onSettled(): void }) {
+    cleanup(reason: PiCleanupReason): Promise<void>; onCall(call: PiToolCall): void; onSettled(): void;
+    /** Session sandbox only: the first worker frame is the private step receipt and goes here, never to the protocol. */
+    admitPrelude?(value: unknown): void }) {
     this.finished = new Promise<void>((resolve, reject) => { this.resolveFinished = resolve; this.rejectFinished = reject; });
     this.finished.catch(() => {});
     this.abort = () => this.failWith("cancelled"); options.signal.addEventListener("abort", this.abort, { once: true });
@@ -61,6 +63,7 @@ export class PiStepChannel {
   }
   private async consume(stream: OpenShellDuplex): Promise<void> {
     let exited = false;
+    let prelude = this.options.admitPrelude === undefined;
     try {
       for await (const event of stream.output) {
         this.check();
@@ -74,6 +77,7 @@ export class PiStepChannel {
         if (event.stream === "stderr") continue;
         for (const frame of this.output.feed(event.data)) {
           if (++this.frames > L.frames) throw new PiProtocolFault("overload");
+          if (!prelude) { this.options.admitPrelude!(frame.value); prelude = true; continue; }
           this.effect(this.options.protocol.worker(frame.value));
         }
       }

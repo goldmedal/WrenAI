@@ -21,7 +21,8 @@ import type { InteractiveLaunchSpec, InteractiveTarget, InteractiveTerminalSessi
 import { newId, type NativeSessionPurpose, type NativeSessionRow, type NativeSessionVendor, type NativeSetupRecoveryCode, type NativeSetupRecoveryRow, type NativeSetupRecoveryState, type Store } from "./db.js";
 import { NATIVE_MCP_CREDENTIAL_ENV_VAR, type NativeArtifactService, type NativeMcpDescriptor, type NativeMcpHealth } from "./native-artifacts.js";
 import { dispatchForPurpose, NATIVE_DISPATCH_REGISTRY, NATIVE_PURPOSES, nativeTargetLabel, sameNativeRuntimeBinding, targetForProvider } from "./native-dispatch-registry.js";
-import type { NativePurpose, NativeRuntimeBinding, NativeVendor } from "./native-dispatch-registry.js";
+import { PI_SCOPED_TARGET } from "./native-dispatch-registry.js";
+import type { NativePurpose, NativeRuntimeBinding, NativeScopedTarget, NativeScopedVendor, NativeVendor } from "./native-dispatch-registry.js";
 import { createNativeSessionWorkspace, initializeNativeSessionStateBase, nativeSessionStateBaseAvailable, nativeSessionStateBaseAvailableForProject, validateNativeSessionWorkspace } from "./native-session-workspace.js";
 import type { NativeSessionStateBase } from "./native-session-workspace.js";
 import { NativeWrenRuntimeError, resolveNativeWrenRuntime } from "./native-wren-runtime.js";
@@ -183,7 +184,7 @@ export function nativeSessionLifecycle(
   if (row.status === "creating" || row.status === "running" || row.status === "detached") {
     return { liveAction: "reattach", resumeAvailable: false };
   }
-  const target = row.vendor === "claude" ? "Claude" : "Codex";
+  const target = row.vendor === "claude" ? "Claude" : row.vendor === "pi" ? "pi" : "Codex";
   if (resumeAvailability.available) {
     return { liveAction: "resume", resumeAvailable: true, reason: `Resume continues the retained ${target} conversation in a new isolated terminal.` };
   }
@@ -226,13 +227,13 @@ export interface NativeProducerReadiness {
 export interface NativePurposeReadiness {
   readonly scopeKind: "bootstrap" | "bound_project";
   readonly profile: string;
-  readonly target?: InteractiveTarget;
+  readonly target?: InteractiveTarget | NativeScopedTarget;
   readonly targetLabel?: string;
   readonly available: boolean;
   readonly reason?: string;
   readonly producer?: NativeProducerReadiness;
-  /** Compatibility shape retained empty; native target authority is `target`. */
-  readonly vendors: Record<NativeVendor, NativeVendorReadiness>;
+  /** Compatibility shape retained empty; native target authority is `target`. `pi` appears only on an OpenShell + pi boot, which reports it independently of the terminal vendors. */
+  readonly vendors: Record<NativeVendor, NativeVendorReadiness> & { readonly pi?: NativeVendorReadiness };
 }
 
 export type NativeSessionReadiness = {
@@ -351,7 +352,7 @@ export interface NativeProfileReadiness {
   readonly id: string;
   readonly scopeKind: "bound_project";
   readonly profile: string;
-  readonly target?: InteractiveTarget;
+  readonly target?: InteractiveTarget | NativeScopedTarget;
   readonly targetLabel?: string;
   readonly available: boolean;
   readonly reason?: string;
@@ -1241,7 +1242,7 @@ export class NativeSessionService {
   }
 
   /** Why this boot does not offer the vendor, or undefined when it does (or no selection is wired). */
-  private vendorNotOffered(vendor: NativeVendor): string | undefined {
+  private vendorNotOffered(vendor: NativeScopedVendor): string | undefined {
     const offer = this.options.selection?.offers[vendor];
     return offer && !offer.offered ? `The ${vendor} backend is not offered: ${offer.reason}` : undefined;
   }
@@ -1252,7 +1253,7 @@ export class NativeSessionService {
     const backends = Object.fromEntries(BACKENDS.map((name) => {
       const offer = selection.offers[name];
       if (!offer.offered) return [name, { offered: false, state: "not_offered" as const, ...(offer.reason ? { reason: offer.reason } : {}) }];
-      const state = name !== "pi" && purposes.analysis.vendors?.[name]?.available ? "ready" as const : "unavailable" as const;
+      const state = purposes.analysis.vendors?.[name]?.available ? "ready" as const : "unavailable" as const;
       return [name, { offered: true, state }];
     })) as NativeRuntimeSelectionReadiness["backends"];
     return { runtimeSelection: { runtime: selection.runtime, backends } };
@@ -1336,7 +1337,7 @@ export class NativeSessionService {
     const binding = input.purpose === "setup" ? undefined : this.options.getBinding();
     const profileId = requestedProfileId(input.purpose, input.profile);
     const entryVerb = selectedNativeEntry(input.purpose, dispatch.provider, input.entryVerb);
-    const reusable = this.list().find((row) => this.matchesOpenScope(row, input.purpose, dispatch.target, runtime.generation, binding, profileId) && selectedNativeEntry(row.purpose, row.vendor, row.entryVerb) === entryVerb);
+    const reusable = this.list().find((row) => row.vendor !== "pi" && this.matchesOpenScope(row, input.purpose, dispatch.target, runtime.generation, binding, profileId) && selectedNativeEntry(row.purpose, row.vendor, row.entryVerb) === entryVerb);
     if (reusable) {
       const recoveryCapability = this.recoveryCapabilities.get(reusable.id);
       return { row: reusable, capability: this.liveCapability(reusable.id)!, ...(recoveryCapability ? { recoveryCapability } : {}) };
@@ -1469,6 +1470,8 @@ export class NativeSessionService {
   }
 
   private resumeScope(row: NativeSessionRow): { readonly binding: EnrichmentBinding | undefined; readonly runtime: NativeRuntimeBinding; readonly dispatch: ResumeDispatch } | undefined {
+    // pi only ever holds an OpenShell scoped session, which no host terminal can resume.
+    if (row.vendor === "pi") return undefined;
     const storedRuntime = this.options.store.getNativeRuntimeBinding();
     const runtime: NativeRuntimeBinding = !storedRuntime.configured && this.legacyFixtureMode()
       ? { configured: true, generation: 0, provider: row.vendor, target: targetForProvider(row.vendor), targetLabel: nativeTargetLabel(row.vendor) }
@@ -1496,6 +1499,7 @@ export class NativeSessionService {
   }
 
   private async resumeReserved(source: NativeSessionRow, idempotencyKey: string, scope: { readonly binding: EnrichmentBinding | undefined; readonly runtime: NativeRuntimeBinding; readonly dispatch: ResumeDispatch }): Promise<NativeSessionLaunch> {
+    if (source.vendor === "pi") throw new InteractiveLaunchError("native session resume is unavailable");
     const fingerprint = resumeScopeFingerprint(source);
     const existing = this.options.store.getNativeSessionResumeAction(source.id, idempotencyKey);
     if (existing) {
@@ -1531,7 +1535,7 @@ export class NativeSessionService {
 
   private async recoverReservedResume(id: string, scope: { readonly binding: EnrichmentBinding | undefined; readonly runtime: NativeRuntimeBinding; readonly dispatch: ResumeDispatch }): Promise<NativeSessionLaunch> {
     const row = this.get(id);
-    if (!row) throw new InteractiveLaunchError("native session resume is unavailable");
+    if (!row || row.vendor === "pi") throw new InteractiveLaunchError("native session resume is unavailable");
     const terminal = this.sessions.get(row.id);
     if (terminal) return { row, capability: terminal.capability };
     // Store reconciliation marks an unstarted reservation `interrupted` on a
@@ -1704,16 +1708,24 @@ export class NativeSessionService {
     const runtimeHostReadiness = await this.runtimeHost.probe();
     if (runtimeHostReadiness.selected === "openshell") {
       const scoped = await this.options.openShellNative?.readiness();
-      const claudeRefusal = this.vendorNotOffered("claude");
-      const reason = claudeRefusal ?? (scoped?.state === "ready" ? undefined : scoped?.message ?? "OpenShell scoped analysis is unavailable.");
+      // An OpenShell boot holds exactly one scoped model vendor. pi is reported on its own: the terminal vendors are never evidence for it.
+      const pi = this.options.selection?.offers.pi.offered === true;
+      const runtime = this.options.store.getNativeRuntimeBinding();
+      const vendorRefusal = this.vendorNotOffered(pi ? "pi" : "claude");
+      const bindingRefusal = pi && !(runtime.configured && runtime.provider === "pi") ? "Select an API key or gateway Runtime binding for pi." : undefined;
+      const reason = vendorRefusal ?? bindingRefusal ?? (scoped?.state === "ready" ? undefined : scoped?.message ?? "OpenShell scoped analysis is unavailable.");
       const purposes = Object.fromEntries(NATIVE_PURPOSES.map((purpose) => [purpose, {
         scopeKind: NATIVE_DISPATCH_REGISTRY[purpose].scopeKind, profile: NATIVE_DISPATCH_REGISTRY[purpose].profile,
-        target: "claude-code:interactive", targetLabel: "OpenShell scoped analysis",
-        available: purpose === "analysis" && reason === undefined, ...(purpose !== "analysis" ? { reason: "This purpose is unavailable. Official Claude TUI is unavailable." } : reason ? { reason } : {}),
-        vendors: { codex: { available: false, ...(this.vendorNotOffered("codex") ? { reason: this.vendorNotOffered("codex")! } : {}) }, claude: { available: purpose === "analysis" && reason === undefined } },
+        target: pi ? PI_SCOPED_TARGET : "claude-code:interactive", targetLabel: "OpenShell scoped analysis",
+        available: purpose === "analysis" && reason === undefined,
+        ...(purpose !== "analysis" ? { reason: pi ? "This purpose is unavailable for pi scoped sessions." : "This purpose is unavailable. Official Claude TUI is unavailable." } : reason ? { reason } : {}),
+        vendors: pi
+          ? { codex: { available: false, ...(this.vendorNotOffered("codex") ? { reason: this.vendorNotOffered("codex")! } : {}) }, claude: { available: false, ...(this.vendorNotOffered("claude") ? { reason: this.vendorNotOffered("claude")! } : {}) },
+            pi: { available: purpose === "analysis" && reason === undefined, ...(purpose !== "analysis" ? { reason: "This purpose is unavailable for pi scoped sessions." } : reason ? { reason } : {}) } }
+          : { codex: { available: false, ...(this.vendorNotOffered("codex") ? { reason: this.vendorNotOffered("codex")! } : {}) }, claude: { available: purpose === "analysis" && reason === undefined } },
       }])) as Record<NativePurpose, NativePurposeReadiness>;
-      return { runtime: this.options.store.getNativeRuntimeBinding(), runtimeHost: runtimeHostReadiness, purposes, ...this.runtimeSelectionReadiness(purposes), ...purposes,
-        mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason: "Scoped sessions use host-governed analysis tools. Official Claude TUI is unavailable." } };
+      return { runtime, runtimeHost: runtimeHostReadiness, purposes, ...this.runtimeSelectionReadiness(purposes), ...purposes,
+        mcp: { server: "GenBI MCP", tool: "save_dashboard", destination: "GenBI Artifacts", available: false, reason: pi ? "Scoped sessions use host-governed analysis tools. No terminal is offered for pi." : "Scoped sessions use host-governed analysis tools. Official Claude TUI is unavailable." } };
     }
     if (runtimeHostReadiness.selected === "codex-app-server") {
       const runtime = this.options.store.getNativeRuntimeBinding();
@@ -1848,7 +1860,7 @@ export class NativeSessionService {
       }));
       return legacy as unknown as NativeSessionReadiness;
     }
-    const profiles = await this.conversationProfileReadiness(result.analysis, runtime.configured ? runtime.provider : undefined);
+    const profiles = await this.conversationProfileReadiness(result.analysis, runtime.configured && runtime.provider !== "pi" ? runtime.provider : undefined);
     return {
       runtime,
       runtimeHost: runtimeHostReadiness,
@@ -1876,7 +1888,7 @@ export class NativeSessionService {
 
   private async createCaptured(input: NativeLaunchInput, binding = input.purpose === "setup" ? undefined : this.options.getBinding(), capturedRuntime = this.options.store.getNativeRuntimeBinding(), resumed?: { readonly row: NativeSessionRow; readonly handle: string }): Promise<NativeSessionLaunch> {
     this.assertRuntimeDispatchable();
-    const runtimeReadiness = await this.assertSelectedRuntimeReady(capturedRuntime.configured ? capturedRuntime.provider : input.vendor);
+    const runtimeReadiness = await this.assertSelectedRuntimeReady(capturedRuntime.configured && capturedRuntime.provider !== "pi" ? capturedRuntime.provider : input.vendor);
     const purpose = input.purpose;
     const legacyRuntime = !capturedRuntime.configured && input.vendor
       ? { configured: true as const, generation: 0, provider: input.vendor, target: targetForProvider(input.vendor), targetLabel: nativeTargetLabel(input.vendor) }
@@ -2448,7 +2460,7 @@ export class NativeSessionService {
         this.options.store.stopNativeSessionAndRevokeRecoveryAction(input.id);
         return undefined;
       }
-      return await this.create({ purpose: "setup", ...(this.legacyFixtureMode() ? { vendor: session.vendor } : {}) });
+      return await this.create({ purpose: "setup", ...(this.legacyFixtureMode() && session.vendor !== "pi" ? { vendor: session.vendor } : {}) });
     } catch (error) {
       this.options.store.releaseNativeSetupRecoveryAction(input.id);
       throw error;

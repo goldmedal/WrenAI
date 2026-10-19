@@ -183,7 +183,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         const captured = modelScope;
         // Every step sandbox is preceded by the read-only gateway proof; a changed provider or profile never reaches a launch.
         await assertGatewayCurrent(parent); check();
-        const provider = observeStructured(options.diagnostics, "provider_setup", () => composition.piProvider!({ scope: captured, currentScope: () => { try { check(); return captured; } catch { return undefined; } }, models, assertCurrent: check, assertExecutableCurrent }));
+        const provider = observeStructured(options.diagnostics, "provider_setup", () => composition.piProvider!({ ...(ask?.modelSession ? { modelSession: ask.modelSession } : {}), scope: captured, currentScope: () => { try { check(); return captured; } catch { return undefined; } }, models, assertCurrent: check, assertExecutableCurrent }));
         return observeStructuredAsync(options.diagnostics, "provider_open", () => provider.openStep!(model, tier, parent));
       };
       const openStep = async (model: string, tier: string, parent: AbortSignal) => {
@@ -272,15 +272,17 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       enrichmentApprovedFiles: () => composition.applyInventory?.()?.approvedFiles,
     }),
   };
-  if (!pi) provisioner.reserveSession = async input => {
+  provisioner.reserveSession = async input => {
     const signal = input.scope.signal;
     if (!signal || !composition.lifecycle?.modelIdentity) throw unavailable();
     const status = structuredClone(checkConfiguration()), binding = structuredClone(options.getBinding()!), settings = structuredClone(options.store.getRuntimeSettings());
     const generation = options.store.getNativeRuntimeBinding().generation, home = options.sourceWrenHome();
     const check = () => { signal.throwIfAborted(); input.scope.assertCurrent(); options.assertConfigurationCurrent();
-      if (!isDeepStrictEqual(status, composition.claudeVault?.status()) || !isDeepStrictEqual(binding, options.getBinding())
+      if (!isDeepStrictEqual(status, currentStatus()) || !isDeepStrictEqual(binding, options.getBinding())
         || !isDeepStrictEqual(settings, options.store.getRuntimeSettings()) || generation !== options.store.getNativeRuntimeBinding().generation || home !== options.sourceWrenHome()) throw new StructuredRuntimeError("stale"); };
     check();
+    // The gateway objects are proven before any session sandbox is reserved, as they are before every step sandbox.
+    if (pi) { await assertGatewayCurrent(signal); check(); }
     const preparationScope = { backend: "openshell" as const, account: status.fingerprint!, generation: status.generation!, session: input.scope.sessionId, turn: input.scope.turnId,
       binding: binding.identity, bindingGeneration: String(binding.generation), bindingRevision: binding.revision,
       context: planDigest({ binding: binding.revision }), plan: planDigest({ purpose: "analysis", entry: "answer_query", profile: options.profileSource }),
@@ -294,7 +296,14 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
       captured = await provisioner.prepare({ ...input, scope: { ...input.scope, signal: AbortSignal.any([signal, effect.signal]), assertCurrent() { effect.assertActive(); check(); } }, persistRoot: async () => { throw new StructuredRuntimeError("failed"); }, onEvent() {} });
       const identity = captured.sessionIdentity!(); captured.assertCurrent(); check();
       const permit = await composition.lifecycle.prepareLaunch(identity, () => { try { check(); return identity; } catch { return undefined; } }, signal);
-      try { check(); return await launchOpenShellModelSession(composition.lifecycle, permit, identity); } catch (error) { permit.release(); throw error; }
+      let session: Awaited<ReturnType<typeof launchOpenShellModelSession>>;
+      try { check(); session = await launchOpenShellModelSession(composition.lifecycle, permit, identity, pi ? "pi" : "claude"); } catch (error) { permit.release(); throw error; }
+      if (pi) {
+        // A gateway change between turns revokes the live session at once: its sandbox is destroyed, which interrupts it. The proof is read-only.
+        const watch = watchGateway(session.signal, () => { void session.close().catch(() => {}); });
+        session.signal.addEventListener("abort", watch.stop, { once: true }); if (session.signal.aborted) watch.stop();
+      }
+      return session;
     } finally { await captured?.dispose(); effect.release(); }
   };
   return provisioner;

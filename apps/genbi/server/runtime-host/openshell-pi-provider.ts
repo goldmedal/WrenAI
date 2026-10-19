@@ -5,6 +5,7 @@ import type { StepRun } from "../../harness/components/runner.js";
 import type { NativeComponentVendor } from "../native-component-runtime.js";
 import type { OpenShellLease, OpenShellLifecycle } from "./openshell-lifecycle.js";
 import { openShellIdentitySchema, type OpenShellIdentity } from "./openshell-types.js";
+import { claimOpenShellSessionStep, type OpenShellModelSession } from "./openshell-model-session.js";
 import { PiStepChannel, type PiCleanupReason } from "./pi-json-process.js";
 import type { PiComponentRuntime } from "./pi-component-step.js";
 import { PI_PROC_CHECK_ARGV, PI_WORKER_ARGV, PiProtocolFault, PiStepProtocol, buildPiBootstrap, piEndpointSchema, sha256Hex, type PiEndpointConfig, type PiStepSpec, type PiThinking } from "./pi-protocol.js";
@@ -33,13 +34,16 @@ export function piAccountDigest(config: Pick<PiProviderConfig, "provider" | "pro
 export const piAccountLabel = (config: Pick<PiProviderConfig, "displayLabel">) => `pi (${config.displayLabel})`;
 
 type Scope = Omit<Extract<OpenShellIdentity, { purpose: "model" }>, "purpose" | "operation" | "snapshot" | "invocation" | "step" | "attempt" | "model" | "tier">;
-export interface PiCleanupReport { readonly reason: PiCleanupReason; readonly processes: "clear" | "residue" | "unavailable" | "timeout" | "not_checked"; readonly teardown: "proven" | "failed" }
+/** A step in its own sandbox proves absence by the /proc check and the teardown; a step in an owned session proves it by the session's step control, and the sandbox stays. */
+export interface PiCleanupReport { readonly reason: PiCleanupReason; readonly processes: "clear" | "residue" | "unavailable" | "timeout" | "not_checked" | "controlled"; readonly teardown: "proven" | "failed" | "not_required" }
 export interface PiProviderOptions {
   lifecycle: OpenShellLifecycle;
   config: PiProviderConfig;
   /** Captured tier map; the step model must be one of its values. */
   models: Readonly<Record<string, string>>;
   scope: Scope;
+  /** Owned session sandbox: every step is a fresh process inside it, claimed through the session's step control instead of a sandbox launch. */
+  modelSession?: OpenShellModelSession;
   currentScope(): Scope | undefined;
   assertCurrent(): void;
   assertExecutableCurrent?(): void;
@@ -85,17 +89,20 @@ export function createOpenShellPiProvider(options: PiProviderOptions): NativeCom
       const tier = requestedTier ?? Object.keys(models).find(name => models[name] === model); if (!tier || models[tier] !== model) throw new PiProtocolFault("protocol");
       const step = randomUUID(), invocation = randomUUID();
       const identity = Object.freeze(openShellIdentitySchema.parse({ ...scope, purpose: "model", operation: "step", snapshot: "none", invocation, step, attempt: 1, model, tier })) as Extract<OpenShellIdentity, { purpose: "model" }>;
-      let lease: OpenShellLease | undefined; let channel: PiStepChannel | undefined; let run: StepRun | undefined;
+      let lease: OpenShellLease | undefined; let sessionStep: ReturnType<typeof claimOpenShellSessionStep> | undefined; let channel: PiStepChannel | undefined; let run: StepRun | undefined;
       const current = () => { try { check(); return identity; } catch { return undefined; } };
-      const assertCurrent = () => { signal.throwIfAborted(); check(); lease?.assertActive(); };
+      const assertCurrent = () => { signal.throwIfAborted(); check(); lease?.assertActive(); sessionStep?.assertActive(); };
       let closing: Promise<void> | undefined;
-      const close = () => closing ??= channel ? channel.close() : (lease?.close() ?? Promise.resolve());
+      const close = () => closing ??= channel ? channel.close() : sessionStep ? sessionStep.close() : (lease?.close() ?? Promise.resolve());
       try {
         assertExecutableCurrent();
-        const permit = await options.lifecycle.prepareLaunch(identity, current, signal);
-        try { lease = await options.lifecycle.launch(permit); } catch (error) { permit.release(); throw error; }
+        if (options.modelSession) sessionStep = claimOpenShellSessionStep(options.modelSession, identity);
+        else {
+          const permit = await options.lifecycle.prepareLaunch(identity, current, signal);
+          try { lease = await options.lifecycle.launch(permit); } catch (error) { permit.release(); throw error; }
+        }
         assertCurrent();
-        const owned = lease;
+        const owned = (sessionStep ?? lease)!;
         const runtime: PiComponentRuntime = { vendor: "pi", model, tier, signal: AbortSignal.any([signal, owned.signal]), assertCurrent, assertExecutableCurrent,
           openStep(value, hooks) {
             assertCurrent(); assertExecutableCurrent(); if (run || channel || value.signal.aborted || value.tier !== tier || proofs.get(runtime)?.claimedRun !== value) throw new PiProtocolFault("protocol");
@@ -106,8 +113,15 @@ export function createOpenShellPiProvider(options: PiProviderOptions): NativeCom
             const protocol = new PiStepProtocol({ run: value, spec, token: shimToken, check: assertCurrent });
             const bootstrap = buildPiBootstrap(spec, shimToken);
             channel = new PiStepChannel({ signal: AbortSignal.any([signal, value.signal, owned.signal, hooks.signal]), protocol, bootstrap, check: assertCurrent,
-              connect: () => owned.duplex([...PI_WORKER_ARGV]), onCall: hooks.onCall, onSettled: hooks.onSettled,
+              connect: () => sessionStep ? sessionStep.duplex() : lease!.duplex([...PI_WORKER_ARGV]), onCall: hooks.onCall, onSettled: hooks.onSettled,
+              ...(sessionStep ? { admitPrelude: sessionStep.admitPrelude } : {}),
               async cleanup(reason) {
+                if (sessionStep) {
+                  // Control cleanup proves the step's process group and directory gone; a missing or uncertain proof already destroyed the sandbox and fenced the session.
+                  try { await sessionStep.close(); } catch (error) { options.onCleanup?.({ reason, processes: "unavailable", teardown: "failed" }); throw error; }
+                  options.onCleanup?.({ reason, processes: "controlled", teardown: "not_required" }); return;
+                }
+                const owned = lease!;
                 // Cancellation proves absence twice: /proc inside the sandbox while it is still reachable (bounded, a hung exec is reported as a timeout and proves nothing), then the sandbox teardown itself.
                 const processes = reason === "cancelled" ? await checkNoPiProcesses(owned) : "not_checked";
                 try { await owned.close(); } catch (error) { options.onCleanup?.({ reason, processes, teardown: "failed" }); throw error; }

@@ -216,8 +216,8 @@ export type HarnessPurposeInfo = HarnessPurposeInfoBase & (
     }
   | {
       executionKind: 'native_session';
-      target?: 'claude-code:interactive' | 'codex:interactive';
-      targetLabel?: 'Claude CLI' | 'Codex CLI';
+      target?: 'claude-code:interactive' | 'codex:interactive' | 'pi:scoped-events';
+      targetLabel?: 'Claude CLI' | 'Codex CLI' | 'pi';
     }
 );
 

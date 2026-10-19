@@ -64,7 +64,7 @@ export interface SetupContextLifecycleEvidence {
 /** Deliberately separate from Ask's `sessions` table and wire contract. */
 export type NativeSessionStatus = "creating" | "running" | "detached" | "exited" | "stopped" | "interrupted" | "failed" | "stale";
 export type NativeSessionPurpose = "analysis" | "setup" | "context_enrichment";
-export type NativeSessionVendor = "claude" | "codex";
+export type NativeSessionVendor = "claude" | "codex" | "pi";
 export type NativeSessionScopeKind = "bootstrap" | "bound_project";
 export type NativeSetupRecoveryPhase = "connect" | "context";
 export type NativeSetupRecoveryState = "working" | "needs_input" | "needs_decision" | "retryable_failure" | "reported_complete";
@@ -724,6 +724,8 @@ export interface StoreOptions {
   readonly onEnrichmentCreationWrite?: (phase: "after_run" | "after_operations" | "after_event") => void;
   /** Test-only clock so lease-expiry behavior is deterministic. */
   readonly now?: () => Date;
+  /** Boot fact: this boot serves pi as its one scoped native vendor (OpenShell + pi), so an explicit api-key or gateway setting is a pi native binding. */
+  readonly nativeScopedVendor?: "pi";
 }
 
 export interface ContextSetupSuccessPersistence {
@@ -745,6 +747,7 @@ export class Store {
   private readonly onEnrichmentCreationWrite: StoreOptions["onEnrichmentCreationWrite"];
   private inApplyTransaction = false;
   private readonly now: () => Date;
+  private readonly nativeScopedVendor: "pi" | undefined;
 
   constructor(path: string, options: StoreOptions = {}) {
     this.db = new DatabaseSync(path);
@@ -752,6 +755,7 @@ export class Store {
     this.onEnrichmentTransitionWrite = options.onEnrichmentTransitionWrite;
     this.onEnrichmentCreationWrite = options.onEnrichmentCreationWrite;
     this.now = options.now ?? (() => new Date());
+    this.nativeScopedVendor = options.nativeScopedVendor;
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(SCHEMA_SQL);
     this.db.exec("CREATE TABLE IF NOT EXISTS openshell_intents (id TEXT PRIMARY KEY, payload TEXT NOT NULL)");
@@ -1919,7 +1923,7 @@ export class Store {
   }
 
   getNativeRuntimeBinding(): NativeRuntimeBinding {
-    return resolveNativeRuntimeBinding(this.getRuntimeSettings(), this.hasExplicitRuntimeSettings(), this.getRuntimeGeneration());
+    return resolveNativeRuntimeBinding(this.getRuntimeSettings(), this.hasExplicitRuntimeSettings(), this.getRuntimeGeneration(), this.nativeScopedVendor);
   }
 
   /** Atomically persist a new runtime fence and stop every incompatible live row. */
@@ -1927,7 +1931,7 @@ export class Store {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const generation = this.getRuntimeGeneration() + 1;
-      const target = resolveNativeRuntimeBinding(settings, explicit, generation).target ?? null;
+      const target = resolveNativeRuntimeBinding(settings, explicit, generation, this.nativeScopedVendor).target ?? null;
       const ids = this.db.prepare(
         `SELECT id FROM native_sessions WHERE status IN ('creating', 'running', 'detached')
          AND (? IS NULL OR dispatch_target IS NULL OR dispatch_target <> ?)`,

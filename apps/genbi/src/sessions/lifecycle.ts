@@ -16,11 +16,13 @@ export interface DeadNativeSessionAction {
 const restartOnlyReason: Record<NativeSessionVendor, string> = {
   claude: 'This Claude session cannot be resumed. Restart creates a new isolated session.',
   codex: 'This Codex session cannot be resumed. Restart creates a new isolated session.',
+  pi: 'This pi session cannot be resumed. Restart creates a new isolated session.',
 };
 
 const freshRestartReason: Record<NativeSessionVendor, string> = {
   claude: 'Restart starts a separate Claude conversation in a new isolated terminal.',
   codex: 'Restart starts a separate Codex conversation in a new isolated terminal.',
+  pi: 'Restart starts a separate pi session in a new isolated sandbox.',
 };
 
 function processIsGone(status: NativeSession['status']): boolean {

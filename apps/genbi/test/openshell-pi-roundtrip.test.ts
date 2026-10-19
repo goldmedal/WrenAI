@@ -132,7 +132,8 @@ async function fixture(controls: Controls = {}) {
   const provisioner = createOpenShellStructuredProvisioner({ composition, store, ...(controls.componentLimits ? { componentLimits: controls.componentLimits } : {}), ...(controls.gatewayPollMs ? { gatewayPollMs: controls.gatewayPollMs } : {}),
     producerBinary: producer, wrenBinary: wren, profileSource, hostHome: root, sourceWrenHome: () => home, getBinding: () => store.getEnrichmentBinding(),
     modelsFor: () => { throw new Error("the Claude model resolver must never run for a pi boot"); }, assertConfigurationCurrent() { boot.assertCurrent(); } });
-  expect(provisioner.reserveSession).toBeUndefined();
+  // Native Sessions on a pi boot hold an owned session sandbox, so the provisioner reserves one (the session suite lives in openshell-pi-native-session.test.ts).
+  expect(provisioner.reserveSession).toBeTypeOf("function");
   const local = vi.fn(async () => { throw Error("in-process fallback forbidden"); });
   const adapter = createOpenShellStructuredAdapter(provisioner, undefined, "pi");
   const runtime = new StructuredRuntime({ selection, localRoute: local, localSetupFor: () => undefined, adapters: { pi: adapter }, onRevoke: composition.revokeRuntime });
@@ -308,7 +309,7 @@ describe("pi OpenShell Structured Ask: the full scoped path with a scripted work
       await expect(f.runtime.route({ authChoice: { mode: "subscription", provider: "claude" }, profileSource: f.profileSource, userProject: f.project, question: "x" }, { sessionId: "s", turnId: "t", assertCurrent() {} })).rejects.toMatchObject({ code: "unavailable" });
       expect(f.local).not.toHaveBeenCalled(); expect(f.receipt.creates).toBe(0);
     });
-    it.each(["/api/setup/connect", "/api/setup/adopt", "/api/native-sessions", "/api/context/enrichment/start", "/api/context/terminal/sessions"])("refuses %s", async route => {
+    it.each(["/api/setup/connect", "/api/setup/adopt", "/api/context/enrichment/start", "/api/context/terminal/sessions"])("refuses %s", async route => {
       const f = await fixture(); const app = createApp(f.deps);
       const response = await app.request(route, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
       expect(response.status).toBe(503); expect(await response.json()).toMatchObject({ code: "unsupported" }); expect(f.receipt.creates).toBe(0); expect(f.local).not.toHaveBeenCalled();

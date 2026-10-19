@@ -98,9 +98,8 @@ describe("pi block in the OpenShell driver is additive and keyed to the pi image
     const f = fixture({ claude: true, pi: false }); const claude = intent(claudeImage); runnable(f, claude, claudeImage); await f.driver.create(claude, new AbortController().signal);
     const argv = createArgs(f); expect(argv).not.toContain("--provider"); expect(argv.slice(argv.indexOf("--from"), argv.indexOf("--from") + 4)).toEqual(["--from", claudeImage, "--policy", f.files.claudePolicy]);
   });
-  it("refuses a model intent whose image is neither configured model image, and never gives pi a session or data role", async () => {
+  it("refuses a model intent whose image is neither configured model image", async () => {
     const f = fixture(); const stranger = intent(sha("9")); await expect(f.driver.create(stranger, new AbortController().signal)).rejects.toMatchObject({ code: "openshell_scope_invalid" });
-    const session = intent(piImage, "model_session"); f.scenario({ resource: resourceFor(session) }); await expect(f.driver.create(session, new AbortController().signal)).rejects.toBeDefined();
     expect(f.cli().filter(call => call.includes("create"))).toHaveLength(0);
     const only = fixture({ claude: false, pi: true }); await expect(only.driver.create(intent(claudeImage), new AbortController().signal)).rejects.toMatchObject({ code: "openshell_scope_invalid" });
   });
@@ -131,5 +130,56 @@ describe("pi block in the OpenShell driver is additive and keyed to the pi image
     const f = fixture(); const claude = intent(claudeImage); runnable(f, claude, claudeImage);
     await f.driver.duplex(claude, ["/usr/local/bin/node", "/opt/genbi/claude-worker.mjs"], new AbortController().signal);
     expect((await f.driver.exec(claude, ["/bin/echo", "x"], new AbortController().signal)).trim()).toBe("exec ok");
+  });
+});
+
+describe("an owned pi model session in the OpenShell driver", () => {
+  const piSessionStep = ["/usr/local/bin/node", "/opt/genbi/pi-session-step.mjs"], piControl = ["/usr/local/bin/node", "/opt/genbi/pi-step-control.mjs"];
+  const claudeSessionStep = ["/usr/local/bin/node", "/opt/genbi/claude-session-step.mjs"], claudeControl = ["/usr/local/bin/node", "/opt/genbi/claude-step-control.mjs"];
+  const piWorker = ["/usr/local/bin/node", "/opt/genbi/pi-worker.mjs"], procCheck = ["/usr/local/bin/node", "/opt/genbi/pi-proc-check.mjs"];
+  it("creates a pi-image model_session sandbox from the pi image and policy with the vendor provider and no Claude block", async () => {
+    const f = fixture(); const session = intent(piImage, "model_session"); runnable(f, session, piImage);
+    await f.driver.create(session, new AbortController().signal);
+    const argv = createArgs(f); expect(argv[argv.indexOf("--from") + 1]).toBe(piImage); expect(argv[argv.indexOf("--policy") + 1]).toBe(f.files.piPolicy);
+    expect(argv.filter(value => value === "--provider")).toHaveLength(1); expect(argv[argv.indexOf("--provider") + 1]).toBe("pi-vendor"); expect(argv).toContain("--no-auto-providers");
+    const only = fixture({ claude: false, pi: true }); const alone = intent(piImage, "model_session"); runnable(only, alone, piImage); await only.driver.create(alone, new AbortController().signal);
+    expect(createArgs(only)[createArgs(only).indexOf("--from") + 1]).toBe(piImage);
+  });
+  it("still creates a Claude-image model_session exactly as before, with no provider", async () => {
+    const f = fixture(); const session = intent(claudeImage, "model_session"); runnable(f, session, claudeImage); await f.driver.create(session, new AbortController().signal);
+    const argv = createArgs(f); expect(argv).not.toContain("--provider"); expect(argv.slice(argv.indexOf("--from"), argv.indexOf("--from") + 4)).toEqual(["--from", claudeImage, "--policy", f.files.claudePolicy]);
+  });
+  it("verifies the session's containers against the pi image, not the Claude image", async () => {
+    const f = fixture(); const session = intent(piImage, "model_session"); runnable(f, session, piImage); await expect(f.driver.inspect(session)).resolves.toBeDefined();
+    runnable(f, session, claudeImage); await expect(f.driver.inspect(session)).rejects.toMatchObject({ code: "openshell_identity_mismatch" });
+  });
+  it("admits only the pi session-step argv for a pi-image session, and nothing else for it", async () => {
+    const f = fixture(); const session = intent(piImage, "model_session"); runnable(f, session, piImage);
+    await expect(f.driver.duplex(session, piSessionStep, new AbortController().signal)).resolves.toBeDefined(); expect(f.opened.at(-1)!.argv).toEqual(piSessionStep);
+    for (const argv of [piWorker, claudeSessionStep, ["/usr/local/bin/node", "/opt/genbi/claude-worker.mjs"], piControl, [...piSessionStep, "--extra"], ["/bin/sh", "-c", "id"], ["/usr/local/bin/node", "-e", "1"], ["/usr/local/bin/node", "/opt/genbi/pi-mcp-shim.mjs"]])
+      await expect(f.driver.duplex(session, argv, new AbortController().signal), argv.join(" ")).rejects.toMatchObject({ code: "openshell_scope_invalid" });
+    expect(f.opened).toHaveLength(1);
+  });
+  it("never lets a pi step intent run the session-step argv, or a Claude-image intent run any pi argv, and the reverse", async () => {
+    const f = fixture(); const pi = intent(piImage), claudeStep = intent(claudeImage), claudeSession = intent(claudeImage, "model_session");
+    runnable(f, pi, piImage); await expect(f.driver.duplex(pi, piSessionStep, new AbortController().signal)).rejects.toMatchObject({ code: "openshell_scope_invalid" });
+    for (const claude of [claudeStep, claudeSession]) { runnable(f, claude, claudeImage); for (const argv of [piWorker, piSessionStep]) await expect(f.driver.duplex(claude, argv, new AbortController().signal), argv.join(" ")).rejects.toMatchObject({ code: "openshell_scope_invalid" }); }
+    runnable(f, claudeSession, claudeImage); await expect(f.driver.duplex(claudeSession, claudeSessionStep, new AbortController().signal)).resolves.toBeDefined();
+    expect(f.opened).toHaveLength(1);
+  });
+  it("runs only the fixed pi step control in a pi-image session, with its three documented shapes", async () => {
+    const f = fixture(); const session = intent(piImage, "model_session"); runnable(f, session, piImage);
+    for (const argv of [[...piControl, "--baseline"], [...piControl, "--check", "{}"], [...piControl, "{}"]]) expect((await f.driver.exec(session, argv, new AbortController().signal)).trim(), argv.join(" ")).toBe("exec ok");
+    const before = f.cli().filter(call => call.includes("exec")).length;
+    for (const argv of [claudeControl, [...claudeControl, "--baseline"], ["/bin/echo", "x"], procCheck, piWorker, piSessionStep, piControl, [...piControl, "a", "b", "c"], ["/usr/local/bin/node", "/opt/genbi/other.mjs", "--baseline"]])
+      await expect(f.driver.exec(session, argv, new AbortController().signal), argv.join(" ")).rejects.toMatchObject({ code: "openshell_scope_invalid" });
+    expect(f.cli().filter(call => call.includes("exec"))).toHaveLength(before);
+  });
+  it("refuses an exec that names a pi script on any intent that is not a pi-image model intent, and leaves per-step pi and Claude exec alone", async () => {
+    const f = fixture(); const claudeStep = intent(claudeImage), claudeSession = intent(claudeImage, "model_session"), pi = intent(piImage);
+    for (const claude of [claudeStep, claudeSession]) { runnable(f, claude, claudeImage); for (const argv of [piControl, [...piControl, "--baseline"], procCheck, piWorker, piSessionStep]) await expect(f.driver.exec(claude, argv, new AbortController().signal), argv.join(" ")).rejects.toMatchObject({ code: "openshell_scope_invalid" }); }
+    runnable(f, claudeSession, claudeImage);
+    expect((await f.driver.exec(claudeSession, [...claudeControl, "--baseline"], new AbortController().signal)).trim()).toBe("exec ok"); expect((await f.driver.exec(claudeStep, ["/bin/echo", "x"], new AbortController().signal)).trim()).toBe("exec ok");
+    runnable(f, pi, piImage); expect((await f.driver.exec(pi, procCheck, new AbortController().signal)).trim()).toBe("exec ok");
   });
 });

@@ -155,7 +155,7 @@ export function getContextFiles(): Promise<ContextFileNode[]> {
 
 export type NativeSessionPurpose = 'analysis' | 'setup' | 'context_enrichment';
 export type NativeSessionLaunchIntent = 'open_existing' | 'start_separate' | 'resume';
-export type NativeSessionVendor = 'claude' | 'codex';
+export type NativeSessionVendor = 'claude' | 'codex' | 'pi';
 export type NativeSessionStatus = 'creating' | 'running' | 'detached' | 'exited' | 'stopped' | 'interrupted' | 'failed' | 'stale';
 
 export interface NativeSession {
@@ -187,8 +187,8 @@ export interface NativeSession {
 export interface NativePurposeReadiness {
   scopeKind: 'bootstrap' | 'bound_project';
   profile: string;
-  target?: 'claude-code:interactive' | 'codex:interactive';
-  targetLabel?: 'Claude CLI' | 'Codex CLI';
+  target?: 'claude-code:interactive' | 'codex:interactive' | 'pi:scoped-events';
+  targetLabel?: 'Claude CLI' | 'Codex CLI' | 'pi';
   available: boolean;
   reason?: string;
   /** Stable server category; deliberately excludes producer paths and process output. */
@@ -211,8 +211,8 @@ export interface NativeProfileReadiness {
   id: string;
   scopeKind: 'bound_project';
   profile: string;
-  target?: 'claude-code:interactive' | 'codex:interactive';
-  targetLabel?: 'Claude CLI' | 'Codex CLI';
+  target?: 'claude-code:interactive' | 'codex:interactive' | 'pi:scoped-events';
+  targetLabel?: 'Claude CLI' | 'Codex CLI' | 'pi';
   available: boolean;
   reason?: string;
   entryKind?: 'scope' | 'agent';

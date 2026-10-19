@@ -10,6 +10,8 @@ host broker's step tools, reached over the single duplex the host opens with the
 | `pi-worker.mjs` | Entry. Verifies `pins.json` (Node, the worker files, pi's `dist/bundle` tree), then starts the core. |
 | `pi-worker-core.mjs` | Materialises exactly what the host computed (agent dir with three files, system prompt, empty cwd and HOME), re-checks it before pi starts, runs pi, relays events and tool frames, ends in-band. |
 | `pi-mcp-shim.mjs` | The stdio MCP server pi launches. Forwards JSON lines to the worker's per-step unix socket; no network, no environment access. |
+| `pi-session-step.mjs` | Host-only entrypoint for a step inside an owned session sandbox. A thin supervisor around the unchanged per-step worker: writes the private step receipt before the worker sees a byte, relays its frames, and writes the settled marker only after a clean in-band exit. |
+| `pi-step-control.mjs` | Host-only control for a session sandbox: `--baseline`, `--check`, and exact cleanup of one step's process group and directory. A byte-for-byte copy of the Claude worker's control (a test keeps them identical). |
 | `pi-proc-check.mjs` | Reads `/proc` and reports how many step processes are alive; the host runs it after a cancellation. |
 | `policy.template.yaml`, `profile.template.yaml` | Deny-all policy plus one model endpoint, and the provider profile for it. Render with `renderPiEndpointAssets` (endpoint host and port are parameters). |
 

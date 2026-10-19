@@ -343,7 +343,8 @@ async function main(): Promise<void> {
   // BFF state, never a bound project, owns all non-Setup native artifacts.
   // Initialization creates the fixed private namespaces once at startup.
   const nativeMaterializationState = initializeNativeSessionStateBase(dbPath);
-  const store = new Store(dbPath);
+  // OpenShell + pi serves pi as the boot's one scoped native vendor, so an explicit api-key or gateway Runtime is a pi native binding.
+  const store = new Store(dbPath, runtimeSelection.runtime === "openshell" && isBackendOffered(runtimeSelection, "pi") ? { nativeScopedVendor: "pi" } : {});
   // Conversation profiles a session may start inside: the shipped ones under this package's
   // `profiles/` plus any the operator adds under the workspace. Registration compiles each one, so
   // it runs in the background; the first `/api/profiles` request awaits the same promise.
@@ -717,7 +718,7 @@ async function main(): Promise<void> {
     localAvailable: localTerminalAvailable(runtimeSelection, nativeTerminalHostAvailable),
     vendorProbes: { "codex-app-server": codexComposition.probe, openshell: openshellComposition.probe },
   });
-  const openShellNative = claudeOnOpenShell ? new OpenShellNativeSessions({ store, provisioner: openshellProvisioner, runtime: () => structuredRuntime, getBinding: currentInteractiveBinding, routeOptions: () => effectiveRouteOptions(deps) }) : undefined;
+  const openShellNative = claudeOnOpenShell || piOnOpenShell ? new OpenShellNativeSessions({ store, provisioner: openshellProvisioner, runtime: () => structuredRuntime, getBinding: currentInteractiveBinding, routeOptions: () => effectiveRouteOptions(deps) }) : undefined;
   const nativeSessions = new NativeSessionService({
     ...(openShellNative ? { openShellNative } : {}),
     store,

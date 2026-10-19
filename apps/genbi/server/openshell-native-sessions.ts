@@ -23,7 +23,7 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const hash = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 const terminal = (state: ScopedSessionState) => state === "stopped" || state === "interrupted";
 
-/** Same governed analytical route, with a process-local owned sandbox and durable replay. */
+/** Same governed analytical route, with a process-local owned sandbox and durable replay. One class serves the boot's single scoped vendor (Claude or pi); the vendor only changes which model worker the sandbox runs. */
 export class OpenShellNativeSessions {
   private readonly records = new Map<string, Record>();
   private readonly creations = new Map<string, Promise<{ row: NativeSessionRow; capability: string }>>();
@@ -64,14 +64,16 @@ export class OpenShellNativeSessions {
     const id = newId("native-session"), capability = randomUUID(), controller = new AbortController();
     const signal = AbortSignal.any([controller.signal, this.lifetime.signal]);
     const binding = structuredClone(this.options.getBinding()), runtime = structuredClone(this.options.store.getNativeRuntimeBinding()), settings = structuredClone(this.options.store.getRuntimeSettings());
-    if (!binding || !runtime.configured || !runtime.target || runtime.provider !== "claude" || !this.options.provisioner.reserveSession) throw new StructuredRuntimeError("unavailable");
+    // The saved Runtime binding names the one vendor this boot holds a session for: Claude (subscription) or pi (api-key / gateway on a pi boot). Nothing else opens one.
+    const vendor = runtime.provider;
+    if (!binding || !runtime.configured || !runtime.target || (vendor !== "claude" && vendor !== "pi") || !this.options.provisioner.reserveSession) throw new StructuredRuntimeError("unavailable");
     const check = () => { signal.throwIfAborted(); if (!isDeepStrictEqual(binding, this.options.getBinding()) || !isDeepStrictEqual(runtime, this.options.store.getNativeRuntimeBinding()) || !isDeepStrictEqual(settings, this.options.store.getRuntimeSettings())) throw new StructuredRuntimeError("stale"); };
     const scope: StructuredScope = { sessionId: id, turnId: newId("native-preparation"), signal, assertCurrent: check };
     let lease: OpenShellModelSession | undefined;
     try {
       // The opaque launch permission and actual lease precede the first durable native row.
       lease = await this.options.provisioner.reserveSession({ options: { ...this.options.routeOptions(), question: "Analyze the bound project.", agentId: "answer_query" }, scope }); check(); lease.assertActive();
-      const row = this.options.store.createNativeSession({ id, transport: "scoped-events", purpose: "analysis", vendor: "claude", agent: "answer_query", scopeKind: "bound_project", scopeId: newId("native-scope"), projectIdentity: binding.identity, bindingGeneration: binding.generation, projectRevision: binding.revision, dispatchProfile: "genbi-default", dispatchTarget: runtime.target!, runtimeGeneration: runtime.generation });
+      const row = this.options.store.createNativeSession({ id, transport: "scoped-events", purpose: "analysis", vendor, agent: "answer_query", scopeKind: "bound_project", scopeId: newId("native-scope"), projectIdentity: binding.identity, bindingGeneration: binding.generation, projectRevision: binding.revision, dispatchProfile: "genbi-default", dispatchTarget: runtime.target!, runtimeGeneration: runtime.generation });
       const record: Record = { id, capability, lease, state: "ready", controller, listeners: new Set(), assertCurrent: () => { check(); lease!.assertActive(); const current = this.options.store.getNativeSession(id); if (!current || !["creating", "running", "detached"].includes(current.status)) throw new StructuredRuntimeError("stale"); } };
       this.records.set(id, record); this.options.store.transitionNativeSession(id, "running", { started: true });
       lease.signal.addEventListener("abort", () => { if (!terminal(record.state) && record.state !== "stopping") { record.active?.controller.abort(); void this.interrupt(record).catch(() => { this.cleanupFailed = true; }); } }, { once: true });

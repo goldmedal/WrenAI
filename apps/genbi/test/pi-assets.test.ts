@@ -24,7 +24,7 @@ describe("pi worker image definition", () => {
     expect(dockerfile).toMatch(/apt-get install -y --no-install-recommends ca-certificates iproute2 nftables/);
     expect(dockerfile).toMatch(/npm ci --ignore-scripts/); expect(dockerfile).not.toMatch(/npm install/);
     expect(dockerfile).toMatch(/rm -rf [^\n]*\/usr\/local\/bin\/npm \/usr\/local\/bin\/npx/); expect(dockerfile).toMatch(/groupadd -g 1500 sandbox && useradd -u 1500 -g 1500/); expect(dockerfile).toMatch(/^USER 1500:1500$/m);
-    expect([...dockerfile.matchAll(/^COPY (.+)$/gm)].map(match => match[1])).toEqual(["package.json package-lock.json ./", "pi-worker.mjs pi-worker-core.mjs pi-mcp-shim.mjs pi-proc-check.mjs pi-pins.mjs claude-worker-ca.mjs /opt/genbi/"]);
+    expect([...dockerfile.matchAll(/^COPY (.+)$/gm)].map(match => match[1])).toEqual(["package.json package-lock.json ./", "pi-worker.mjs pi-worker-core.mjs pi-mcp-shim.mjs pi-proc-check.mjs pi-session-step.mjs pi-step-control.mjs pi-pins.mjs claude-worker-ca.mjs /opt/genbi/"]);
     const instructions = dockerfile.replace(/^#.*$/gm, "");
     for (const forbidden of [/\bwren\b/i, /project/i, /\bHOME=/, /\bENV\b/, /\bARG\b/, /--mount/, /\bVOLUME\b/, /API_KEY/]) expect(instructions, String(forbidden)).not.toMatch(forbidden);
   });
@@ -41,7 +41,7 @@ describe("pi worker image definition", () => {
   it("is covered by the package files and the installed-package acceptance", () => {
     expect(JSON.parse(readFileSync(path.resolve(here, "../package.json"), "utf8")).files).toContain("dist-server/runtime-assets");
     expect(readFileSync(path.resolve(here, "../scripts/installed-package-acceptance.mjs"), "utf8")).toContain("package/dist-server/runtime-assets/pi-worker/pi-worker.mjs");
-    for (const file of ["pi-worker.mjs", "pi-worker-core.mjs", "pi-mcp-shim.mjs", "pi-proc-check.mjs", "pi-pins.mjs", "claude-worker-ca.mjs"]) expect(spawnSync(process.execPath, ["--check", path.join(assets, file)]).status, file).toBe(0);
+    for (const file of ["pi-worker.mjs", "pi-worker-core.mjs", "pi-mcp-shim.mjs", "pi-proc-check.mjs", "pi-session-step.mjs", "pi-step-control.mjs", "pi-pins.mjs", "claude-worker-ca.mjs"]) expect(spawnSync(process.execPath, ["--check", path.join(assets, file)]).status, file).toBe(0);
   });
 });
 
