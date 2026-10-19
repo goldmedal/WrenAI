@@ -242,6 +242,17 @@ describe("an unparseable batch terminal", () => {
       { slot_id: "c", columns: ["n"], rows: [{ n: 100 }], summary: "c repaired", verified: true, definition: { sql: SQL.c, source_tables: tablesOf(SQL.c), filters: [] } },
     ] }, provenance: { verified: true } });
   });
+  it("a terminal that prints the same answer twice parses: no repair step runs", async () => {
+    const answer = JSON.stringify([answered("a"), { slot_id: "b", status: "unanswerable", reason: "no revenue model" }, answered("c")], null, 2);
+    const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.a, "a"), query(SQL.c, "c"), text("```json\n" + answer + "\n```\n```json\n" + answer + "\n```")] });
+    const f = host(strong);
+    const r = recording(f);
+    const result = await new ComponentRunner(plan(), r.host).run("answer_batch", { request: "fill the report", input: { slots } });
+    expect(r.runs.map((run) => run.prompt)).toEqual(["resolve", "generate"]);
+    expect(result).toMatchObject({ status: "ok", output: { kind: "value", value: [
+      { slot_id: "a", rows: [{ n: 1672 }], verified: true }, { slot_id: "b", status: "unanswerable" }, { slot_id: "c", rows: [{ n: 100 }], verified: true },
+    ] } });
+  });
   it("a repair whose terminal still does not parse yields every declared slot unanswerable, not callee_failed", async () => {
     const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.a, "a"), text(broken), text(`Here is the fix: ${broken}`)] });
     const f = host(strong);

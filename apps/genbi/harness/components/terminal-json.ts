@@ -26,26 +26,29 @@ function parsedJson(text: string): { value: unknown } | undefined {
 }
 /**
  * The one top-level JSON array or object in a prose terminal, after dropping reasoning tags
- * and Markdown fences. Zero or several candidates return undefined, so the text stays prose.
+ * and Markdown fences. Zero candidates, or several that do not all parse to the same value, return
+ * undefined, so the text stays prose.
  */
 function soleJsonValue(raw: string): unknown {
   const untagged = raw.replace(/<think>[\s\S]*?<\/think>/gi, "");
   // A lone closing tag: everything before it is treated as reasoning.
   const closing = untagged.toLowerCase().lastIndexOf("</think>");
   const text = (closing >= 0 ? untagged.slice(closing + "</think>".length) : untagged).replace(/```[\w-]*/g, "");
-  const found: unknown[] = [];
+  const found: { canonical: string; value: unknown }[] = [];
   let failures = 0;
   for (let index = 0; index < text.length; index++) {
     if (text[index] !== "{" && text[index] !== "[") continue;
     const end = spanEnd(text, index);
     const candidate = end >= 0 ? parsedJson(text.slice(index, end + 1)) : undefined;
     if (candidate) {
-      found.push(candidate.value);
-      if (found.length > 1) return undefined;
+      found.push({ canonical: JSON.stringify(candidate.value), value: candidate.value });
       index = end;
     } else if (++failures > MAX_FAILED_STARTS) return undefined;
   }
-  return found.length === 1 ? found[0] : undefined;
+  // A model that prints its answer twice (a fenced block, then the same value again, pretty or
+  // minified) still gave one answer; two different candidates are ambiguous and stay prose.
+  const [first] = found;
+  return first && found.every((candidate) => candidate.canonical === first.canonical) ? first.value : undefined;
 }
 
 /**
