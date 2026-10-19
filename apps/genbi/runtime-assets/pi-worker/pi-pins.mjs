@@ -22,7 +22,7 @@ export function hashTree(root) {
 
 export const PIN_PATHS = Object.freeze({
   node: '/usr/local/bin/node', worker: '/opt/genbi/pi-worker.mjs', workerCore: '/opt/genbi/pi-worker-core.mjs', shim: '/opt/genbi/pi-mcp-shim.mjs',
-  procCheck: '/opt/genbi/pi-proc-check.mjs', trust: '/opt/genbi/claude-worker-ca.mjs', pins: '/opt/genbi/pi-pins.mjs', lockfile: '/opt/pi/package-lock.json',
+  procCheck: '/opt/genbi/pi-proc-check.mjs', sessionStep: '/opt/genbi/pi-session-step.mjs', stepControl: '/opt/genbi/pi-step-control.mjs', trust: '/opt/genbi/claude-worker-ca.mjs', pins: '/opt/genbi/pi-pins.mjs', lockfile: '/opt/pi/package-lock.json',
 });
 export const PI_PACKAGE = '/opt/pi/node_modules/@earendil-works/pi-coding-agent';
 export const PI_BUNDLE = `${PI_PACKAGE}/dist/bundle`;

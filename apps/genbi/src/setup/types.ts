@@ -112,9 +112,9 @@ export type GatewayModelCatalog =
 export interface NativeRuntimeBinding {
   configured: boolean;
   generation: number;
-  provider?: SubscriptionProvider;
-  target?: 'claude-code:interactive' | 'codex:interactive';
-  targetLabel?: 'Claude CLI' | 'Codex CLI';
+  provider?: SubscriptionProvider | 'pi';
+  target?: 'claude-code:interactive' | 'codex:interactive' | 'pi:scoped-events';
+  targetLabel?: 'Claude CLI' | 'Codex CLI' | 'pi';
 }
 
 export type RuntimeSettingsPutResponse = RuntimeSettings & { warnings: string[]; nativeSessionBinding: NativeRuntimeBinding };

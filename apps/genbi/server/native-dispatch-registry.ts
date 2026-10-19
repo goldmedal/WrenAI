@@ -9,6 +9,11 @@ import type { RuntimeSettings, SubscriptionProvider } from "./wire-types.js";
 export const NATIVE_PURPOSES = ["analysis", "setup", "context_enrichment"] as const;
 export type NativePurpose = (typeof NATIVE_PURPOSES)[number];
 export type NativeVendor = SubscriptionProvider;
+/** pi never runs in a host terminal: it exists only as an OpenShell scoped session, so it is a session vendor and not a PTY `NativeVendor`. */
+export type NativeScopedVendor = NativeVendor | "pi";
+/** Provenance label of a pi scoped session row. Deliberately not an `InteractiveTarget`: the host PTY routes can never accept it. */
+export const PI_SCOPED_TARGET = "pi:scoped-events" as const;
+export type NativeScopedTarget = typeof PI_SCOPED_TARGET;
 
 export interface NativeDispatchDefinition {
   readonly purpose: NativePurpose;
@@ -39,9 +44,9 @@ export function assertHarnessPurposeProfile(purpose: NativePurpose, profile: str
 export interface NativeRuntimeBinding {
   readonly configured: boolean;
   readonly generation: number;
-  readonly provider?: NativeVendor;
-  readonly target?: InteractiveTarget;
-  readonly targetLabel?: "Claude CLI" | "Codex CLI";
+  readonly provider?: NativeScopedVendor;
+  readonly target?: InteractiveTarget | NativeScopedTarget;
+  readonly targetLabel?: "Claude CLI" | "Codex CLI" | "pi";
 }
 
 export function targetForProvider(provider: NativeVendor): InteractiveTarget {
@@ -52,8 +57,16 @@ export function nativeTargetLabel(provider: NativeVendor): "Claude CLI" | "Codex
   return provider === "claude" ? "Claude CLI" : "Codex CLI";
 }
 
-/** Explicit marker, not seed/default settings, is the authority. */
-export function resolveNativeRuntimeBinding(settings: RuntimeSettings, explicit: boolean, generation: number): NativeRuntimeBinding {
+/**
+ * Explicit marker, not seed/default settings, is the authority. A boot that serves pi as its one scoped vendor (OpenShell + pi) binds an explicit
+ * api-key or gateway setting to pi; without that boot fact the result is exactly the subscription-derived binding.
+ */
+export function resolveNativeRuntimeBinding(settings: RuntimeSettings, explicit: boolean, generation: number, scopedVendor?: "pi"): NativeRuntimeBinding {
+  if (scopedVendor === "pi") {
+    return explicit && !settings.hybrid && (settings.authMode === "byo" || settings.authMode === "gateway")
+      ? { configured: true, generation, provider: "pi", target: PI_SCOPED_TARGET, targetLabel: "pi" }
+      : { configured: false, generation };
+  }
   if (!explicit || settings.authMode !== "subscription" || (settings.subscriptionProvider !== "claude" && settings.subscriptionProvider !== "codex")) {
     return { configured: false, generation };
   }
@@ -70,7 +83,14 @@ export function sameNativeRuntimeBinding(left: NativeRuntimeBinding, right: Nati
     && left.targetLabel === right.targetLabel;
 }
 
+/** The host-terminal target of a binding. pi's scoped target is never one, so a pi binding has none and no PTY route can act on it. */
+export function interactiveTargetOf(binding: NativeRuntimeBinding): InteractiveTarget | undefined {
+  return binding.target === "claude-code:interactive" || binding.target === "codex:interactive" ? binding.target : undefined;
+}
+
+/** Host-terminal dispatch only: a pi binding resolves to nothing here, because pi holds scoped sessions and never a terminal. */
 export function dispatchForPurpose(purpose: NativePurpose, binding: NativeRuntimeBinding): NativeDispatchDefinition & { readonly provider: NativeVendor; readonly target: InteractiveTarget; readonly targetLabel: "Claude CLI" | "Codex CLI" } | undefined {
-  if (!binding.configured || !binding.provider || !binding.target || !binding.targetLabel) return undefined;
-  return { ...NATIVE_DISPATCH_REGISTRY[purpose], provider: binding.provider, target: binding.target, targetLabel: binding.targetLabel };
+  const target = interactiveTargetOf(binding);
+  if (!binding.configured || !binding.provider || binding.provider === "pi" || !target || !binding.targetLabel || binding.targetLabel === "pi") return undefined;
+  return { ...NATIVE_DISPATCH_REGISTRY[purpose], provider: binding.provider, target, targetLabel: binding.targetLabel };
 }

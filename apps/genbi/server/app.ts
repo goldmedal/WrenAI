@@ -36,7 +36,7 @@ import type { InteractiveTarget, InteractiveTerminalSession } from "./interactiv
 import { nativeSessionLaunchErrorCode, nativeSessionLaunchFailure, nativeSessionLifecycle, NATIVE_PURPOSES, NATIVE_SETUP_RECOVERY_MCP_TOOL_NAME, NativeSetupRecoveryError } from "./native-sessions.js";
 import type { NativePurpose, NativeSessionResumeAvailability } from "./native-sessions.js";
 import { NATIVE_MCP_PERSIST_ANSWER_TOOL_NAME, NATIVE_MCP_QUERY_TOOL_NAME, NATIVE_MCP_TOOL_NAME, NATIVE_PERSIST_ANSWER_CONTRACT, NATIVE_QUERY_INPUT_SCHEMA, NATIVE_SAVE_DASHBOARD_CONTRACT, NativeArtifactError } from "./native-artifacts.js";
-import { sameNativeRuntimeBinding } from "./native-dispatch-registry.js";
+import { interactiveTargetOf, sameNativeRuntimeBinding } from "./native-dispatch-registry.js";
 import { ProfileRegistryError, toWarbleProfileDto } from "./profile-registry.js";
 import { DEFAULT_CONVERSATION_PROFILE } from "./native-sessions.js";
 import { detectAdapterEnv, GATEWAY_API_KEY_ENV } from "./env-detect.js";
@@ -1136,13 +1136,14 @@ export function createApp(deps: TurnDeps) {
     const body = await c.req.json().catch(() => ({})) as { target?: unknown };
     if (!INTERACTIVE_TARGETS.includes(body.target as InteractiveTarget)) return c.json({ error: "unsupported interactive CLI target" }, 400);
     const runtime = deps.store.getNativeRuntimeBinding();
-    if (!runtime.configured || !runtime.target || body.target !== runtime.target) return c.json({ error: "interactive terminal target does not match the saved Runtime binding" }, 409);
+    const target = interactiveTargetOf(runtime);
+    if (!runtime.configured || !target || body.target !== target) return c.json({ error: "interactive terminal target does not match the saved Runtime binding" }, 409);
     if (!deps.startInteractiveTerminal) return c.json({ error: "interactive terminal hosting is not configured" }, 503);
     let binding: EnrichmentBinding | undefined;
     try { binding = currentEnrichmentBinding(deps); } catch { binding = undefined; }
     if (!binding) return c.json({ error: "interactive enrichment requires a current bound project" }, 409);
     try {
-      const session = await deps.startInteractiveTerminal({ target: runtime.target, binding });
+      const session = await deps.startInteractiveTerminal({ target, binding });
       if (!sameNativeRuntimeBinding(runtime, deps.store.getNativeRuntimeBinding())) {
         session.close();
         return c.json({ error: "interactive terminal is stale because the Runtime binding changed" }, 409);
@@ -1159,21 +1160,23 @@ export function createApp(deps: TurnDeps) {
   app.get("/api/context/terminal/readiness", async (c) => {
     if (!deps.interactiveTerminalReadiness) return c.json({ error: "interactive terminal hosting is not configured" }, 503);
     const runtime = deps.store.getNativeRuntimeBinding();
-    if (!runtime.configured || !runtime.target) return c.json({ error: "interactive terminal requires a saved Runtime & authentication binding" }, 409);
+    const target = interactiveTargetOf(runtime);
+    if (!runtime.configured || !target) return c.json({ error: "interactive terminal requires a saved Runtime & authentication binding" }, 409);
     const readiness = await deps.interactiveTerminalReadiness();
     if (!sameNativeRuntimeBinding(runtime, deps.store.getNativeRuntimeBinding())) return c.json({ error: "interactive terminal readiness is stale because the Runtime binding changed" }, 409);
-    return c.json({ target: runtime.target, ...(readiness[runtime.target] ?? {}) });
+    return c.json({ target, ...(readiness[target] ?? {}) });
   });
   app.post("/api/context/terminal/prepare", async (c) => {
     const body = await c.req.json().catch(() => ({})) as { target?: unknown };
     if (!INTERACTIVE_TARGETS.includes(body.target as InteractiveTarget)) return c.json({ error: "unsupported interactive CLI target" }, 400);
     const runtime = deps.store.getNativeRuntimeBinding();
-    if (!runtime.configured || !runtime.target || body.target !== runtime.target) return c.json({ error: "interactive terminal target does not match the saved Runtime binding" }, 409);
+    const target = interactiveTargetOf(runtime);
+    if (!runtime.configured || !target || body.target !== target) return c.json({ error: "interactive terminal target does not match the saved Runtime binding" }, 409);
     if (!deps.prepareInteractiveTerminal) return c.json({ error: "interactive terminal hosting is not configured" }, 503);
     let binding: EnrichmentBinding | undefined; try { binding = currentEnrichmentBinding(deps); } catch { binding = undefined; }
     if (!binding) return c.json({ error: "interactive enrichment requires a current bound project" }, 409);
     try {
-      const handoff = await deps.prepareInteractiveTerminal({ target: runtime.target, binding });
+      const handoff = await deps.prepareInteractiveTerminal({ target, binding });
       if (!sameNativeRuntimeBinding(runtime, deps.store.getNativeRuntimeBinding())) return c.json({ error: "interactive terminal preparation is stale because the Runtime binding changed" }, 409);
       return c.json(handoff);
     } catch (error) { return c.json({ error: error instanceof InteractiveLaunchError ? error.message : "interactive terminal could not prepare" }, 409); }

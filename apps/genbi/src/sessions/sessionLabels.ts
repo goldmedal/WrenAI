@@ -6,9 +6,9 @@ export const purposeLabels: Record<NativeSessionPurpose, string> = {
   context_enrichment: 'Enrich context',
 };
 
-export const vendorLabels: Record<NativeSessionVendor, string> = { claude: 'Claude', codex: 'Codex' };
+export const vendorLabels: Record<NativeSessionVendor, string> = { claude: 'Claude', codex: 'Codex', pi: 'pi' };
 
-export const targetLabels: Record<NativeSessionVendor, string> = { claude: 'Claude CLI', codex: 'Codex CLI' };
+export const targetLabels: Record<NativeSessionVendor, string> = { claude: 'Claude CLI', codex: 'Codex CLI', pi: 'pi' };
 
 export const statusLabels: Record<NativeSessionStatus, string> = {
   creating: 'Starting', running: 'Running', detached: 'Detached', exited: 'Exited', stopped: 'Stopped',

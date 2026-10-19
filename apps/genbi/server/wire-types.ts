@@ -606,9 +606,9 @@ export interface SubscriptionLoginStatus {
 export interface NativeRuntimeBindingDto {
   readonly configured: boolean;
   readonly generation: number;
-  readonly provider?: SubscriptionProvider;
-  readonly target?: "claude-code:interactive" | "codex:interactive";
-  readonly targetLabel?: "Claude CLI" | "Codex CLI";
+  readonly provider?: SubscriptionProvider | "pi";
+  readonly target?: "claude-code:interactive" | "codex:interactive" | "pi:scoped-events";
+  readonly targetLabel?: "Claude CLI" | "Codex CLI" | "pi";
 }
 
 export type RuntimeSettingsPutResponse = RuntimeSettings & { readonly warnings: readonly string[]; readonly nativeSessionBinding: NativeRuntimeBindingDto };
@@ -887,7 +887,7 @@ export interface HarnessComponent {
    */
   readonly nativeAvailability?: {
     /** The native session's target label, e.g. `"Claude CLI"` — why this actually runs. */
-    readonly viaLabel: "Claude CLI" | "Codex CLI";
+    readonly viaLabel: "Claude CLI" | "Codex CLI" | "pi";
     /** The compiled dispatch target that cannot run it, e.g. `"claude-agent-sdk:local"`. */
     readonly compiledDispatchTarget: string;
     /** `agent.availability.reason` — the original bundle-level explanation, preserved for the expanded row. */
@@ -910,8 +910,8 @@ export interface HarnessDto {
       readonly purpose: "analysis" | "setup" | "context_enrichment";
       readonly profile: string;
       readonly scopeKind: "bootstrap" | "bound_project";
-      readonly target?: "claude-code:interactive" | "codex:interactive";
-      readonly targetLabel?: "Claude CLI" | "Codex CLI";
+      readonly target?: "claude-code:interactive" | "codex:interactive" | "pi:scoped-events";
+      readonly targetLabel?: "Claude CLI" | "Codex CLI" | "pi";
       readonly available: boolean;
       readonly reason?: string;
     }[];
@@ -941,8 +941,8 @@ export type HarnessPurpose = HarnessPurposeBase & (
     }
   | {
       readonly executionKind: "native_session";
-      readonly target?: "claude-code:interactive" | "codex:interactive";
-      readonly targetLabel?: "Claude CLI" | "Codex CLI";
+      readonly target?: "claude-code:interactive" | "codex:interactive" | "pi:scoped-events";
+      readonly targetLabel?: "Claude CLI" | "Codex CLI" | "pi";
     }
 );
 

@@ -7,6 +7,7 @@ import { z } from "zod";
 import { OpenShellError, OPEN_SHELL_OWNER_LABEL, isSnapshotIdentity, type OpenShellDriver, type OpenShellIntent, type OpenShellResource, type OpenShellDuplex } from "./openshell-types.js";
 import type { SnapshotMount } from "./openshell-snapshot-types.js";
 import type { RuntimeSelection } from "../runtime-selection.js";
+import { OPENSHELL_SESSION_ARGV } from "./openshell-model-session.js";
 
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 /** The fixed, packaged enrichment validator entrypoint. It ships in `runtime-assets` and is copied into the worker image. */
@@ -14,6 +15,8 @@ export const VALIDATOR_SCRIPT_PATH = fileURLToPath(new URL("../../runtime-assets
 export const VALIDATOR_ARGV: readonly string[] = Object.freeze(["/usr/local/bin/python", "-I", "/opt/genbi/validator.py"]);
 export const DATA_WORKER_ARGV: readonly string[] = Object.freeze(["/usr/local/bin/python", "-I", "/opt/genbi/worker.py"]);
 const token = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/);
+/** Every pi entrypoint a sandbox can run; a non-pi intent may not name one in an exec. */
+const PI_IMAGE_SCRIPTS: readonly string[] = Object.freeze(["/opt/genbi/pi-worker.mjs", OPENSHELL_SESSION_ARGV.pi.step[1], OPENSHELL_SESSION_ARGV.pi.control[1], "/opt/genbi/pi-proc-check.mjs"]);
 const absolute = z.string().refine(path.isAbsolute);
 const configurationSchema = z.object({
   executable: absolute, executableDigest: digest, version: z.string().regex(/^0\.0\.[0-9]+(?:[-+][A-Za-z0-9.+-]+)?$/),
@@ -118,17 +121,16 @@ export class OpenShellCliDriver implements OpenShellDriver {
     if (!result.success) throw new OpenShellError("openshell_protocol_invalid");
     return result.data;
   }
-  /** The pi block is selected only by the pi image digest and only for per-step model intents. */
+  /** The pi block is selected only by the pi image digest, and only for a per-step model intent or an owned model session. */
   private piBlock(intent: OpenShellIntent): NonNullable<OpenShellConfiguration["pi"]> | undefined {
     const pi = this.configuration.pi;
-    return pi && intent.identity.purpose === "model" && intent.identity.image === pi.image ? pi : undefined;
+    return pi && (intent.identity.purpose === "model" || intent.identity.purpose === "model_session") && intent.identity.image === pi.image ? pi : undefined;
   }
   async create(intent: OpenShellIntent, signal: AbortSignal): Promise<OpenShellResource> {
     const mount = isSnapshotIdentity(intent.identity) ? this.snapshotMount?.(intent) : undefined;
     if (isSnapshotIdentity(intent.identity) && (!mount || !this.dataIdentity)) throw new OpenShellError("openshell_scope_invalid");
     if (intent.identity.purpose === "validate" && !this.validatorReady()) throw new OpenShellError("openshell_scope_invalid");
     const pi = this.piBlock(intent);
-    if (intent.identity.purpose === "model_session" && this.configuration.pi && intent.identity.image === this.configuration.pi.image) throw new OpenShellError("openshell_scope_invalid");
     if (["model", "model_session"].includes(intent.identity.purpose) && !this.configuration.model && !pi) throw new OpenShellError("openshell_scope_invalid");
     if (this.configuration.pi && this.configuration.model && intent.identity.purpose === "model" && !pi && intent.identity.image !== this.configuration.model.image) throw new OpenShellError("openshell_scope_invalid");
     await this.command(["sandbox", "create", "--name", intent.name, "--from", pi ? pi.image : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.image : isSnapshotIdentity(intent.identity) ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image, "--policy", pi ? pi.policy : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.policy : mount ? this.configuration.dataPolicy! : this.configuration.policy,
@@ -200,7 +202,10 @@ export class OpenShellCliDriver implements OpenShellDriver {
     if ([...this.volumeNames(intent.remoteId), ...(intent.volumes ?? [])].some((volume) => volumes.includes(volume))) throw new OpenShellError("openshell_cleanup_pending");
   }
   async duplex(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex> {
-    const pi = this.piBlock(intent) !== undefined && argv.length === 2 && argv[0] === "/usr/local/bin/node" && argv[1] === "/opt/genbi/pi-worker.mjs";
+    const piIntent = this.piBlock(intent) !== undefined;
+    // pi image: the per-step worker for a step intent, the session-step entrypoint for the owned session. Nothing else, and never a Claude entrypoint.
+    const pi = piIntent && argv.length === 2 && argv[0] === "/usr/local/bin/node"
+      && (intent.identity.purpose === "model" ? argv[1] === "/opt/genbi/pi-worker.mjs" : argv[1] === OPENSHELL_SESSION_ARGV.pi.step[1]);
     const model = !this.piBlock(intent) && ["model", "model_session"].includes(intent.identity.purpose) && this.modelIdentity && argv.length === 2 && argv[0] === "/usr/local/bin/node" && (argv[1] === "/opt/genbi/claude-worker.mjs" || (intent.identity.purpose === "model_session" && argv[1] === "/opt/genbi/claude-session-step.mjs"));
     const sameArgv = (expected: readonly string[]) => argv.length === expected.length && expected.every((value, index) => argv[index] === value);
     const data = intent.identity.purpose === "data" && !!this.configuration.dataWorker && sameArgv(DATA_WORKER_ARGV);
@@ -214,6 +219,10 @@ export class OpenShellCliDriver implements OpenShellDriver {
   }
   async exec(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<string> {
     if (!argv.length || !path.posix.isAbsolute(argv[0]!) || argv.some((value) => value.includes("\0")) || Buffer.byteLength(JSON.stringify(argv)) > 65_536) throw new OpenShellError("openshell_scope_invalid");
+    // The pi scripts belong to the pi image alone, and an owned pi session runs only its fixed step control.
+    const pi = this.piBlock(intent);
+    if (!pi && argv.some(value => PI_IMAGE_SCRIPTS.includes(value))) throw new OpenShellError("openshell_scope_invalid");
+    if (pi && intent.identity.purpose === "model_session" && !(argv.length >= 3 && argv.length <= 4 && argv[0] === OPENSHELL_SESSION_ARGV.pi.control[0] && argv[1] === OPENSHELL_SESSION_ARGV.pi.control[1])) throw new OpenShellError("openshell_scope_invalid");
     return this.command(["sandbox", "exec", "--name", intent.name, "--workdir", "/sandbox", "--timeout", "30", "--no-login-shell", "--no-tty",
       "--env", "HOME=/sandbox", "--env", "PATH=/usr/bin:/bin", "--", ...argv], signal, 35_000);
   }

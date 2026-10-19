@@ -329,8 +329,20 @@ object. It only verifies, read-only and fail-closed at boot, before every Ask an
 sandbox, that the provider exists with the profile as its type, that the exported profile has the
 recorded digest with exactly one endpoint and only the node binary, and that the credential name
 matches. The setup steps and the descriptor shape are in `runtime-assets/pi-worker/README.md`.
-Only the `answer_query` Ask is available; setup, dashboards, enrichment, hybrid and native
-sessions stay unavailable, exactly as for Claude, and nothing falls back to in-process execution.
+The `answer_query` Ask and the scoped Native Session are available; setup, dashboards, enrichment and hybrid
+stay unavailable, exactly as for Claude, and nothing falls back to in-process execution.
+
+A pi Native Session is the Claude scoped session with pi as the step worker. An explicit api-key or gateway
+Runtime binding on this boot is the pi native binding (`provider: "pi"`, `target: "pi:scoped-events"`; a
+subscription binding is not one). Creating the session reserves one owned pi-image sandbox, after the same
+read-only gateway proof as every Ask. Each turn runs the governed `answer_query` route, and each component step
+is a fresh `pi --mode json` process inside that sandbox, in its own `/sandbox/steps/<step>` directory behind a
+private receipt: the sandbox is baselined before the first step, checked before every step, and every step's
+process group and directory are proven gone before the next one starts. Anything uncertain interrupts the
+session and tears down its sandbox. Conversation memory is host-owned (validated answers and refusals prepended
+as context); pi holds no state between steps. The gateway objects are re-verified while a session lives, and a
+change destroys its sandbox at once. pi is never a host-terminal target: it is not an interactive target, and
+both `/api/context/terminal/*` launch routes refuse it.
 
 This backend requires a **GenBI-exclusive gateway/workspace with no other resource writer**,
 and one lifecycle controller per private state root. Shared gateways are unsupported.
