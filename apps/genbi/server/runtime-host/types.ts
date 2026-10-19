@@ -51,7 +51,7 @@ export const RUNTIME_BACKEND_REASON_CODES = {
     "runtime_policy_unavailable",
     "runtime_probe_failed",
   ],
-  openshell: ["openshell_unavailable", "openshell_configuration_invalid", "openshell_exclusivity_required", "openshell_gateway_unavailable", "openshell_version_mismatch", "openshell_identity_mismatch", "openshell_protocol_invalid", "openshell_scope_invalid", "openshell_cancelled", "openshell_journal_failed", "openshell_ownership_mismatch", "openshell_remote_unknown", "openshell_cleanup_pending", "runtime_probe_failed"],
+  openshell: ["openshell_unavailable", "openshell_configuration_invalid", "openshell_exclusivity_required", "openshell_gateway_unavailable", "openshell_version_mismatch", "openshell_identity_mismatch", "openshell_protocol_invalid", "openshell_scope_invalid", "openshell_cancelled", "openshell_journal_failed", "openshell_ownership_mismatch", "openshell_remote_unknown", "openshell_cleanup_pending", "pi_uncertified", "pi_identity_mismatch", "pi_dependencies_drifted", "runtime_probe_failed"],
   "claude-sandbox-runtime": [
     "claude_sandbox_runtime_unprovisioned",
     "claude_cli_missing",

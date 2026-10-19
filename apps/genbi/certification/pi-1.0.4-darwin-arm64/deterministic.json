@@ -1,0 +1,151 @@
+{
+  "kind": "deterministic_pi_evidence",
+  "date": "2026-10-19",
+  "vendor": "pi",
+  "runner": "scripts/pi-backend-probe.mjs",
+  "modelCalls": 0,
+  "mode": "gateway",
+  "piVersion": "1.0.4",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "gateway": {
+    "version": "0.0.117-dev.167+g7e7a8d561",
+    "executableSha256": "f93bd7a5198527604cd507fcfdd02895e2ee50dc48128d38bec72ad853d42654"
+  },
+  "dependencies": {
+    "warble": "0.19.0",
+    "ir": "0.9.0",
+    "context-loader": "0.1.4"
+  },
+  "sandboxesCreated": 3,
+  "ok": true,
+  "checks": [
+    {
+      "name": "certification row is a strict certified_row",
+      "ok": true
+    },
+    {
+      "name": "shipped pi assets hash to the certified pins and templates",
+      "ok": true
+    },
+    {
+      "name": "the certified row is ready for exactly its own observation",
+      "ok": true
+    },
+    {
+      "name": "rendered policy is deny-all plus one endpoint and the node binary",
+      "ok": true
+    },
+    {
+      "name": "rendered profile holds one credential name, one endpoint and the node binary only",
+      "ok": true
+    },
+    {
+      "name": "operator helper dry run plans, runs nothing and prints the provider command with a placeholder",
+      "ok": true
+    },
+    {
+      "name": "lifecycle probe is ready",
+      "ok": true
+    },
+    {
+      "name": "gateway proof passes: provider, profile, one endpoint, node binary, credential name",
+      "ok": true
+    },
+    {
+      "name": "the configured image, policy, profile, OpenShell build and components are certified",
+      "ok": true,
+      "detail": {
+        "piVersion": "1.0.4"
+      }
+    },
+    {
+      "name": "credential variable holds only the OpenShell placeholder, never a key-shaped value",
+      "ok": true,
+      "detail": {
+        "present": true,
+        "placeholder": true,
+        "startsWithSk": false
+      }
+    },
+    {
+      "name": "positive control: the one allowed endpoint is reachable from the sandbox",
+      "ok": true,
+      "detail": {
+        "reached": true,
+        "status": 200
+      }
+    },
+    {
+      "name": "egress denial: the public internet is blocked",
+      "ok": true,
+      "detail": {
+        "reached": false
+      }
+    },
+    {
+      "name": "egress denial: another port on the allowed host is blocked",
+      "ok": true,
+      "detail": {
+        "reached": false
+      }
+    },
+    {
+      "name": "per-step round trip: the real pi called the one host tool and relayed the stub's answer",
+      "ok": true
+    },
+    {
+      "name": "per-step cleanup proven by sandbox teardown",
+      "ok": true,
+      "detail": {
+        "reason": "settled",
+        "processes": "not_checked",
+        "teardown": "proven"
+      }
+    },
+    {
+      "name": "session turn-1: the real pi called the one host tool and answered",
+      "ok": true
+    },
+    {
+      "name": "session turn-2: the real pi called the one host tool and answered",
+      "ok": true
+    },
+    {
+      "name": "session: exactly one sandbox served both turns",
+      "ok": true,
+      "detail": {
+        "sandboxesForTwoTurns": 1
+      }
+    },
+    {
+      "name": "session: baseline once, then check and cleanup around each turn, nothing left running",
+      "ok": true,
+      "detail": {
+        "controls": "baseline,check,cleanup,check,cleanup"
+      }
+    },
+    {
+      "name": "the stub only ever saw the placeholder, never a key-shaped Authorization value",
+      "ok": true
+    },
+    {
+      "name": "no frame crossing the host-sandbox channel held a key-shaped value",
+      "ok": true,
+      "detail": {
+        "frames": 55,
+        "keyShaped": 0
+      }
+    },
+    {
+      "name": "cleanup: every ownership intent is cleaned and no sandbox this run created remains",
+      "ok": true,
+      "detail": {
+        "sandboxesCreated": 3,
+        "remaining": 0
+      }
+    }
+  ]
+}

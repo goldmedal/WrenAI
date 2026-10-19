@@ -7,7 +7,7 @@ host broker's step tools, reached over the single duplex the host opens with the
 | --- | --- |
 | `Dockerfile` | linux/arm64 only. Pinned Node base, `ca-certificates`, `iproute2`, `nftables`, pi 1.0.4 from `package-lock.json` via `npm ci`, npm and npx removed, uid/gid 1500. No Wren, no project data, no host HOME. |
 | `package.json`, `package-lock.json` | GenBI-owned lockfile that freezes every transitive pi dependency; the root dependency is the exact version. |
-| `pi-worker.mjs` | Entry. Verifies `pins.json` (Node, the worker files, pi's `dist/bundle` tree), then starts the core. |
+| `pi-worker.mjs` | Entry. Verifies the image against its own `pins.json` (Node, the worker files, pi's `dist/bundle` tree), then starts the core. That start-time check is self-consistency only: `pins.json` lives in the image, so it cannot tell a different image from this one. |
 | `pi-worker-core.mjs` | Materialises exactly what the host computed (agent dir with three files, system prompt, empty cwd and HOME), re-checks it before pi starts, runs pi, relays events and tool frames, ends in-band. |
 | `pi-mcp-shim.mjs` | The stdio MCP server pi launches. Forwards JSON lines to the worker's per-step unix socket; no network, no environment access. |
 | `pi-session-step.mjs` | Host-only entrypoint for a step inside an owned session sandbox. A thin supervisor around the unchanged per-step worker: writes the private step receipt before the worker sees a byte, relays its frames, and writes the settled marker only after a clean in-band exit. |
@@ -16,6 +16,8 @@ host broker's step tools, reached over the single duplex the host opens with the
 | `policy.template.yaml`, `profile.template.yaml` | Deny-all policy plus one model endpoint, and the provider profile for it. Render with `renderPiEndpointAssets` (endpoint host and port are parameters). |
 
 ## Operator steps (the operator provisions, the server only verifies)
+
+The shipped helper does steps 1 to 6 below for you (`genbi-openshell-pi provision`, then `verify`; see `INSTALL.md`) and only **prints** step 3's command, because it must never see your key. The manual steps stay as the reference for what it does.
 
 The BFF process never holds the model vendor key and never creates or changes a gateway object. Everything below is done by the operator; at boot and again before every Ask and every step sandbox the server
 re-checks, read-only, that the gateway still holds exactly what the descriptor names.

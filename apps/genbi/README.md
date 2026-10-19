@@ -171,6 +171,13 @@ session closes its processes; restart creates a fresh session rather than resumi
 thread. Remote terminal admission requires its own `remote-tui-v1` certification evidence in
 addition to the driver certification.
 
+pi runs only inside an OpenShell image, so its identity is that image and never an executable on the host: the host does not run pi and does not discover it from `PATH`.
+Under `GENBI_RUNTIME=openshell` with `GENBI_BACKEND=pi`, readiness requires an exact certified row (`server/runtime-host/openshell-vendor-certification.ts`) for the host,
+the OpenShell build, the image's `pins.json` (pi version and bundle digest, lockfile, Node, worker, supervisor, shim, step-control and CA-trust file digests), the shipped policy and profile
+templates, and the Warble, IR and context-loader versions. A `tested_baseline` record, a missing or partial row, an image whose declared `pins.json` differs from the row, or a changed template is never ready (the gate guards against drift and mistakes, not against a deliberately built image; its limits are in [`PI.md`](./server/runtime-host/PI.md#what-the-gate-does-not-prove)): the browser sees
+the fixed codes `pi_uncertified`, `pi_identity_mismatch` and `pi_dependencies_drifted`. Claude on OpenShell keeps its existing readiness (it has no row yet). See
+[`server/runtime-host/PI.md`](./server/runtime-host/PI.md) and the [certification record](./certification/pi-1.0.4-darwin-arm64/README.md).
+
 `test/component-default-parity.test.ts` compares the real default profile across Vercel and
 both native producer formats using deterministic model/database responses. It exercises the
 host broker, context verifier, result normalizer and native admission, including repeated
@@ -318,8 +325,9 @@ With `GENBI_RUNTIME=openshell` and `GENBI_BACKEND=pi`, the boot serves the pi st
 api-key and gateway Ask instead of Claude (one model backend per boot), with
 `GENBI_OPENSHELL_PI_BOOT` naming a protected descriptor with the same file rules; that variable,
 like every `GENBI_OPENSHELL_*` variable, refuses boot under `local`. `pi` is always offered on the
-OpenShell row when listed; it is ready only when its descriptor and gateway verification succeed,
-and otherwise readiness reports it unavailable. The Claude descriptor and vault are not read in
+OpenShell row when listed; it is ready only when its descriptor, driver probe and gateway verification succeed **and** a certified identity row matches the configured image, policy,
+profile and OpenShell build (`pi_uncertified`, `pi_identity_mismatch`, `pi_dependencies_drifted` otherwise), and otherwise readiness reports it unavailable. The Setup Runtime step shows the pi backend,
+its readiness and reason code, the provider label and the pinned model per tier read-only; saving applies the pins. It never shows the endpoint, credential name, profile or any path. The Claude descriptor and vault are not read in
 that mode, the driver configuration carries the `pi` block and no `model` block, and a
 subscription Ask is not offered. The descriptor
 names an operator-provisioned OpenShell provider and provider profile, one pinned model id per
@@ -328,7 +336,9 @@ tier, and the one model endpoint; the BFF never holds the vendor key, never read
 object. It only verifies, read-only and fail-closed at boot, before every Ask and every step
 sandbox, that the provider exists with the profile as its type, that the exported profile has the
 recorded digest with exactly one endpoint and only the node binary, and that the credential name
-matches. The setup steps and the descriptor shape are in `runtime-assets/pi-worker/README.md`.
+matches. Provision a boot with the shipped operator helper, which builds the image, renders and imports the policy and profile, writes the protected descriptor and driver block and
+**prints** the provider-create command for you to run with your own key (it never reads, accepts or stores a key); see [INSTALL.md](./INSTALL.md#openshell-pi-boot-operators). The descriptor
+shape is in `runtime-assets/pi-worker/README.md`.
 The `answer_query` Ask and the scoped Native Session are available; setup, dashboards, enrichment and hybrid
 stay unavailable, exactly as for Claude, and nothing falls back to in-process execution.
 

@@ -23,7 +23,8 @@
     "node": ">=20"
   },
   "bin": {
-    "genbi": "bin/genbi.mjs"
+    "genbi": "bin/genbi.mjs",
+    "genbi-openshell-pi": "bin/genbi-openshell-pi.mjs"
   },
   "type": "module",
   "scripts": {

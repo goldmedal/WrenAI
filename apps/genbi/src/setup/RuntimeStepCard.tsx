@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Alert, AutoComplete, Button, Collapse, Input, Segmented, Space } from 'antd';
+import { Alert, AutoComplete, Button, Collapse, Input, Segmented, Space, Tag } from 'antd';
 import { ExecutionLimitsEditor } from '@/harness/ExecutionLimitsEditor';
 import { Panel } from '@/ui';
 import { t } from '@/i18n/strings';
 import { getGatewayModelCatalog, getStructuredAskReadiness } from '@/bff/client';
+import type { StructuredBackendReadiness } from '@/bff/client';
 import { isBffEnabled } from '@/bff/env';
 import { useSetupStore } from './useSetupStore';
 import { CLAUDE_TIER_MODELS } from './claude-tier-models';
@@ -121,9 +122,16 @@ function ModelInput({ label, value, placeholder, catalog, allowedModels, onChang
   );
 }
 
-/** Which subscription providers this boot offers; absent until known, so nothing is disabled on a guess. */
-function useOfferedProviders(): Partial<Record<SubscriptionProvider, boolean>> | undefined {
-  const [offered, setOffered] = useState<Partial<Record<SubscriptionProvider, boolean>>>();
+interface BootReadiness {
+  /** Which subscription providers this boot offers. */
+  readonly offered: Partial<Record<SubscriptionProvider, boolean>>;
+  /** The pi backend, only when this boot offers it and carries a protected descriptor to show. */
+  readonly pi?: StructuredBackendReadiness;
+}
+
+/** What the boot offers; absent until known, so nothing is disabled on a guess. */
+function useBootReadiness(): BootReadiness | undefined {
+  const [boot, setBoot] = useState<BootReadiness>();
   useEffect(() => {
     if (!isBffEnabled()) return;
     let cancelled = false;
@@ -132,14 +140,73 @@ function useOfferedProviders(): Partial<Record<SubscriptionProvider, boolean>> |
       getStructuredAskReadiness().then(
         (value) => {
           const backends = value.backends;
-          if (!cancelled && backends) setOffered({ claude: backends.claude?.offered, codex: backends.codex?.offered });
+          if (!cancelled && backends) {
+            const pi = backends.pi?.offered && backends.pi.pinned ? backends.pi : undefined;
+            setBoot({ offered: { claude: backends.claude?.offered, codex: backends.codex?.offered }, ...(pi ? { pi } : {}) });
+          }
         },
         () => {},
       );
     } catch { /* readiness unavailable */ }
     return () => { cancelled = true; };
   }, []);
-  return offered;
+  return boot;
+}
+
+/**
+ * A pi boot fixes the provider and one model per tier in the server configuration, so nothing here is chosen: the panel shows the backend,
+ * its readiness and the pins, and saving applies them. There is no catalog, no endpoint and no credential field.
+ */
+function PiRuntimePanel({ readiness }: { readiness: StructuredBackendReadiness }) {
+  const runtimeTierNames = useSetupStore((s) => s.runtimeTierNames);
+  const runtimeTierNamesError = useSetupStore((s) => s.runtimeTierNamesError);
+  const savePinnedRuntimeSettings = useSetupStore((s) => s.savePinnedRuntimeSettings);
+  const runtimeSettingsSaving = useSetupStore((s) => s.runtimeSettingsSaving);
+  const runtimeSettingsError = useSetupStore((s) => s.runtimeSettingsError);
+  const pinned = readiness.pinned!;
+  const unpinned = runtimeTierNames.filter((tier) => !Object.hasOwn(pinned.models, tier));
+  const ready = readiness.state === 'ready';
+  const saveDisabled = runtimeSettingsSaving || runtimeTierNames.length === 0 || unpinned.length > 0;
+  return (
+    <Panel title={t('setup.runtimeTitle')} note={t('setup.runtimeDescription')}>
+      <Space direction="vertical" size={16} style={{ width: '100%' }}>
+        <div>
+          <div style={{ marginBottom: 4, fontWeight: 500 }}>{t('setup.piRuntimeBackend')}</div>
+          <Space>
+            <span>{t('setup.piRuntimeBackendValue')}</span>
+            <Tag color={ready ? 'success' : 'warning'}>{ready ? t('setup.piRuntimeStateReady') : t('setup.piRuntimeStateNotReady')}</Tag>
+          </Space>
+          {!ready && (
+            <Alert style={{ marginTop: 8 }} type="warning" showIcon message={readiness.reason}
+              description={readiness.code ? `${t('setup.piRuntimeReasonPrefix')}${readiness.code}` : undefined} />
+          )}
+        </div>
+        <div>
+          <div style={{ marginBottom: 4, fontWeight: 500 }}>{t('setup.piRuntimeProvider')}</div>
+          <div>{pinned.provider}</div>
+          <div style={{ opacity: 0.65, fontSize: 12, marginTop: 4 }}>{t('setup.piRuntimeAuth')}: {pinned.auth === 'gateway' ? t('setup.piRuntimeAuthGateway') : t('setup.piRuntimeAuthByo')}</div>
+        </div>
+        <div>
+          <div style={{ marginBottom: 4, fontWeight: 500 }}>{t('setup.piRuntimePinnedTitle')}</div>
+          <div style={{ opacity: 0.65, fontSize: 12, marginBottom: 8 }}>{t('setup.piRuntimePinnedNote')}</div>
+          {runtimeTierNamesError && <Alert style={{ marginBottom: 8 }} type="error" showIcon message={t('setup.tierDiscoveryErrorTitle')} description={runtimeTierNamesError} />}
+          <table aria-label={t('setup.piRuntimePinnedTitle')} style={{ borderCollapse: 'collapse' }}>
+            <tbody>
+              {Object.entries(pinned.models).map(([tier, model]) => (
+                <tr key={tier}>
+                  <th scope="row" style={{ textAlign: 'left', fontWeight: 500, padding: '2px 16px 2px 0' }}>{tier}</th>
+                  <td><code>{model}</code></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {unpinned.length > 0 && <Alert style={{ marginTop: 8 }} type="error" showIcon message={`${t('setup.piRuntimeTierMissing')}${unpinned.join(', ')}`} />}
+        </div>
+        {runtimeSettingsError && <Alert type="error" showIcon message={t('setup.runtimeSaveErrorTitle')} description={runtimeSettingsError} />}
+        <Button type="primary" disabled={saveDisabled} onClick={() => savePinnedRuntimeSettings(pinned)}>{runtimeSettingsSaving ? t('setup.savingRuntime') : t('setup.piRuntimeSave')}</Button>
+      </Space>
+    </Panel>
+  );
 }
 
 /** pi-ai's offline catalog for the gateway option; absent in fixture mode or while loading. */
@@ -173,7 +240,8 @@ export function RuntimeStepCard() {
   const runtimeSettingsSaving = useSetupStore((s) => s.runtimeSettingsSaving);
   const runtimeSettingsError = useSetupStore((s) => s.runtimeSettingsError);
   const adapterEnvStatus = useSetupStore((s) => s.adapterEnvStatus);
-  const offeredProviders = useOfferedProviders();
+  const bootReadiness = useBootReadiness();
+  const offeredProviders = bootReadiness?.offered;
 
   // Setup offers subscription and the org gateway. Any other hydrated mode is
   // projected onto the subscription form without overwriting it until a save.
@@ -213,6 +281,8 @@ export function RuntimeStepCard() {
   const saveDisabled = gateway
     ? runtimeSettingsSaving || !rowsValid || !gatewayProvider.trim() || gatewayBaseUrlInvalid
     : runtimeSettingsSaving || !rowsValid || !subscriptionLoggedIn || !runtimeSettings.subscriptionDriverModel?.trim();
+
+  if (bootReadiness?.pi) return <PiRuntimePanel readiness={bootReadiness.pi} />;
 
   return (
     <Panel title={t('setup.runtimeTitle')} note={t('setup.runtimeDescription')}>

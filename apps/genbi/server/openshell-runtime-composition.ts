@@ -12,6 +12,7 @@ import { OpenShellProjectSnapshots, snapshotSourceAuthority } from "./runtime-ho
 import { readOpenShellClaudeBoot, verifyRetainedOpenShellClaudeBoot } from "./runtime-host/openshell-claude-boot.js";
 import { readOpenShellPiBoot, piProviderConfig, type OpenShellModelVendor, type OpenShellPiBoot } from "./runtime-host/openshell-pi-boot.js";
 import { createPiGatewayVerifier, type PiGatewayVerifier } from "./runtime-host/openshell-pi-gateway.js";
+import { createPiCertificationGate, requirePiCertification, type PiCertificationGate, type PiGateOptions } from "./runtime-host/openshell-pi-identity.js";
 import { createOpenShellPiProvider, type PiProviderOptions } from "./runtime-host/openshell-pi-provider.js";
 import { snapshotHash } from "./runtime-host/openshell-snapshot-driver.js";
 import { openOpenShellWrenAccess } from "./runtime-host/openshell-wren-access.js";
@@ -36,12 +37,22 @@ export interface ValidatorSession {
 /** Outcome of the boot-time gateway proof; only a pi boot has one. */
 export type PiBootVerification = { readonly ok: boolean; readonly code?: string } | undefined;
 /** A pi boot's protected descriptor and the read-only gateway verification bound to it. */
-export interface OpenShellPiRuntime { readonly boot: OpenShellPiBoot; readonly verifyGateway: PiGatewayVerifier }
+export interface OpenShellPiRuntime {
+  readonly boot: OpenShellPiBoot;
+  /** Read-only proof; for a boot this module composes it also requires the certified identity, so a mid-run drift revokes the run. */
+  readonly verifyGateway: PiGatewayVerifier;
+  /** The certification gate readiness reports through. Absent only on the trusted host test seam, which supplies its own `verifyGateway`. */
+  readonly certify?: PiCertificationGate;
+}
 
 /** BFF-owned lifecycle seam. Deliberately supplies no model operation or browser command API. The selection names the one model backend this boot serves. */
 export async function createOpenShellRuntimeComposition(options: { env: NodeJS.ProcessEnv; selection: RuntimeSelection; store: Store; stateRoot: string; driver?: OpenShellDriver; currentProject?: () => string | undefined; currentContext?: () => string | undefined; claude?: { vaultRoot: string; duplex(intent: OpenShellIntent, argv: readonly string[], signal: AbortSignal): Promise<OpenShellDuplex> };
   /** Trusted host test seam; no environment, browser or API chooses it. */
-  pi?: OpenShellPiRuntime }) {
+  pi?: OpenShellPiRuntime;
+  /** Trusted host test seam for the certification gate's rows, host tuple and readers; production passes nothing. */
+  piCertification?: Partial<Pick<PiGateOptions, "rows" | "installed" | "host" | "readPins" | "readFile" | "run">>;
+  /** Trusted host test seam for the read-only gateway proof; production passes nothing and the real verifier runs. The certification requirement wraps it either way. */
+  piGatewayProof?: PiGatewayVerifier }) {
   const config = readOpenShellConfiguration(options.env, options.selection);
   if (options.selection.runtime === "openshell" && isBackendOffered(options.selection, "pi")) return composePi(options, config);
   const boot = !options.claude && config.configuration && config.selected ? readOpenShellClaudeBoot(options.env, options.selection) : undefined;
@@ -63,7 +74,9 @@ async function composePi(options: CompositionOptions, config: ReturnType<typeof 
   const runtime: OpenShellPiRuntime | undefined = !usable ? undefined : options.pi ?? (() => {
     const boot = readOpenShellPiBoot(options.env, options.selection);
     if (!boot || boot.descriptor.provider !== driverConfiguration!.pi!.provider) return undefined;
-    return { boot, verifyGateway: createPiGatewayVerifier({ configuration: driverConfiguration!, descriptor: boot.descriptor }) };
+    const verifyGateway = options.piGatewayProof ?? createPiGatewayVerifier({ configuration: driverConfiguration!, descriptor: boot.descriptor });
+    const certify = createPiCertificationGate({ configuration: driverConfiguration!, descriptor: boot.descriptor, ...options.piCertification });
+    return { boot, certify, verifyGateway: requirePiCertification(verifyGateway, certify) };
   })();
   const composition = await compose({ ...options, env: usable ? options.env : { ...options.env, GENBI_OPENSHELL_CONFIG: "" } }, undefined, undefined, { vendor: "pi", ...(runtime ? { pi: runtime } : {}) });
   let bootVerification: PiBootVerification = { ok: false, code: "openshell_configuration_invalid" };
@@ -104,9 +117,17 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
     }
     try { await lifecycle.initialize(); } catch { /* startup ownership uncertainty remains unavailable */ }
   }
-  const probe = (): Promise<RuntimeBackendProbeResult<"openshell">> => (model.vendor === "claude" || pi) && lifecycle ? lifecycle.probe() : Promise.resolve({
-    readiness: runtimeNotReady("openshell", "unprovisioned", "openshell_configuration_invalid"), diagnostic: { phase: "provisioning" },
-  });
+  const probe = async (): Promise<RuntimeBackendProbeResult<"openshell">> => {
+    if (!((model.vendor === "claude" || pi) && lifecycle)) return { readiness: runtimeNotReady("openshell", "unprovisioned", "openshell_configuration_invalid"), diagnostic: { phase: "provisioning" } };
+    const result = await lifecycle.probe();
+    if (result.readiness.state !== "ready" || !pi?.certify) return result;
+    // A pi boot is ready only with a certified row for the exact image, policy, profile and OpenShell build; Claude's readiness is not gated here.
+    let verdict: Awaited<ReturnType<PiCertificationGate>>;
+    try { verdict = await pi.certify(); } catch { verdict = { ready: false, code: "runtime_probe_failed" }; }
+    if (verdict.ready) return result;
+    return { readiness: runtimeNotReady("openshell", verdict.code === "runtime_probe_failed" ? "unavailable" : "incompatible", verdict.code),
+      diagnostic: { phase: "identity", ...("drift" in verdict && verdict.drift ? { drift: verdict.drift } : {}) } as RuntimeBackendProbeResult<"openshell">["diagnostic"] };
+  };
   const adapter: StructuredAdapter = { vendor: model.vendor, backend: "openshell", probe: async () => (await probe()).readiness };
   return { selected: configuration.selected, modelVendor: model.vendor, piBoot: pi?.boot, verifyPiGateway: pi?.verifyGateway, lifecycle, snapshots, adapter, probe,
     dataWorkerAvailable: !!(configuration.configuration?.dataWorker && snapshots && (options.claude || pi)),

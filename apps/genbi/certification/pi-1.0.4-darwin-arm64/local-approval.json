@@ -1,0 +1,56 @@
+{
+  "kind": "local_exact_identity_approval",
+  "date": "2026-10-19",
+  "authority": "The project owner approved the scope and method of this exact-identity certification of the pi step-worker image for local OpenShell acceptance. This record documents the identity accepted by the deterministic probes and the packed-install acceptance referenced here.",
+  "vendor": "pi",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "imageArch": "linux-arm64",
+  "gateway": {
+    "version": "0.0.117-dev.167+g7e7a8d561",
+    "executableSha256": "f93bd7a5198527604cd507fcfdd02895e2ee50dc48128d38bec72ad853d42654"
+  },
+  "image": {
+    "nodeBase": "node:24.20.0-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e",
+    "pins": {
+      "nodeVersion": "v24.20.0",
+      "piVersion": "1.0.4",
+      "piBundle": "99a5efa3dca87774c0332423d0f65a60b14c023fc9bba6fe4bf2aa3069dfb937",
+      "node": "23a5637c2470fde09fcc1acc77c1b92e04e3d7e3e6e80ff7df6f5831958d1477",
+      "worker": "509bd40fcfa595f662b2f8d9a5da13f464d7ffd167e63d98acaa8f92d34dc18b",
+      "workerCore": "0b8f58623b2e291f8931ec470c6e025f08aa20dfb189802a03c4f6c2962a83ae",
+      "shim": "8dff4346866cc0b12483146960a396928e34edc5d37cd03f01fd364a1b458897",
+      "procCheck": "9ec6f0f9945e8cbdc58986be2837de623279015a347595b4b03b90942ba48fd9",
+      "sessionStep": "2c387f0952026451bec22e12cd315212b6eba9f5f775b0e1cc912315f45037c9",
+      "stepControl": "87b33c39b5bd9e77fecec1d3756e9e43aee64ef81d0869e4d1edecd603bb6756",
+      "trust": "9b5376ad8876013407d7b614daec62a77bb813f94ffb06c53818ff1eb7809d87",
+      "pins": "2e6ad19f0a4d35c257b2aa7bf2d54d7a133e22606800ec7dbc8fd936e54944d1",
+      "lockfile": "a714e93d80449d851cf5c51d0cd6122f0696c4a2e20f7bf848e9b6588490e98b"
+    },
+    "templates": {
+      "policy": "30832a2ee6ca301ab20fbef2c87599240d78101f17877e29f68299b5a68be3f6",
+      "profile": "efb0b63560491e1f9d1427f6cb510880786c5b6bc1192295fbcbfa20c7d6566e"
+    }
+  },
+  "dependencies": {
+    "warble": "0.19.0",
+    "ir": "0.9.0",
+    "context-loader": "0.1.4"
+  },
+  "deterministicProbesSha256": "09eaf76c861039ace0d477eca102cfee115ace60d835b7697199ab085733b629",
+  "packedAcceptanceSha256": "e76737271332f39548f7353aa6fc6c77198eb3de55f729cd026626b9473c23cb",
+  "realModelAcceptance": {
+    "role": "acceptance record cited by this approval; it is not a certification input and its digest is not in the row",
+    "date": "2026-10-16",
+    "summary": "One Structured Ask answer_query through pi in the OpenShell scoped runtime against a real OpenAI-compatible endpoint (model gpt-6-luna, api openai-responses) produced a host-verified answer equal to an independent oracle (23 completed orders of 60), using 3 vendor requests of a budget of 20.",
+    "credentialEnvironment": "The sandbox's credential variable held only the OpenShell placeholder and no key-shaped value appeared in any evidence file.",
+    "notExercised": [
+      "gateway auth mode",
+      "a browser walk-through",
+      "Linux hosts"
+    ]
+  },
+  "scope": "Local exact-identity row and unmodified packed-install acceptance only. No publication, merge, release or default activation is authorized, and Claude on OpenShell is not certified by this record."
+}

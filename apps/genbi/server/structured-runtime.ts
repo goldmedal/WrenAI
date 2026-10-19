@@ -53,8 +53,19 @@ export interface StructuredAdapter {
   validateEnrichment?(request: EnrichmentValidationRequest, scope: StructuredScope): Promise<EnrichmentValidationResult>;
   enrichmentValidationAvailable?(): boolean;
 }
+/**
+ * What a pi boot lets the browser see of its operator configuration: a non-secret label, the authentication mode and one pinned model id per tier.
+ * Never the endpoint, credential name, profile, image, generation or any path or digest.
+ */
+export interface PiPinnedProjection {
+  readonly provider: string;
+  readonly auth: "byo" | "gateway";
+  readonly models: Readonly<Record<string, string>>;
+}
 interface Options {
   readonly diagnostics?: StructuredDiagnosticObserver;
+  /** The pi boot's pinned models for read-only display; absent when this boot has no pi descriptor. */
+  readonly piPins?: () => PiPinnedProjection | undefined;
   /** Where agents run and which backends this boot offers; the only source of backend choice. */
   readonly selection: RuntimeSelection;
   readonly onRevoke?: () => void;
@@ -128,6 +139,7 @@ export class StructuredRuntime {
         return [name, { offered: true, backend, state: localReady ? "ready" : "unavailable", ask: localReady, setup: localReady && !!this.options.localSetupFor({ mode: "subscription", provider: vendor }), reason: "Explicit local execution; vendor isolation is not claimed." }] as const;
       }
       const adapter = this.adapter(vendor);
+      const pins = name === "pi" && backend === "openshell" ? this.options.piPins?.() : undefined;
       let probe: RuntimeBackendReadiness | undefined;
       try { probe = await adapter?.probe(); } catch { /* fixed public failure below */ }
       const ready = !this.lifetime.signal.aborted && probe?.state === "ready";
@@ -135,7 +147,8 @@ export class StructuredRuntime {
         reason: !adapter ? "Selected vendor backend is not configured." : !ready ? "Selected vendor backend is not ready." : "Only explicitly supported operations are available.",
         ...(backend === "openshell" ? { modelExecution: "openshell", queryExecution: "openshell", enrich: ready && !!adapter?.enrich,
           supportedAgents: ["answer_query", ...(adapter?.enrich ? ["inspect_context", "draft_enrichment"] : [])] } : {}),
-        ...(probe && probe.state !== "ready" ? { code: probe.code } : {}) }] as const;
+        ...(probe && probe.state !== "ready" ? { code: probe.code } : {}),
+        ...(pins ? { pinned: { provider: pins.provider, auth: pins.auth, models: { ...pins.models } } } : {}) }] as const;
     }));
     const backends = Object.fromEntries(entries) as Record<BackendName, (typeof entries)[number][1]>;
     const inProcess = (offer: ReturnType<typeof inProcessAuthOffer>) => offer.offered

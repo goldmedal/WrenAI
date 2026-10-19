@@ -129,6 +129,25 @@ here because they aren't needed for a first install and run.
 
 Offline or air-gapped environments are not supported by this guide.
 
+## OpenShell pi boot (operators)
+
+This is for an administrator who runs GenBI with `GENBI_RUNTIME=openshell` and `GENBI_BACKEND=pi` (the pi step worker inside an OpenShell sandbox). The server never holds the model
+vendor key and never creates a gateway object; you do that once with the shipped helper. It needs Docker (with the buildx component), an OpenShell gateway and a base driver
+configuration (the OpenShell build, gateway, workspace, docker identity and the other images).
+
+1. Write a spec (strict JSON, closed field set; a key field is rejected): the base driver configuration path, an output directory, an image tag, the gateway URL and its three PKI files, `auth`
+   (`api-key` or `gateway`), provider name, profile id, display label, `generation`, the endpoint (`providerId`, `api`, `baseUrl`, and `credentialEnv`, the **name** of the variable your key lives in), and one exact model id per tier.
+   Add `dockerConfig` (a docker configuration directory holding the `cli-plugins` buildx) if the build cannot find buildx under the base configuration's home.
+2. Plan it: `npx --no-install genbi-openshell-pi provision --spec <absolute spec path> --dry-run`. It runs nothing and writes nothing.
+3. Provision: the same command without `--dry-run`. It builds the pi image from the shipped assets, renders the policy and profile, lints and imports the profile, and writes `policy.yaml`, `profile.yaml`, `pi-boot.json` and
+   `driver-config.json` (0600 files in a 0700 directory). Re-running is a no-op; a changed image, model, endpoint or file is refused unless you pass `--replace`.
+4. Run the printed `provider create` command yourself, in your own shell, with your key in the named variable. The helper never runs it and never sees the key.
+5. Check it: `npx --no-install genbi-openshell-pi verify --dir <output directory>` runs the checks boot readiness runs: descriptor, driver configuration, driver probe, gateway proof and the certified identity.
+6. Start the server with `GENBI_RUNTIME=openshell`, `GENBI_BACKEND=pi`, `GENBI_OPENSHELL_CONFIG=<dir>/driver-config.json` and `GENBI_OPENSHELL_PI_BOOT=<dir>/pi-boot.json`.
+
+pi is ready only when the identity matches a certified row. If `verify` reports `pi_uncertified` the host or OpenShell build has no row; `pi_identity_mismatch` means the image, policy or profile differs from the certified one (rebuild with the helper,
+do not edit the files); `pi_dependencies_drifted` means this install runs other Warble, IR or context-loader versions than the evidence used. `genbi-openshell-pi row` prints the packaged row.
+
 ## Troubleshooting
 
 **"@wrenai/context-loader unsupported-platform"** (during `npm install`) —

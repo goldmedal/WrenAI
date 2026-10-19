@@ -41,6 +41,7 @@ import type {
   ContextSummary,
   ConversationMessage,
   NativeRuntimeBinding,
+  PiPinnedRuntimeSettings,
   RuntimeSettings,
   SetupFailureRecovery,
   SubscriptionModelCatalog,
@@ -352,6 +353,11 @@ interface SetupStoreState {
    * current — 'connect' in create mode, 'adopt' in adopt mode.
    */
   saveRuntimeSettings: () => void;
+  /**
+   * Saves the runtime a pi boot pins: the boot's authentication mode and exactly its pinned model for every compiled tier, no base URL and no
+   * hybrid. Nothing here is typed by the user. Advances the step like `saveRuntimeSettings`.
+   */
+  savePinnedRuntimeSettings: (pinned: PiPinnedRuntimeSettings) => void;
   /**
    * Starts a real agentic connect turn (live mode) and streams its WorkLog
    * into `connectStream`; step 2 → done / step 3 (context) → current ONLY
@@ -959,6 +965,46 @@ export const useSetupStore = create<SetupStoreState>()((set, get) => {
                 role: 'assistant' as const,
                 text: warning,
               })),
+            ],
+          };
+        });
+        void useNativeSessions.getState().refreshReadiness();
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : t('ask.streamErrorGeneric');
+        set({ runtimeSettingsSaving: false, runtimeSettingsError: message });
+      });
+  },
+
+  savePinnedRuntimeSettings: (pinned) => {
+    const current = get();
+    const tierModels = current.runtimeTierNames.map((tier) => ({ tier, model: pinned.models[tier] }));
+    if (!isBffEnabled() || tierModels.length === 0 || tierModels.some((entry) => !entry.model)) return;
+    set((s) => ({ runtimeSettingsSaving: true, runtimeSettingsError: undefined, runtimeSettingsGeneration: s.runtimeSettingsGeneration + 1, runtimeSettingsDirty: true }));
+    putRuntimeSettings({
+      ...current.runtimeSettings,
+      authMode: pinned.auth,
+      hybrid: false,
+      apiKeyAdapter: 'openai-compatible',
+      apiKeyModel: '',
+      apiKeyBaseURL: '',
+      gatewayBaseURL: '',
+      tierModels,
+    })
+      .then(({ warnings, nativeSessionBinding, ...settings }) => {
+        set((s) => {
+          const nextKey = stepAfter(s.steps, 'runtime');
+          return {
+            runtimeSettings: settings,
+            nativeSessionBinding,
+            runtimeSettingsSaving: false,
+            runtimeSettingsError: undefined,
+            steps: advance(s.steps, 'runtime', nextKey),
+            selectedStepKey: nextKey,
+            messages: [
+              ...s.messages,
+              { id: nextMessageId(), role: 'assistant', text: t('setup.runtimeConfiguredMessage') },
+              ...warnings.map((warning) => ({ id: nextMessageId(), role: 'assistant' as const, text: warning })),
             ],
           };
         });

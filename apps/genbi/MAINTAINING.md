@@ -63,6 +63,9 @@ bump after it):
 7. Commit the `package.json` pin bump, the lockfile, and the corrected
    `pnpm-workspace.yaml` together as one change, following the pattern of the
    two example commits above.
+8. Know what the bump does to certified rows: the pi (and Codex) rows record the Warble, IR and context-loader versions their evidence was produced with, and
+   a bump makes readiness deny them (`pi_dependencies_drifted`, `codex_dependencies_drifted`) until they are re-certified. See
+   [Upgrading or re-certifying pi](#upgrading-or-re-certifying-pi).
 
 If a step is skipped: skipping step 1 (bumping the packages together) risks a
 `@warble/*` trio that didn't ship together and was never tested as a set.
@@ -74,6 +77,21 @@ step 5 leaves the pinned Warble unproven against this package's committed
 profiles, so the mismatch surfaces later, as a
 misleading "verified" tuple. Skipping steps 6–7 is the ordinary risk of
 skipping tests before a commit.
+
+### Upgrading or re-certifying pi
+
+pi readiness is an exact certified row (`server/runtime-host/openshell-vendor-certification.ts`, evidence in `certification/pi-<version>-<host>/`), so **any** of these changes needs a new row, never an edit of the old one's digests:
+a new pi version, a new `package-lock.json`, a new Node base image, a change to any `runtime-assets/pi-worker` file (worker, core, supervisor, shim, step control, proc check, CA trust, pins) or to the policy or profile template, a new
+OpenShell build, a new host platform, and a bump of the pinned `@warble/*`, `@warble/ir-spec` or `@wrenai/context-loader` versions (the last one denies pi with `pi_dependencies_drifted` until the row is renewed).
+
+1. pi releases often. Pin the exact version in `runtime-assets/pi-worker/package.json`, regenerate `package-lock.json` (`npm install --package-lock-only --ignore-scripts`), and update the version check in the Dockerfile.
+2. **Re-run the tools matrix of the first pi probe.** pi's `--tools` behaviour has changed in practice between versions: with no tool, a named tool and the `--no-tools` form, the step must expose exactly the host's tools and nothing else
+   (the deterministic checks live in `test/pi-worker.test.ts` and `test/openshell-pi-provider.test.ts`; confirm them against the real pi in the image, not only the simulator).
+3. Build the image with `genbi-openshell-pi provision` on a private test gateway and read the new `pins.json` (`docker create` the image and `docker cp` `/opt/genbi/pins.json -`).
+4. Run the deterministic probe against that boot (it uses an in-sandbox stub, no model): `node scripts/pi-backend-probe.mjs --dir <out dir> --prefix <your owned prefix> --out <file>` and keep its JSON as `deterministic.json`.
+5. Run `pnpm run check:installed-package` and keep the report as the packed-install acceptance, record the local approval, and add the new row (pins, templates, gateway build, host, component versions and the three evidence digests of the committed files) next to the previous one.
+   The static tests bind the row to the repository: file digests, lockfile, Dockerfile base, templates and the evidence bytes.
+6. A real-model smoke is an acceptance record cited by the approval, not a certification input.
 
 ## Regenerating a profile's prepared-context document and IR golden
 
