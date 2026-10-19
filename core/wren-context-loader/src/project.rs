@@ -346,11 +346,125 @@ pub fn read_knowledge_rules(dir: &std::path::Path) -> std::io::Result<KnowledgeR
         .map(|file| file.content.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
+    let (declared_defaults, warnings) = declared_default_ids(&files);
+    for warning in warnings {
+        eprintln!("wren-context-loader: {warning}");
+    }
     Ok(KnowledgeRules {
         content,
         used_legacy,
         files,
+        declared_defaults,
     })
+}
+
+const FRONT_MATTER_FENCE: &str = "---";
+const DECLARED_DEFAULT_KINDS: [&str; 2] = ["exclude_rows", "require_rate_join"];
+
+/// The declared default rule ids in `files`, in declaration order, plus warnings for anything
+/// that could not be read.
+///
+/// A rule file may open with a `---` fenced YAML block whose `defaults:` list declares rules the
+/// `wren` CLI enforces. This reads the ids only: validating the declarations is the CLI's job
+/// (it refuses to start on an invalid one), so a malformed block here yields no ids and a
+/// warning rather than an error. The id contract mirrors `wren.declared_defaults`: a leading
+/// fence as the first line, a closing fence, `defaults[].id` matching
+/// `^[a-z0-9][a-z0-9_-]{0,63}$`.
+///
+/// The outcome is all-or-nothing, like the CLI's: when anything is malformed (a bad id, an unknown
+/// kind, a repeated id, `defaults` not a list, invalid YAML, an unclosed fence) the id list is empty
+/// and the warnings say why, because the CLI voids the whole set and refuses to start, so a partial
+/// list could never match what it reports.
+pub fn declared_default_ids(files: &[KnowledgeRuleFile]) -> (Vec<String>, Vec<String>) {
+    let mut ids: Vec<String> = Vec::new();
+    let mut warnings = Vec::new();
+    for file in files {
+        let front = match front_matter(&file.content) {
+            Ok(Some(front)) => front,
+            Ok(None) => continue,
+            Err(message) => {
+                warnings.push(format!("{}: {message}; declared defaults void", file.path));
+                continue;
+            }
+        };
+        let data: serde_yaml::Value = match serde_yaml::from_str(&front) {
+            Ok(data) => data,
+            Err(_) => {
+                warnings.push(format!(
+                    "{}: front-matter is not valid YAML; declared defaults void",
+                    file.path
+                ));
+                continue;
+            }
+        };
+        let Some(entries) = data.get("defaults") else {
+            continue;
+        };
+        let Some(entries) = entries.as_sequence() else {
+            warnings.push(format!(
+                "{}: 'defaults' is not a list; declared defaults void",
+                file.path
+            ));
+            continue;
+        };
+        for (position, entry) in entries.iter().enumerate() {
+            let label = format!("{} defaults[{position}]", file.path);
+            let id = entry.get("id").and_then(serde_yaml::Value::as_str);
+            let Some(id) = id.filter(|id| is_declared_default_id(id)) else {
+                warnings.push(format!(
+                    "{label}: missing or malformed id; declared defaults void"
+                ));
+                continue;
+            };
+            let kind = entry.get("kind").and_then(serde_yaml::Value::as_str);
+            if !kind.is_some_and(|kind| DECLARED_DEFAULT_KINDS.contains(&kind)) {
+                warnings.push(format!("{label}: unknown kind; declared defaults void"));
+                continue;
+            }
+            if ids.iter().any(|seen| seen == id) {
+                warnings.push(format!(
+                    "{label}: duplicate id '{id}'; declared defaults void"
+                ));
+                continue;
+            }
+            ids.push(id.to_string());
+        }
+    }
+    if warnings.is_empty() {
+        (ids, warnings)
+    } else {
+        (Vec::new(), warnings)
+    }
+}
+
+/// Split a leading `---` fenced block off `text`: `Ok(None)` when the text does not open with
+/// one, an error when the fence never closes.
+fn front_matter(text: &str) -> Result<Option<String>, &'static str> {
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some(FRONT_MATTER_FENCE) {
+        return Ok(None);
+    }
+    let mut block = Vec::new();
+    for line in lines {
+        if line.trim_end() == FRONT_MATTER_FENCE {
+            return Ok(Some(block.join("\n")));
+        }
+        block.push(line);
+    }
+    Err("front-matter is not closed by a '---' line")
+}
+
+/// `^[a-z0-9][a-z0-9_-]{0,63}$`
+fn is_declared_default_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    let allowed = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && allowed(&bytes[0])
+        && bytes[1..]
+            .iter()
+            .all(|b| allowed(b) || *b == b'_' || *b == b'-')
 }
 
 /// Normalized business rules loaded by a native host for dispatch-time injection.
@@ -361,6 +475,9 @@ pub struct KnowledgeRules {
     /// The non-empty rule files behind `content`, trimmed, in the same order: current
     /// `knowledge/rules/*.md` sorted by path, then the legacy `instructions.md`.
     pub files: Vec<KnowledgeRuleFile>,
+    /// Ids of the declared default rules in the front-matter of `files`, in declaration order
+    /// (files in order, then in-file order). Ids only: the `wren` CLI validates the declarations.
+    pub declared_defaults: Vec<String>,
 }
 
 /// One business-rule file: its project-relative path and trimmed contents.
