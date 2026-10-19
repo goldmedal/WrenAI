@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
 import { captureWrenAccessIdentity, GovernedWrenError, openWrenComponentAccess } from "../harness/components/wren-access.js";
 
@@ -147,6 +147,7 @@ describe("owned Wren access", () => {
       ["more than eight ids", v3(["a", "b", "c", "d", "e", "f", "g", "h", "i"]), ["a", "b", "c", "d", "e", "f", "g", "h"]],
       ["an id outside the id shape", v3(["Bad Id"]), ["a"]],
       ["a non-list", v3("a"), ["a"]],
+      ["protocol 3 with an empty list and an empty catalog", v3([]), []],
       ["declarations the host does not know of", v3(["a"]), []],
       ["a client that announces none for a declaring catalog", { id: 0, protocol: "wren-governed/2" }, ["a"]],
     ])("is unavailable, with a fixed reason and no id, for %s", async (_name, frame, declared) => fixture(hello(frame) + "process.stdin.resume();", async (project, executable) => {
@@ -192,6 +193,23 @@ describe("owned Wren access", () => {
         // The channel stays usable after these refusals.
         expect(await run("two")).toBeInstanceOf(GovernedWrenError);
       } finally { await access.close(); }
+    }));
+    it("logs, with counts only, a refusal whose rule ids the catalog declares none of, and renders the sentence alone", async () => fixture(hello(v3(["a", "b"])) + serve(missing('"declared_default_missing"')), async (project, executable) => {
+      const logged: string[] = [];
+      const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => { logged.push(String(line)); });
+      const access = await open(project, executable, ["a", "b"]);
+      try {
+        const run = (sql: string) => access.query({ sql, limit: 1 }, new AbortController().signal).then(() => undefined as never, (error: unknown) => error as GovernedWrenError);
+        const none = await run("allout");
+        expect(none.message).not.toContain("Rule:");
+        const dropLines = () => logged.filter((line) => line.includes("governed_frame"));
+        expect(dropLines()).toHaveLength(1);
+        expect(JSON.parse(dropLines()[0]!.replace("[component-failure] ", ""))).toEqual({ site: "governed_frame", code: "declared_rules_not_in_catalog", dropped: 1 });
+        expect(dropLines()[0]).not.toContain("zz");
+        // A partly kept list and a frame without ids stay silent.
+        await run("outside"); await run("plain");
+        expect(dropLines()).toHaveLength(1);
+      } finally { spy.mockRestore(); await access.close(); }
     }));
     it("renders the sentence alone when a process without declarations names the class", async () => fixture(hello({ id: 0, protocol: "wren-governed/2" }) + serve(missing('"declared_default_missing"')), async (project, executable) => {
       const signal = new AbortController().signal;

@@ -65,6 +65,9 @@ function governedError(wire: string | { class: string; rule_ids?: readonly strin
   const known = GOVERNED_ERROR_CLASSES.find((candidate) => candidate === named && candidate !== "transport");
   const ruleIds = known === "declared_default_missing" && typeof wire !== "string" ? [...new Set((wire.rule_ids ?? []).filter((id) => declared.has(id)))] : [];
   const error = new GovernedWrenError(known ?? "internal", dialect, { ruleIds });
+  // A producer that names rules the host's catalog does not declare is visible in the log (counts only); rendering is unchanged.
+  if (known === "declared_default_missing" && typeof wire !== "string" && (wire.rule_ids?.length ?? 0) > 0 && ruleIds.length === 0)
+    console.error(`[component-failure] ${JSON.stringify({ site: "governed_frame", code: "declared_rules_not_in_catalog", dropped: wire.rule_ids!.length })}`);
   if (typeof wire !== "string" && "message" in wire && typeof wire.message === "string") error.wireMessage = wire.message;
   return error;
 }
@@ -82,7 +85,7 @@ const reply = z.object({ id: z.number().int().nonnegative(), protocol: z.enum(PR
   error: z.union([z.string(), z.object({ class: z.string().min(1).max(64), message: z.string().max(1024), rule_ids: declaredDefaultIds.optional() }).strict()]).optional() }).strict();
 
 /**
- * Protocol 3 announces the project's declared default rules and exists only for a project that declares some; every
+ * Protocol 3 announces the project's declared default rules and exists only for a project that declares some (an empty list is refused); every
  * earlier protocol announces none. Either way the announcement must equal the host catalog's set: a client that
  * enforces rules the host does not know of, or one that enforces fewer, is not trusted to run the project.
  */
@@ -90,7 +93,7 @@ function helloMatchesDeclarations(value: z.infer<typeof reply>, declared: readon
   if (value.protocol !== "wren-governed/3") return Object.keys(value).length === 2 && declared.length === 0;
   if (Object.keys(value).length !== 3) return false;
   const announced = declaredDefaultIds.safeParse(value.declared_defaults);
-  if (!announced.success || new Set(announced.data).size !== announced.data.length || announced.data.length !== declared.length) return false;
+  if (!announced.success || announced.data.length === 0 || new Set(announced.data).size !== announced.data.length || announced.data.length !== declared.length) return false;
   const expected = new Set(declared);
   return announced.data.every((id) => expected.has(id));
 }
