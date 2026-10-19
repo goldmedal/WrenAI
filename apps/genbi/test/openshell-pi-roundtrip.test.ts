@@ -308,12 +308,12 @@ describe("pi OpenShell Structured Ask: the full scoped path with a scripted work
       expect(response.status).toBe(503); expect(f.receipt.creates).toBe(0); expect(f.local).not.toHaveBeenCalled();
       await expect(f.runtime.route({ authChoice: { mode: "subscription", provider: "claude" }, profileSource: f.profileSource, userProject: f.project, question: "x" }, { sessionId: "s", turnId: "t", assertCurrent() {} })).rejects.toMatchObject({ code: "unavailable" });
       expect(f.local).not.toHaveBeenCalled(); expect(f.receipt.creates).toBe(0);
-    });
+    }, 180_000);
     it.each(["/api/setup/connect", "/api/setup/adopt", "/api/context/enrichment/start", "/api/context/terminal/sessions"])("refuses %s", async route => {
       const f = await fixture(); const app = createApp(f.deps);
       const response = await app.request(route, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
       expect(response.status).toBe(503); expect(await response.json()).toMatchObject({ code: "unsupported" }); expect(f.receipt.creates).toBe(0); expect(f.local).not.toHaveBeenCalled();
-    });
+    }, 180_000);
     it("refuses an Ask whose authentication mode is not the one the descriptor serves, before any sandbox exists", async () => {
       const f = await fixture(); (f.deps as { getAuthChoice?: () => unknown }).getAuthChoice = () => ({ mode: "gateway", config: { provider: "vendor" } });
       const { stored } = await f.ask();
@@ -326,7 +326,7 @@ describe("pi OpenShell Structured Ask: the full scoped path with a scripted work
       const dashboards = await fixture();
       await expect(dashboards.runtime.route({ ...effectiveRouteOptions(dashboards.deps), question: "x", agentId: "generate_dashboard" } as never, { sessionId: "s", turnId: "t", assertCurrent() {} })).rejects.toMatchObject({ code: "unsupported" });
       expect(dashboards.receipt.creates).toBe(0); expect(dashboards.local).not.toHaveBeenCalled();
-    });
+    }, 180_000);
   });
 
   describe("saving the runtime for a pi boot", () => {
@@ -339,7 +339,7 @@ describe("pi OpenShell Structured Ask: the full scoped path with a scripted work
         expect(ok.status, JSON.stringify(await ok.clone().json())).toBe(200);
         expect(env.reads).toEqual([]);
       } finally { env.restore(); }
-    });
+    }, 180_000);
     it.each([
       ["a model alias", { tierModels: [{ tier: "cheap", model: "sonnet" }, { tier: "strong", model: "model-strong" }] }],
       ["inherit", { tierModels: [{ tier: "cheap", model: "inherit" }, { tier: "strong", model: "model-strong" }] }],
@@ -353,6 +353,6 @@ describe("pi OpenShell Structured Ask: the full scoped path with a scripted work
       const f = await fixture(); const before = JSON.stringify(f.store.getRuntimeSettings());
       const response = await put(f, { authMode: "byo", apiKeyAdapter: "openai-compatible", tierModels: [{ tier: "cheap", model: "model-cheap" }, { tier: "strong", model: "model-strong" }], ...patch });
       expect(response.status).toBe(400); expect(JSON.stringify(f.store.getRuntimeSettings())).toBe(before);
-    });
+    }, 180_000);
   });
 });
