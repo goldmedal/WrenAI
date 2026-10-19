@@ -1,12 +1,13 @@
 """The declared-default checker over parsed SQL: pure functions, no engine."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from sqlglot import parse_one
 
 from wren.context import build_json
-from wren.declared_default_check import DefaultsChecker
+from wren.declared_default_check import DefaultsChecker, _Statement
 from wren.declared_defaults import read_declared_defaults
 
 pytestmark = pytest.mark.unit
@@ -153,6 +154,23 @@ def test_the_atom_is_found_in_a_correlated_subquery(checker):
         "SELECT COUNT(*) FROM orders o WHERE EXISTS "
         "(SELECT 1 FROM customers c WHERE c.id = o.customer_id AND NOT c.is_test)"
     )
+    assert check(checker, sql) == []
+
+
+def test_a_cte_shadowing_a_covered_model_still_reads_the_base_table(checker):
+    assert check(
+        checker,
+        "WITH customers AS (SELECT * FROM customers) SELECT COUNT(*) FROM customers",
+    ) == [EXCLUDE]
+    assert check(
+        checker,
+        "WITH orders AS (SELECT id, customer_id FROM orders) "
+        "SELECT COUNT(*) FROM orders",
+    ) == [EXCLUDE]
+
+
+def test_a_cte_named_like_a_covered_model_but_built_elsewhere_reads_none(checker):
+    sql = "WITH orders AS (SELECT id, name FROM products) SELECT COUNT(*) FROM orders"
     assert check(checker, sql) == []
 
 
@@ -339,6 +357,7 @@ DATES = {
     "on or before": "f.date <= CAST(p.captured_at AS DATE)",
     "reversed": "CAST(p.captured_at AS DATE) >= f.date",
     "order date": "f.date <= CAST(o.placed_at AS DATE)",
+    "between with a declared upper bound": "f.date BETWEEN CAST(p.captured_at AS DATE) - INTERVAL 7 DAY AND CAST(p.captured_at AS DATE)",
 }
 
 
@@ -355,6 +374,8 @@ FX_BAD_DATES = {
     "strictly before": "f.date < CAST(p.captured_at AS DATE)",
     "bounded by today": "f.date <= CURRENT_DATE",
     "bounded by an undeclared column": "f.date <= CAST(c.created_at AS DATE)",
+    "between whose upper bound is not a declared date": "f.date BETWEEN CAST(p.captured_at AS DATE) AND CURRENT_DATE",
+    "between literals": "f.date BETWEEN DATE '2020-01-01' AND DATE '2030-01-01'",
 }
 
 
@@ -460,3 +481,10 @@ def test_without_an_aggregated_amount_the_rate_rule_does_not_fire(checker, sql):
 
 def test_both_rules_fire_in_declaration_order(checker):
     assert check(checker, "SELECT SUM(p.amount) FROM payments p") == [RATE, EXCLUDE]
+
+
+@pytest.mark.parametrize("fault", [RuntimeError, ValueError, KeyError, AttributeError])
+@pytest.mark.parametrize("method", ["fires_exclude", "fires_rate"])
+def test_any_checker_fault_earns_no_verdict(checker, monkeypatch, method, fault):
+    monkeypatch.setattr(_Statement, method, MagicMock(side_effect=fault("boom")))
+    assert check(checker, f"{COUNT}") is None

@@ -96,6 +96,12 @@ Exclude internal test accounts from every business metric. Report money in USD a
 rate on the transaction date.
 ```
 
+A rules file that opens with a `---` line must close the fence with another `---` line:
+an unclosed leading `---` is a declaration error, and `governed-stdio` refuses to start.
+Rule ids are unique across the project; files are read in sorted order under
+`knowledge/rules/` and the legacy `instructions.md` is read last, which fixes the order of
+the ids a host sees.
+
 Two kinds exist. Declarations are never inferred from the prose, and an invalid one makes
 `wren context validate` fail and `governed-stdio` refuse to start, so a typo cannot
 silently turn enforcement off.
@@ -113,7 +119,8 @@ silently turn enforcement off.
 - **`require_rate_join`**: statements that aggregate a listed amount column must read the
   rate model joined on one of the declared currency columns and bounded
   `rate.date <= <expression over a declared transaction-date column>` (an inner
-  `MAX(date)`, `ORDER BY date DESC LIMIT 1`, `LATERAL` and `ASOF JOIN` all qualify).
+  `MAX(date)`, `ORDER BY date DESC LIMIT 1`, `LATERAL`, `ASOF JOIN` and
+  `rate.date BETWEEN ... AND <upper bound>` all qualify; only the upper bound is checked).
   Same-day equality and an unbounded latest rate do not.
 
 Optional fields: `when: aggregated` limits a rule to statements that use an aggregate

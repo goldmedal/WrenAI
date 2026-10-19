@@ -705,8 +705,7 @@ def test_a_checker_without_a_verdict_never_blocks_a_query(declaring, monkeypatch
     assert "result" in query_frame(declaring, EXCLUDE_MISSING)
 
 
-def test_a_runaway_statement_earns_no_verdict(declaring, monkeypatch):
-    monkeypatch.setattr(
-        _Statement, "fires_exclude", MagicMock(side_effect=RecursionError)
-    )
+@pytest.mark.parametrize("fault", [RecursionError, RuntimeError, KeyError])
+def test_a_checker_fault_earns_no_verdict_not_a_refusal(declaring, monkeypatch, fault):
+    monkeypatch.setattr(_Statement, "fires_exclude", MagicMock(side_effect=fault))
     assert "result" in query_frame(declaring, EXCLUDE_MISSING)

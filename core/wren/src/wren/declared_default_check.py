@@ -93,11 +93,14 @@ class _Statement:
         roots += [q.this for q in ast.find_all(exp.Qualify)]
         self.roots = roots
         self.conjuncts = [c for root in roots for c in _conjuncts(root)]
-        cte_names = {cte.alias_or_name.casefold() for cte in ast.find_all(exp.CTE)}
+        # A table is read when some scope's source is that stored table. A CTE
+        # that shadows a model name is a Scope source, while the table inside the
+        # CTE body is still a Table source, so shadowing cannot hide a read.
         self.tables_read = {
-            table.name
-            for table in ast.find_all(exp.Table)
-            if table.name and table.name.casefold() not in cte_names
+            source.name
+            for scope in scopes
+            for source in scope.sources.values()
+            if isinstance(source, exp.Table) and source.name
         }
         self.aggregates = list(ast.find_all(exp.AggFunc))
         self.aggregated = bool(self.aggregates) or ast.find(exp.Group) is not None
@@ -333,14 +336,23 @@ class _Statement:
             for node in self._condition_nodes(exp.EQ)
             for a, b in [(node.this, node.expression)]
         )
-        date_bounded = any(
-            self.direct(low) == rate_date and self.taint(high) & dates
-            for node in self._condition_nodes(exp.LTE)
-            for low, high in [(node.this, node.expression)]
-        ) or any(
-            self.direct(low) == rate_date and self.taint(high) & dates
-            for node in self._condition_nodes(exp.GTE)
-            for high, low in [(node.this, node.expression)]
+        date_bounded = (
+            any(
+                self.direct(low) == rate_date and self.taint(high) & dates
+                for node in self._condition_nodes(exp.LTE)
+                for low, high in [(node.this, node.expression)]
+            )
+            or any(
+                self.direct(low) == rate_date and self.taint(high) & dates
+                for node in self._condition_nodes(exp.GTE)
+                for high, low in [(node.this, node.expression)]
+            )
+            or any(
+                self.direct(node.this) == rate_date
+                and self.taint(node.args["high"]) & dates
+                for node in self._condition_nodes(exp.Between)
+                if node.args.get("high") is not None
+            )
         )
         return not (currency_joined and date_bounded)
 
@@ -441,5 +453,5 @@ class DefaultsChecker:
                     else statement.fires_rate(rule)
                 )
             ]
-        except RecursionError:
+        except Exception:  # noqa: BLE001 - a checker fault is "no verdict", never a refusal
             return None
