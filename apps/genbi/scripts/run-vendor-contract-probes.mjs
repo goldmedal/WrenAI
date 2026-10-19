@@ -55,6 +55,9 @@ try {
   }
   await run(process.execPath, [path.join(process.cwd(), "scripts", "codex-component-probe.mjs")], { ...probeEnv, CODEX_BIN: nativeCodex });
   await run(process.execPath, [path.join(process.cwd(), "scripts", "claude-component-probe.mjs")], probeEnv);
+  // pi runs only inside an OpenShell image and is certified by exact identity, so there is no vendor tool to install here: this checks the certification row, the
+  // shipped pi assets, the rendered policy and the operator helper's dry run, offline. The gateway-backed probe is a separate, operator-run script.
+  await run(process.execPath, [path.join(process.cwd(), "scripts", "pi-backend-probe.mjs"), "--offline"], probeEnv);
   await run(process.execPath, [path.join(process.cwd(), "scripts", "probe-codex-terminal.mjs"), nativeCodex], probeEnv);
   process.stdout.write(`${JSON.stringify({
     ok: true,
@@ -64,6 +67,7 @@ try {
       { name: "exact vendor versions selected before deterministic probes", ok: true },
       { name: "RPC, Codex lifecycle/schema/cleanup, and Claude SRT probes passed", ok: true },
       { name: "compiled Codex driver named-profile, PTY and process-tree contracts passed", ok: true },
+      { name: "pi certification row, shipped assets, rendered policy and operator helper dry run verified offline", ok: true },
       { name: "no authenticated or model-backed probe was selected", ok: true },
     ],
   }, null, 2)}\n`);

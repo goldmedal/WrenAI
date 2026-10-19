@@ -90,6 +90,9 @@ try {
     `await (${installedSnapshotHelperFixture.toString()})(${JSON.stringify(installedPackageRoot)},${JSON.stringify(process.env.GENBI_SNAPSHOT_CAPTURE_PYTHON)});`],
     { cwd: installRoot, env: controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint }) });
 
+  markPhase("pi-operator-helper");
+  await verifyInstalledPiOperatorHelper({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint, tempRoot, packedManifest });
+
   markPhase("start");
   await writeFile(sourceAuditHook, createSourceAuditHook(), { mode: 0o600 });
   const childEnv = controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint });
@@ -132,6 +135,7 @@ try {
       { name: "tarball excludes checkout-only scripts, tests, fixtures, and examples", ok: true },
       { name: "fresh installed package keeps readiness offline, rejects altered approval bytes, then provisions exact local fixture bytes without checkout, ambient Python, or index resolution", ok: true },
       { name: "fresh install launches through npx with package-manager PATH", ok: true },
+      { name: "installed pi operator helper prints the packaged certified row, whose pins equal the shipped assets, dry-runs without side effects, and refuses a spec that carries a key, with the checkout blocked", ok: true },
       { name: "installed direct Codex Sessions and structured Ask preserve scoped tools without checkout/model access or Setup fallback", ok: true },
       { name: "installed Codex driver handles deterministic command events while the production backend remains unavailable", ok: true },
       { name: "first-run Setup connect terminal flow works without checkout access or development escapes", ok: true },
@@ -154,7 +158,7 @@ function controlledEnvironment({ installRoot, workspaceRoot, port: selectedPort,
   const developmentEscapes = [
     "NODE_PATH",
     "GENBI_CLAUDE_RUNTIME", "GENBI_CODEX_RUNTIME", "GENBI_ALLOW_LOCAL_RUNTIME", "GENBI_RUNTIME", "GENBI_BACKEND", "GENBI_CODEX_MODE",
-    "GENBI_OPENSHELL_CONFIG", "GENBI_OPENSHELL_CLAUDE_BOOT", "GENBI_CODEX_EXECUTABLE", "GENBI_CODEX_SOURCE", "GENBI_CODEX_ACCOUNT_EMAIL",
+    "GENBI_OPENSHELL_CONFIG", "GENBI_OPENSHELL_CLAUDE_BOOT", "GENBI_OPENSHELL_PI_BOOT", "GENBI_CODEX_EXECUTABLE", "GENBI_CODEX_SOURCE", "GENBI_CODEX_ACCOUNT_EMAIL",
     "WREN_HOME",
     "WREN_PROJECT_HOME",
     "WREN_HARNESS_PROJECT",
@@ -598,12 +602,45 @@ async function verifyInstalledCodexBackend(input) {
   if (result.stdout.trim() !== "installed-codex-contract-ok") throw new Error("installed Codex contract failed");
 }
 
+/**
+ * The operator helper is a package bin. Run through the fresh install with the checkout blocked, it must report the packaged certified row for exactly the assets the
+ * package ships, plan a provision without running anything or creating a directory, and refuse a spec that names a key without echoing it.
+ */
+async function verifyInstalledPiOperatorHelper({ installRoot, workspaceRoot, port: selectedPort, sourceAuditHook, fixtureEndpoint, tempRoot, packedManifest }) {
+  if (packedManifest.bin?.["genbi-openshell-pi"] !== "bin/genbi-openshell-pi.mjs") throw new Error("packed manifest does not expose genbi-openshell-pi");
+  const env = controlledEnvironment({ installRoot, workspaceRoot, port: selectedPort, sourceAuditHook, fixtureEndpoint });
+  const helper = (args) => run("npx", ["--no-install", "genbi-openshell-pi", ...args], { cwd: installRoot, env });
+  const row = JSON.parse((await helper(["row"])).stdout);
+  const certified = row.rows?.[0];
+  if (row.rows?.length !== 1 || certified.vendor !== "pi" || certified.state !== "certified_row" || certified.packagedAssetsMatch !== true) throw new Error(`installed pi certification row is missing or does not match the shipped assets: ${JSON.stringify(certified)}`);
+  if (/\/Users\/|\/private\/|\/home\//.test(JSON.stringify(row))) throw new Error("installed pi certification row leaks a local path");
+  const root = path.join(tempRoot, "pi-operator"); await mkdir(root, { mode: 0o700 });
+  const digest = `sha256:${"a".repeat(64)}`; const executable = path.join(root, "openshell"); await writeFile(executable, "#!/bin/sh\n", { mode: 0o700 });
+  const baseDriverConfig = path.join(root, "base.json");
+  await writeFile(baseDriverConfig, JSON.stringify({ executable, executableDigest: digest, version: "0.0.1", gateway: "acceptance-gateway", workspace: "default", image: `sha256:${"b".repeat(64)}`, supervisorImage: digest, policy: executable, policyDigest: digest,
+    home: root, configHome: root, stateHome: root, dockerExecutable: executable, dockerRealpath: executable, dockerDigest: digest, dockerSocket: path.join(root, "docker.sock"), dockerNamespace: "acceptance-gateway", exclusive: true }));
+  const spec = { version: 1, baseDriverConfig, outDir: path.join(root, "out"), imageTag: "acceptance-pi-worker:1", gatewayUrl: "https://gateway.example.test/", caCert: executable, clientCert: executable, clientKey: executable,
+    auth: "api-key", provider: "acceptance-provider", profileId: "acceptance-profile", displayLabel: "Acceptance", generation: "gen-1",
+    endpoint: { providerId: "acceptance", api: "openai-completions", baseUrl: "https://model.example.test/v1", credentialEnv: "ACCEPTANCE_KEY" }, models: { cheap: "acceptance-model" } };
+  const specFile = path.join(root, "spec.json"); await writeFile(specFile, JSON.stringify(spec), { mode: 0o600 });
+  const plan = JSON.parse((await helper(["provision", "--spec", specFile, "--dry-run"])).stdout.split("\n\nRun this yourself")[0]);
+  if (plan.dryRun !== true || plan.steps.some((step) => step.status !== "planned" && step.status !== "operator_action") || !plan.providerCommand.startsWith("ACCEPTANCE_KEY=<your key> ") || existsSync(spec.outDir)) throw new Error(`installed pi provision dry run was not side-effect free: ${JSON.stringify(plan)}`);
+  const canary = "sk-acceptance-canary-0123456789";
+  const keyed = path.join(root, "keyed.json"); await writeFile(keyed, JSON.stringify({ ...spec, apiKey: canary }), { mode: 0o600 });
+  let refusal;
+  try { await helper(["provision", "--spec", keyed, "--dry-run"]); } catch (error) { refusal = String(error.message); }
+  if (!refusal || !refusal.includes("spec_invalid") || refusal.includes(canary)) throw new Error("installed pi helper accepted or echoed a spec that carries a key");
+  let verifyRefusal;
+  try { await helper(["verify", "--dir", path.join(root, "missing")]); } catch (error) { verifyRefusal = String(error.message); }
+  if (verifyRefusal === undefined) throw new Error("installed pi helper verify did not fail for a directory with no descriptor");
+}
+
 function assertPublishedFiles(files) {
   if (files.length === 0) throw new Error("package tarball is empty");
   const forbidden = /(^|\/)(scripts|test|tests|fixtures|examples|\.git)(\/|$)|(^|\/)node_modules(\/|$)/;
   const unexpected = files.filter((file) => forbidden.test(file));
   if (unexpected.length > 0) throw new Error(`package tarball contains repository-only files: ${JSON.stringify(unexpected)}`);
-  for (const required of ["package/dist-server/runtime-assets/openshell-sdk/provenance.json", "package/dist-server/runtime-assets/claude-worker/claude-worker.mjs", "package/dist-server/runtime-assets/claude-worker/Dockerfile", "package/dist-server/runtime-assets/pi-worker/Dockerfile", "package/dist-server/runtime-assets/pi-worker/pi-worker.mjs", "package/dist-server/runtime-assets/pi-worker/pi-worker-core.mjs", "package/dist-server/runtime-assets/pi-worker/pi-mcp-shim.mjs", "package/dist-server/runtime-assets/pi-worker/policy.template.yaml", "package/dist-server/runtime-assets/pi-worker/profile.template.yaml", "package/dist-server/server/runtime-host/openshell-pi-provider.js", "package/bin/genbi.mjs", "package/dist/index.html", "package/dist-server/server/bin.js", "package/managed-wren/manifest.json", "package/managed-wren/runtime-tree.cjs", "package/dist-server/server/runtime-host/codex-app-server.js", "package/dist-server/server/runtime-host/codex-session.js", "package/dist-server/server/runtime-host/codex-conversation.js"]) {
+  for (const required of ["package/dist-server/runtime-assets/openshell-sdk/provenance.json", "package/dist-server/runtime-assets/claude-worker/claude-worker.mjs", "package/dist-server/runtime-assets/claude-worker/Dockerfile", "package/bin/genbi-openshell-pi.mjs", "package/dist-server/runtime-assets/pi-worker/Dockerfile", "package/dist-server/runtime-assets/pi-worker/pi-worker.mjs", "package/dist-server/runtime-assets/pi-worker/pi-worker-core.mjs", "package/dist-server/runtime-assets/pi-worker/pi-mcp-shim.mjs", "package/dist-server/runtime-assets/pi-worker/policy.template.yaml", "package/dist-server/runtime-assets/pi-worker/profile.template.yaml", "package/dist-server/server/runtime-host/openshell-pi-provider.js", "package/bin/genbi.mjs", "package/dist/index.html", "package/dist-server/server/bin.js", "package/managed-wren/manifest.json", "package/managed-wren/runtime-tree.cjs", "package/dist-server/server/runtime-host/codex-app-server.js", "package/dist-server/server/runtime-host/codex-session.js", "package/dist-server/server/runtime-host/codex-conversation.js"]) {
     if (!files.includes(required)) throw new Error(`package tarball is missing ${required}`);
   }
 }

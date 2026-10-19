@@ -536,12 +536,25 @@ export function getRuntimeSettingsReadiness(): Promise<RuntimeSettingsReadiness>
   return request<RuntimeSettingsReadiness>('/api/config/runtime/readiness');
 }
 
+/**
+ * What a pi boot lets the browser see: a non-secret provider label, the authentication mode the boot serves and exactly one
+ * model id per tier. The endpoint, credential name, profile and every path stay on the server.
+ */
+export interface PiPinnedRuntime {
+  readonly provider: string;
+  readonly auth: 'byo' | 'gateway';
+  readonly models: Readonly<Record<string, string>>;
+}
 export interface StructuredBackendReadiness {
   readonly offered: boolean;
   readonly state: 'ready' | 'unavailable' | 'not_offered';
   readonly ask: boolean;
   readonly setup: boolean;
   readonly reason: string;
+  /** A fixed, browser-safe reason code when the backend is offered but not ready (for pi: `pi_uncertified`, `pi_identity_mismatch`, `pi_dependencies_drifted`, ...). */
+  readonly code?: string;
+  /** Present only for a pi boot with a protected descriptor. */
+  readonly pinned?: PiPinnedRuntime;
 }
 export interface StructuredAskReadiness {
   readonly runtime?: 'local' | 'openshell';

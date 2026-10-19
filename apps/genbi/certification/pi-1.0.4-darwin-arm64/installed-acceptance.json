@@ -1,0 +1,57 @@
+{
+  "kind": "packed_install_acceptance",
+  "variant": "installed",
+  "date": "2026-10-19",
+  "vendor": "pi",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "dependencies": {
+    "warble": "0.19.0",
+    "ir": "0.9.0",
+    "context-loader": "0.1.4"
+  },
+  "runner": "scripts/installed-package-acceptance.mjs",
+  "modelCalls": 0,
+  "note": "Final package: identical to the candidate except for the row's three evidence digests. Not hashed by the row, to avoid a self-referential hash.",
+  "ok": true,
+  "checks": [
+    {
+      "name": "installed explicit Codex composition reports gated readiness and rejects launch without local fallback",
+      "ok": true
+    },
+    {
+      "name": "tarball excludes checkout-only scripts, tests, fixtures, and examples",
+      "ok": true
+    },
+    {
+      "name": "fresh installed package keeps readiness offline, rejects altered approval bytes, then provisions exact local fixture bytes without checkout, ambient Python, or index resolution",
+      "ok": true
+    },
+    {
+      "name": "fresh install launches through npx with package-manager PATH",
+      "ok": true
+    },
+    {
+      "name": "installed pi operator helper prints the packaged certified row, whose pins equal the shipped assets, dry-runs without side effects, and refuses a spec that carries a key, with the checkout blocked",
+      "ok": true
+    },
+    {
+      "name": "installed direct Codex Sessions and structured Ask preserve scoped tools without checkout/model access or Setup fallback",
+      "ok": true
+    },
+    {
+      "name": "installed Codex driver handles deterministic command events while the production backend remains unavailable",
+      "ok": true
+    },
+    {
+      "name": "first-run Setup connect terminal flow works without checkout access or development escapes",
+      "ok": true
+    },
+    {
+      "name": "fresh install binds through a verified package-local context loader with no Rust toolchain or checkout access",
+      "ok": true
+    }
+  ]
+}

@@ -44,6 +44,13 @@ export interface TierModelSelection extends Omit<TierModelBinding, 'model'> {
   baseURL?: string;
 }
 
+/** A pi boot's browser-safe pins, as `GET /api/structured-runtime/readiness` reports them. */
+export interface PiPinnedRuntimeSettings {
+  readonly provider: string;
+  readonly auth: 'byo' | 'gateway';
+  readonly models: Readonly<Record<string, string>>;
+}
+
 export interface RuntimeSettings {
   authMode: AuthMode;
   subscriptionProvider?: SubscriptionProvider;

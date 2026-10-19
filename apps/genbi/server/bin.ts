@@ -197,6 +197,7 @@ import {
   compileUnboundProfileTierNames,
   effectiveTierModel,
   materializeRuntimeRouteOptions,
+  PI_BOOT_AUTH_MODE,
   RuntimeBindingError,
   validatePiRuntimeBindings,
 } from "./runtime-binding.js";
@@ -781,6 +782,7 @@ async function main(): Promise<void> {
   const structuredRuntime = new StructuredRuntime({
     selection: runtimeSelection, deployment,
     adapters: { codex: createCodexStructuredAdapter(codexComposition.structured), ...(claudeOnOpenShell ? { claude: openshellStructured } : {}), ...(piOnOpenShell ? { pi: openshellStructured } : {}) },
+    piPins: () => { const descriptor = openshellComposition.piBoot?.descriptor; return descriptor ? { provider: descriptor.displayLabel, auth: PI_BOOT_AUTH_MODE[descriptor.auth] as "byo" | "gateway", models: descriptor.models } : undefined; },
     onRevoke: openshellComposition.revokeRuntime,
     localRoute: route, localSetupFor: (choice) => setupRunnerFor?.(choice) ?? setupRunner,
   });
