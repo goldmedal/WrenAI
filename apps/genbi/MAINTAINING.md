@@ -139,6 +139,9 @@ They live in the catalog and not in the prepared document because the prepared-c
 by Warble and rejects unknown fields. The harness reads the catalog on every in-process run, appends the
 rules to the private-zone snapshot text, renders them in full on the capability card, and includes them
 in the context the identity digest covers. `knowledge/sql/` (confirmed queries) is never carried.
+`check-context` (`verifyComponentContext`) verifies only the prepared document, so the integrity of the
+rules rests on `planDigest(contexts)` plus the project fingerprint re-check (`checkProject()` before every
+step), not on `check-context`.
 
 ### Declared default rules (governed protocol 3)
 
@@ -163,9 +166,6 @@ the field means "declares nothing"). The host side lives in `harness/components/
 - **Id filter.** Only ids the catalog declares survive, in the order sent and without repeats; the rest are
   dropped. The model sees the fixed sentence followed by ` Rule: <id>[, <id>]` (the sentence alone when no id
   survives). Nothing else from the frame, the SQL or the declaration reaches a model.
-`check-context` (`verifyComponentContext`) verifies only the prepared document, so the integrity of the
-rules rests on `planDigest(contexts)` plus the project fingerprint re-check (`checkProject()` before every
-step), not on `check-context`.
 
 ### Distributing the context-loader generator
 
