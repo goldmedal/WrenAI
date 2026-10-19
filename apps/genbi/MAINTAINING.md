@@ -139,6 +139,11 @@ They live in the catalog and not in the prepared document because the prepared-c
 by Warble and rejects unknown fields. The harness reads the catalog on every in-process run, appends the
 rules to the private-zone snapshot text, renders them in full on the capability card, and includes them
 in the context the identity digest covers. `knowledge/sql/` (confirmed queries) is never carried.
+Rule files may open with a `---` fenced YAML `defaults:` block declaring rules the `wren` CLI enforces;
+the catalog's `declared_defaults` lists those rule ids (declaration order: files sorted by path, then the
+legacy file, then in-file order; omitted when there are none; `catalog_version` stays 1). The loader reads
+ids only, and the block stays verbatim in `knowledge_rules` content. Validating the declarations is the
+CLI's job, so a malformed block yields no ids and a warning on stderr, not a loader failure.
 `check-context` (`verifyComponentContext`) verifies only the prepared document, so the integrity of the
 rules rests on `planDigest(contexts)` plus the project fingerprint re-check (`checkProject()` before every
 step), not on `check-context`.

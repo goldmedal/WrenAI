@@ -213,6 +213,12 @@ pub struct CapabilityCatalog {
     /// True when a root `instructions.md` exists (the deprecated location of the rules).
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub knowledge_rules_used_legacy: bool,
+    /// Ids of the declared default rules the `wren` CLI enforces, read from the same front-matter
+    /// (`knowledge_rules` content keeps it verbatim), in declaration order. Ids only; the CLI
+    /// validates the declarations. Omitted when there are none, so a project without
+    /// declarations serializes exactly as before.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub declared_defaults: Vec<String>,
     /// Files that did not parse, by kind; the catalog is still emitted without them.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub diagnostics: Vec<String>,
@@ -231,6 +237,7 @@ impl CapabilityCatalog {
             })
             .collect();
         self.knowledge_rules_used_legacy = rules.used_legacy;
+        self.declared_defaults = rules.declared_defaults;
         self
     }
 }
@@ -400,6 +407,7 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
         views,
         knowledge_rules: Vec::new(),
         knowledge_rules_used_legacy: false,
+        declared_defaults: Vec::new(),
         diagnostics,
     }
 }
