@@ -16,6 +16,8 @@ const text = (value: unknown) => ({ content: [{ type: "text" as const, text: typ
 const query = (sql: string, id: string) => ({ content: [{ type: "tool-call" as const, toolName: "query", toolCallId: id, input: JSON.stringify({ sql }) }], finishReason: { unified: "tool-calls" as const, raw: "tool-calls" }, usage, warnings: [] });
 const SQL = { a: "SELECT SUM(amount) AS n FROM orders", b: "SELECT total_revenue FROM revenue", c: "SELECT COUNT(*) AS n FROM customers" };
 const ROWS: Record<string, number> = { [SQL.a]: 1672, [SQL.c]: 100 };
+/** A literal-only query a model issues to "compile" its results; the governed tool refuses it. */
+const PROBE = "SELECT 1 AS dummy";
 /** The tables a query reads, as the governed transport proves them in `definition.source_tables`. */
 const tablesOf = (sql: string) => [...sql.matchAll(/\bFROM (\w+)/g)].map((match) => match[1]!);
 const answered = (slot: "a" | "c") => ({ slot_id: slot, columns: ["n"], rows: [[ROWS[SQL[slot]]]], summary: `${slot} answered`, verified: true, definition: { sql: SQL[slot], source_tables: tablesOf(SQL[slot]), filters: [] } });
@@ -38,6 +40,7 @@ function host(strong: MockLanguageModelV4, extra: Readonly<Record<string, unknow
     tools: [{ name: "query", source: "native", inputSchema: { type: "object", additionalProperties: false, required: ["sql"], properties: { sql: { type: "string" } } },
       async execute(input) {
         const sql = (input as { sql: string }).sql; executed.push(sql);
+        if (sql === PROBE) throw new GovernedWrenError("ungrounded_literal");
         if (!(sql in ROWS)) throw new GovernedWrenError("model_not_found");
         return { columns: ["n"], rows: [{ n: ROWS[sql] }], definition: { sql, source_tables: tablesOf(sql), filters: [] }, ...extra };
       } }],
@@ -131,6 +134,43 @@ describe("per-slot failure isolation in a batch-shaped child", () => {
     const result = await new ComponentRunner(plan(), recording).run("answer_batch", { request: "one question" });
     expect(result).toMatchObject({ status: "refused", code: "callee_refused" });
     expect(prompts).toEqual(["resolve", "generate", "repair"]);
+  });
+  it("a stray refused probe after the slot queries does not fail the child: every grounded slot is answered", async () => {
+    const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.a, "a"), query(SQL.c, "c"), query(PROBE, "probe"),
+      text([answered("a"), { slot_id: "b", status: "unanswerable", reason: "no revenue model" }, answered("c")])] });
+    const f = host(strong);
+    const prompts: string[] = [];
+    const recording: RunnerHost = { ...f.host, async runStep(run, binding) { prompts.push(run.prompt); return f.host.runStep(run, binding); } };
+    const result = await new ComponentRunner(plan(), recording).run("answer_batch", { request: "fill the report", input: { preamble: "FY2025", slots } });
+    expect(result).toMatchObject({ status: "ok", output: { kind: "value", value: [
+      { slot_id: "a", rows: [{ n: 1672 }], verified: true },
+      { slot_id: "b", status: "unanswerable" },
+      { slot_id: "c", rows: [{ n: 100 }], verified: true },
+    ] } });
+    expect(f.executed).toEqual([SQL.a, SQL.c, PROBE]);
+    expect(prompts).toEqual(["resolve", "generate"]);
+  });
+  it("a refused probe before the slot queries does not fail the child, and the probe takes no query id", async () => {
+    const strong = new MockLanguageModelV4({ doGenerate: [query(PROBE, "probe"), query(SQL.a, "a"), query(SQL.c, "c"),
+      text([answered("a"), answered("c"), { slot_id: "b", status: "unanswerable", reason: "no revenue model" }])] });
+    const f = host(strong);
+    const result = await new ComponentRunner(plan(), f.host).run("answer_batch", { request: "fill the report", input: { slots } });
+    expect(result).toMatchObject({ status: "ok", output: { kind: "value", value: [
+      { slot_id: "a", rows: [{ n: 1672 }] }, { slot_id: "c", rows: [{ n: 100 }] }, { slot_id: "b", status: "unanswerable" },
+    ] } });
+    expect(receivedQueryIds(strong.doGenerateCalls[3]!.prompt)).toEqual([["probe", undefined], ["a", "q1"], ["c", "q2"]]);
+  });
+  it("a child whose every query is refused has no grounded result: refused, for the egress seam to disclose every slot as unavailable", async () => {
+    const strong = new MockLanguageModelV4({ doGenerate: [query(PROBE, "probe"), query(SQL.b, "b"),
+      text(["a", "b", "c"].map((slot_id) => ({ slot_id, status: "unanswerable", reason: "every query was refused" })))] });
+    const result = await new ComponentRunner(plan(), host(strong).host).run("answer_batch", { request: "fill the report", input: { slots } });
+    expect(result).toMatchObject({ status: "refused", code: "callee_refused" });
+  });
+  it("a slot answered from no query, beside a refused probe, is not promoted to data", async () => {
+    const strong = new MockLanguageModelV4({ doGenerate: [query(PROBE, "probe"),
+      text([{ slot_id: "a", columns: ["n"], rows: [[1672]], summary: "typed by the model", verified: true, definition: { sql: SQL.a, source_tables: tablesOf(SQL.a), filters: [] } }])] });
+    const result = await new ComponentRunner(plan(), host(strong).host).run("answer_batch", { request: "fill the report", input: { slots } });
+    expect(result).toMatchObject({ status: "refused", code: "callee_refused" });
   });
   it("a malformed slot declaration does not buy per-slot leniency", async () => {
     const strong = new MockLanguageModelV4({ doGenerate: [query(SQL.b, "b1"), text("gave up"), query(SQL.b, "b2"), text("still nothing")] });
