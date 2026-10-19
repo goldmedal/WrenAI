@@ -452,10 +452,18 @@ def governed_stdio(
     project: Annotated[Path, typer.Option("--project")],
 ):
     """Serve typed, read-only operations for a host-selected project."""
+    from wren.declared_defaults import DeclarationError  # noqa: PLC0415
     from wren.governed_stdio import serve  # noqa: PLC0415
 
     try:
         serve(project)
+    except DeclarationError:
+        typer.echo(
+            "Governed Wren access is unavailable: the bound project's declared "
+            "default rules are invalid; run `wren context validate`.",
+            err=True,
+        )
+        raise typer.Exit(1)
     except Exception:
         typer.echo("Governed Wren access is unavailable.", err=True)
         raise typer.Exit(1)

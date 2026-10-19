@@ -2,6 +2,8 @@
 
 import io
 import json
+import shutil
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -11,6 +13,9 @@ from typer.testing import CliRunner
 from wren import cli
 from wren import governed_stdio as transport
 from wren.cli import app
+from wren.context import build_json as build_project_manifest
+from wren.declared_default_check import _Statement
+from wren.declared_defaults import DeclarationError
 from wren.model.error import ErrorCode, ErrorPhase, WrenError
 
 pytestmark = pytest.mark.unit
@@ -542,3 +547,165 @@ def test_a_malformed_cube_list_keeps_model_not_found_and_the_loop_alive(
         b'{"id":2,"operation":"query","sql":"SELECT 1 FROM revenue","limit":1}\n'
     )
     assert [frame["error"]["class"] for frame in frames[1:]] == ["model_not_found"] * 2
+
+
+DECLARED_FIXTURE = (
+    Path(__file__).resolve().parent.parent / "fixtures" / "declared_defaults"
+)
+DECLARED_IDS = ["usd-at-transaction-date", "exclude-test-accounts"]
+EXCLUDE_OK = (
+    "SELECT COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id "
+    "WHERE NOT c.is_test"
+)
+EXCLUDE_MISSING = (
+    "SELECT COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id"
+)
+
+
+@pytest.fixture
+def declaring(bound_transport):
+    f = bound_transport
+    shutil.copytree(DECLARED_FIXTURE / "knowledge", f.project / "knowledge")
+    f.build.return_value = build_project_manifest(DECLARED_FIXTURE)
+    return f
+
+
+def test_a_project_without_declarations_keeps_the_two_key_hello_and_is_never_checked(
+    bound_transport, monkeypatch
+):
+    f = bound_transport
+    rules = f.project / "knowledge" / "rules"
+    rules.mkdir(parents=True)
+    (rules / "prose.md").write_text("# Rules\n\nExclude test accounts.\n")
+    monkeypatch.setattr(
+        transport.DefaultsChecker, "check", MagicMock(side_effect=AssertionError)
+    )
+    frames = f.run(
+        b'{"id":1,"operation":"query","sql":"SELECT n FROM orders","limit":5}\n'
+    )
+    assert frames[0] == {"id": 0, "protocol": "wren-governed/2"}
+    assert list(frames[1]) == ["id", "result"]
+
+
+def test_a_declaring_project_speaks_protocol_3_and_names_its_rules(declaring):
+    assert declaring.run(b"") == [
+        {"id": 0, "protocol": "wren-governed/3", "declared_defaults": DECLARED_IDS}
+    ]
+
+
+def test_a_query_missing_a_declared_default_is_refused_before_execution(declaring):
+    assert query_frame(declaring, EXCLUDE_MISSING) == {
+        "id": 1,
+        "error": {
+            "class": "declared_default_missing",
+            "message": transport.ERROR_MESSAGES["declared_default_missing"],
+            "rule_ids": ["exclude-test-accounts"],
+        },
+    }
+    declaring.engine.query.assert_not_called()
+
+
+def test_every_broken_rule_is_named_in_declaration_order(declaring):
+    frame = query_frame(declaring, "SELECT SUM(p.amount) FROM payments p")
+    assert frame["error"]["rule_ids"] == DECLARED_IDS
+    declaring.engine.query.assert_not_called()
+
+
+def test_the_refusal_copies_nothing_from_the_request_beyond_project_authored_ids(
+    declaring,
+):
+    sql = (
+        "SELECT COUNT(*) /* secret-token */ FROM orders o JOIN customers c "
+        "ON o.customer_id = c.id WHERE c.country = '/private/path'"
+    )
+    wire = json.dumps(query_frame(declaring, sql))
+    for leak in (
+        "secret-token",
+        "/private/path",
+        "SELECT",
+        "is_test",
+        "country",
+        "customers",
+    ):
+        assert leak not in wire
+    assert set(json.loads(wire)["error"]) == {"class", "message", "rule_ids"}
+
+
+def test_a_query_applying_the_default_executes_and_keeps_its_definition(declaring):
+    frame = query_frame(declaring, EXCLUDE_OK)
+    assert frame["result"]["definition"]["source_tables"] == ["customers", "orders"]
+    assert frame["result"]["definition"]["filters"] == ["NOT c.is_test"]
+    declaring.engine.query.assert_called_once_with(EXCLUDE_OK, limit=5, read_only=True)
+
+
+def test_a_refused_query_does_not_end_the_session_and_the_repair_executes(declaring):
+    def frame(request_id, sql):
+        return json.dumps(
+            {"id": request_id, "operation": "query", "sql": sql, "limit": 5}
+        )
+
+    frames = declaring.run(
+        (frame(1, EXCLUDE_MISSING) + "\n" + frame(2, EXCLUDE_OK) + "\n").encode()
+    )
+    assert frames[1]["error"]["class"] == "declared_default_missing"
+    assert "result" in frames[2]
+    assert declaring.engine.query.call_count == 1
+
+
+def test_sql_the_checker_cannot_analyze_reaches_the_engine_which_reports_its_own_class(
+    declaring,
+):
+    declaring.engine.query.side_effect = WrenError(
+        ErrorCode.GENERIC_USER_ERROR, "x", phase=ErrorPhase.SQL_EXECUTION
+    )
+    frame = query_frame(declaring, "SELECT COUNT(nope) FROM orders")
+    assert frame["error"]["class"] == "execution_failed"
+    assert "rule_ids" not in frame["error"]
+    declaring.engine.query.assert_called_once()
+
+
+def test_other_classes_never_carry_rule_ids(declaring):
+    assert query_frame(declaring, "SELECT 1")["error"] == {
+        "class": "ungrounded_literal",
+        "message": transport.ERROR_MESSAGES["ungrounded_literal"],
+    }
+
+
+def write_invalid_declaration(f):
+    (f.project / "knowledge" / "rules" / "conventions.md").write_text(
+        "---\ndefaults:\n  - id: secret-rule\n    kind: nonsense\n---\n"
+    )
+
+
+def test_an_invalid_declaration_refuses_to_start_before_any_frame(declaring):
+    write_invalid_declaration(declaring)
+    with pytest.raises(DeclarationError):
+        declaring.run(b'{"id":1,"operation":"inspect"}\n')
+    declaring.factory.assert_not_called()
+
+
+def test_the_cli_reports_invalid_declarations_without_their_content(declaring):
+    write_invalid_declaration(declaring)
+    result = CliRunner().invoke(
+        app, ["governed-stdio", "--project", str(declaring.project)]
+    )
+    assert result.exit_code == 1
+    assert "declared default rules are invalid" in result.output
+    assert "secret-rule" not in result.output and "nonsense" not in result.output
+
+
+def test_the_checker_is_what_stops_a_missing_default(declaring, monkeypatch):
+    monkeypatch.setattr(transport.DefaultsChecker, "check", lambda self, ast: [])
+    assert "result" in query_frame(declaring, EXCLUDE_MISSING)
+    declaring.engine.query.assert_called_once()
+
+
+def test_a_checker_without_a_verdict_never_blocks_a_query(declaring, monkeypatch):
+    monkeypatch.setattr(transport.DefaultsChecker, "check", lambda self, ast: None)
+    assert "result" in query_frame(declaring, EXCLUDE_MISSING)
+
+
+@pytest.mark.parametrize("fault", [RecursionError, RuntimeError, KeyError])
+def test_a_checker_fault_earns_no_verdict_not_a_refusal(declaring, monkeypatch, fault):
+    monkeypatch.setattr(_Statement, "fires_exclude", MagicMock(side_effect=fault))
+    assert "result" in query_frame(declaring, EXCLUDE_MISSING)

@@ -10,6 +10,8 @@ from sqlglot import exp, parse_one
 
 from wren.config import load_config
 from wren.context import build_json
+from wren.declared_default_check import DefaultsChecker
+from wren.declared_defaults import read_declared_defaults
 from wren.engine import WrenEngine
 from wren.mdl.cte_rewriter import get_sqlglot_dialect
 from wren.model.data_source import DataSource
@@ -21,6 +23,9 @@ from wren.read_only import NoSourceTablesError, require_source_tables
 MAX_REQUEST = 65_536
 MAX_RESULT = 1_048_576
 PROTOCOL = "wren-governed/2"
+# Only a project that declares default rules speaks this protocol; every other
+# project keeps the two-key ``wren-governed/2`` hello byte for byte.
+DECLARED_PROTOCOL = "wren-governed/3"
 
 # The closed error vocabulary a host may show a model. Each class carries one
 # fixed sentence; nothing from the underlying exception (its text, the SQL, a
@@ -43,6 +48,12 @@ ERROR_MESSAGES: dict[str, str] = {
         "typed into the query, not data. A value must come from an executed query "
         "over the bound models: cite the earlier query that already produced it by "
         "its query_id, or compute it in one SELECT over the models."
+    ),
+    "declared_default_missing": (
+        "The query does not apply a default rule that the bound project declares "
+        "for the models it reads, so it was not executed. Apply the rule named "
+        "below (its wording is in the project's knowledge rules), then run the "
+        "query again."
     ),
     "policy_rejected": (
         "The read-only analytical policy rejected the query: use one SELECT over "
@@ -87,12 +98,22 @@ class _ResultTooLarge(ValueError):
     """A well-formed result that does not fit the byte limit."""
 
 
+class _DeclaredDefaultMissing(ValueError):
+    """The query breaks declared rules; ``rule_ids`` are project-authored, validated ids."""
+
+    def __init__(self, rule_ids: list[str]) -> None:
+        super().__init__("declared default rule not applied")
+        self.rule_ids = rule_ids
+
+
 def classify_error(error: BaseException) -> str:
     """Map an exception to one key of ``ERROR_MESSAGES``; never reads its text."""
     if isinstance(error, _RequestError):
         return "invalid_request"
     if isinstance(error, _ResultTooLarge):
         return "result_too_large"
+    if isinstance(error, _DeclaredDefaultMissing):
+        return "declared_default_missing"
     if isinstance(error, NoSourceTablesError):
         return "ungrounded_literal"
     if isinstance(error, WrenError):
@@ -125,10 +146,22 @@ def serve(project: Path) -> None:
     profile = expand_profile_secrets(profile)
     datasource = profile.pop("datasource")
     manifest = build_json(project)
+    dialect = get_sqlglot_dialect(DataSource(datasource))
+    declarations = read_declared_defaults(project, manifest)
+    checker = DefaultsChecker(declarations, manifest, dialect) if declarations else None
     encoded = base64.b64encode(json.dumps(manifest).encode()).decode()
     home = Path(os.environ.get("WREN_HOME", Path.home() / ".wren"))
     with WrenEngine(encoded, datasource, profile, config=load_config(home)) as engine:
-        _write({"id": 0, "protocol": PROTOCOL})
+        if checker is None:
+            _write({"id": 0, "protocol": PROTOCOL})
+        else:
+            _write(
+                {
+                    "id": 0,
+                    "protocol": DECLARED_PROTOCOL,
+                    "declared_defaults": checker.ids,
+                }
+            )
         expected_id = 1
         while True:
             line = sys.stdin.buffer.readline(MAX_REQUEST + 1)
@@ -159,11 +192,10 @@ def serve(project: Path) -> None:
                         or not 1 <= request["limit"] <= 10_000
                     ):
                         raise _RequestError("Invalid query")
-                    ast = parse_one(
-                        request["sql"],
-                        dialect=get_sqlglot_dialect(DataSource(datasource)),
-                    )
+                    ast = parse_one(request["sql"], dialect=dialect)
                     source_tables = require_source_tables(ast)
+                    if checker is not None and (fired := checker.check(ast)):
+                        raise _DeclaredDefaultMissing(fired)
                     result = engine.query(
                         request["sql"], limit=request["limit"], read_only=True
                     )
@@ -191,12 +223,10 @@ def serve(project: Path) -> None:
                     source_tables, manifest
                 ):
                     kind = "cube_not_queryable"
-                _write(
-                    {
-                        "id": request["id"],
-                        "error": {"class": kind, "message": ERROR_MESSAGES[kind]},
-                    }
-                )
+                detail = {"class": kind, "message": ERROR_MESSAGES[kind]}
+                if isinstance(error, _DeclaredDefaultMissing):
+                    detail["rule_ids"] = error.rule_ids
+                _write({"id": request["id"], "error": detail})
 
 
 def _write(value: dict) -> None:
