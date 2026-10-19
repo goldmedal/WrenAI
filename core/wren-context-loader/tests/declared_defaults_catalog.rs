@@ -153,7 +153,7 @@ fn the_binary_writes_declared_ids_into_the_catalog() {
 }
 
 #[test]
-fn an_unclosed_fence_yields_no_ids_and_a_warning_on_stderr() {
+fn an_unclosed_fence_voids_every_id_and_warns_on_stderr() {
     let project = tempfile::tempdir().unwrap();
     copy_dir(&fixture("declared-wren"), project.path());
     fs::write(
@@ -170,16 +170,13 @@ fn an_unclosed_fence_yields_no_ids_and_a_warning_on_stderr() {
         stderr.contains("conventions.md") && stderr.contains("not closed"),
         "{stderr}"
     );
-    let doc = catalog_json(project.path());
-    assert_eq!(
-        doc["declared_defaults"],
-        serde_json::json!(["usd-at-transaction-date"])
-    );
-
-    fs::remove_file(project.path().join("knowledge/rules/canonical-metrics.md")).unwrap();
     assert!(catalog_json(project.path())
         .get("declared_defaults")
         .is_none());
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.path().join("catalog.json")).unwrap())
+            .unwrap();
+    assert!(written.get("declared_defaults").is_none());
 }
 
 #[test]
@@ -219,19 +216,39 @@ fn only_a_leading_fence_declares() {
 }
 
 #[test]
-fn ids_are_read_not_validated() {
+fn any_malformed_entry_voids_the_whole_set() {
+    let valid = "---\ndefaults:\n  - {id: ok, kind: exclude_rows}\n---\n";
     let long = "a".repeat(65);
-    let text = format!(
-        "---\ndefaults:\n  - {{id: ok, kind: exclude_rows}}\n  - {{id: Upper, kind: exclude_rows}}\n  - {{id: {long}, kind: exclude_rows}}\n  - {{id: ok, kind: exclude_rows}}\n  - {{id: odd-kind, kind: other}}\n  - {{kind: exclude_rows}}\n  - plain\n  - {{id: 7, kind: exclude_rows}}\n  - {{id: z, kind: require_rate_join}}\n---\n"
-    );
-    let (ids, warnings) = declared_default_ids(&[rule_file("knowledge/rules/a.md", &text)]);
-    assert_eq!(ids, ["ok", "z"]);
-    assert_eq!(warnings.len(), 7, "{warnings:?}");
-    assert!(warnings.iter().any(|w| w.contains("duplicate id 'ok'")));
+    let bad_entries = [
+        "{id: Upper, kind: exclude_rows}".to_string(),
+        format!("{{id: {long}, kind: exclude_rows}}"),
+        "{id: ok, kind: exclude_rows}".to_string(),
+        "{id: odd-kind, kind: other}".to_string(),
+        "{kind: exclude_rows}".to_string(),
+        "plain".to_string(),
+        "{id: 7, kind: exclude_rows}".to_string(),
+    ];
+    for entry in bad_entries {
+        let text =
+            format!("---\ndefaults:\n  - {{id: z, kind: require_rate_join}}\n  - {entry}\n---\n");
+        let (ids, warnings) = declared_default_ids(&[
+            rule_file("knowledge/rules/a.md", valid),
+            rule_file("knowledge/rules/b.md", &text),
+        ]);
+        assert!(ids.is_empty(), "{entry}: {ids:?}");
+        assert_eq!(warnings.len(), 1, "{entry}: {warnings:?}");
+        assert!(warnings[0].contains("b.md"), "{warnings:?}");
+    }
+    let (ids, warnings) = declared_default_ids(&[
+        rule_file("knowledge/rules/a.md", valid),
+        rule_file("knowledge/rules/b.md", valid),
+    ]);
+    assert!(ids.is_empty());
+    assert!(warnings[0].contains("duplicate id 'ok'"), "{warnings:?}");
 }
 
 #[test]
-fn malformed_front_matter_warns_and_never_panics() {
+fn malformed_front_matter_voids_the_set_and_never_panics() {
     let (ids, warnings) = declared_default_ids(&[
         rule_file(
             "knowledge/rules/a.md",

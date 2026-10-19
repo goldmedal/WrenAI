@@ -369,7 +369,12 @@ const DECLARED_DEFAULT_KINDS: [&str; 2] = ["exclude_rows", "require_rate_join"];
 /// (it refuses to start on an invalid one), so a malformed block here yields no ids and a
 /// warning rather than an error. The id contract mirrors `wren.declared_defaults`: a leading
 /// fence as the first line, a closing fence, `defaults[].id` matching
-/// `^[a-z0-9][a-z0-9_-]{0,63}$`. A repeated id keeps its first occurrence.
+/// `^[a-z0-9][a-z0-9_-]{0,63}$`.
+///
+/// The outcome is all-or-nothing, like the CLI's: when anything is malformed (a bad id, an unknown
+/// kind, a repeated id, `defaults` not a list, invalid YAML, an unclosed fence) the id list is empty
+/// and the warnings say why, because the CLI voids the whole set and refuses to start, so a partial
+/// list could never match what it reports.
 pub fn declared_default_ids(files: &[KnowledgeRuleFile]) -> (Vec<String>, Vec<String>) {
     let mut ids: Vec<String> = Vec::new();
     let mut warnings = Vec::new();
@@ -378,10 +383,7 @@ pub fn declared_default_ids(files: &[KnowledgeRuleFile]) -> (Vec<String>, Vec<St
             Ok(Some(front)) => front,
             Ok(None) => continue,
             Err(message) => {
-                warnings.push(format!(
-                    "{}: {message}; no declared defaults read",
-                    file.path
-                ));
+                warnings.push(format!("{}: {message}; declared defaults void", file.path));
                 continue;
             }
         };
@@ -389,7 +391,7 @@ pub fn declared_default_ids(files: &[KnowledgeRuleFile]) -> (Vec<String>, Vec<St
             Ok(data) => data,
             Err(_) => {
                 warnings.push(format!(
-                    "{}: front-matter is not valid YAML; no declared defaults read",
+                    "{}: front-matter is not valid YAML; declared defaults void",
                     file.path
                 ));
                 continue;
@@ -399,29 +401,40 @@ pub fn declared_default_ids(files: &[KnowledgeRuleFile]) -> (Vec<String>, Vec<St
             continue;
         };
         let Some(entries) = entries.as_sequence() else {
-            warnings.push(format!("{}: 'defaults' is not a list", file.path));
+            warnings.push(format!(
+                "{}: 'defaults' is not a list; declared defaults void",
+                file.path
+            ));
             continue;
         };
         for (position, entry) in entries.iter().enumerate() {
             let label = format!("{} defaults[{position}]", file.path);
             let id = entry.get("id").and_then(serde_yaml::Value::as_str);
             let Some(id) = id.filter(|id| is_declared_default_id(id)) else {
-                warnings.push(format!("{label}: missing or malformed id; skipped"));
+                warnings.push(format!(
+                    "{label}: missing or malformed id; declared defaults void"
+                ));
                 continue;
             };
             let kind = entry.get("kind").and_then(serde_yaml::Value::as_str);
             if !kind.is_some_and(|kind| DECLARED_DEFAULT_KINDS.contains(&kind)) {
-                warnings.push(format!("{label}: unknown kind; skipped"));
+                warnings.push(format!("{label}: unknown kind; declared defaults void"));
                 continue;
             }
             if ids.iter().any(|seen| seen == id) {
-                warnings.push(format!("{label}: duplicate id '{id}'; first kept"));
+                warnings.push(format!(
+                    "{label}: duplicate id '{id}'; declared defaults void"
+                ));
                 continue;
             }
             ids.push(id.to_string());
         }
     }
-    (ids, warnings)
+    if warnings.is_empty() {
+        (ids, warnings)
+    } else {
+        (Vec::new(), warnings)
+    }
 }
 
 /// Split a leading `---` fenced block off `text`: `Ok(None)` when the text does not open with
