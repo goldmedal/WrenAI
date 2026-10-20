@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
@@ -242,5 +243,54 @@ describe("OpenShell product operation fences", () => {
       openshell: async () => ({ readiness: { ...runtimeNotReady("openshell", "unavailable", "openshell_gateway_unavailable"), message: "private path/secret" }, diagnostic: { phase: "probe" } }),
     } });
     const readiness = await host.probe(); expect(readiness.backends.local.state).toBe("ready"); expect(JSON.stringify(readiness)).not.toContain("private path"); expect(readiness.selectedReadiness.state).toBe("unavailable");
+  });
+});
+
+describe("OpenShell launch-in-progress admission state", () => {
+  async function launching() {
+    const f = await fixture(); const first = await f.permit(), second = await f.permit(); const pending = deferred<OpenShellResource>(); let intent!: OpenShellIntent;
+    vi.mocked(f.driver.create).mockImplementation((value) => { intent = value; return pending.promise; });
+    const launch = f.manager.launch(first); await vi.waitFor(() => expect(intent).toBeDefined());
+    return { f, second, pending, launch, intent: () => intent };
+  }
+  it("reports a launch in its provisioning window as launch in progress, not cleanup pending, with admission still closed", async () => {
+    const { f, second, pending, launch, intent } = await launching();
+    const settle = () => { const resource = resourceFor(intent()); f.resources.set(intent().name, resource); pending.resolve(resource); };
+    try {
+      expect((await f.manager.probe()).readiness).toMatchObject({ state: "unavailable", code: "openshell_launch_in_progress" });
+      await expect(f.permit()).rejects.toMatchObject({ code: "openshell_launch_in_progress" });
+      await expect(f.manager.launch(second)).rejects.toMatchObject({ code: "openshell_scope_invalid" });
+      expect(f.driver.create).toHaveBeenCalledTimes(1);
+    } finally { settle(); }
+    const lease = await launch;
+    expect((await f.manager.probe()).readiness.state).toBe("ready"); await lease.close();
+  });
+  it("lets real cleanup pending win over a launch in flight", async () => {
+    const { f, pending, launch, intent } = await launching();
+    const stuck = f.store.listOpenShellIntents()[0]!;
+    const owner = randomUUID();
+    f.store.saveOpenShellIntent({ ...stuck, id: randomUUID(), name: `gb-${owner.replaceAll("-", "").slice(0, 16)}`, owner, phase: "cleanup_pending" });
+    expect((await f.manager.probe()).readiness).toMatchObject({ code: "openshell_cleanup_pending" });
+    await expect(f.permit()).rejects.toMatchObject({ code: "openshell_cleanup_pending" });
+    const resource = resourceFor(intent()); f.resources.set(intent().name, resource); pending.resolve(resource); await launch.catch(() => {});
+  });
+  it("reports aborted owned work as cleanup pending even while its intent phase is unsettled", async () => {
+    const f = await fixture(); const controller = new AbortController(); const pending = deferred<OpenShellResource>(); let intent!: OpenShellIntent;
+    vi.mocked(f.driver.create).mockImplementation((value) => { intent = value; return pending.promise; });
+    const launch = f.manager.launch(await f.permit(controller.signal)); const rejected = expect(launch).rejects.toBeDefined(); await vi.waitFor(() => expect(intent).toBeDefined());
+    controller.abort();
+    expect((await f.manager.probe()).readiness).toMatchObject({ code: "openshell_cleanup_pending" });
+    const resource = resourceFor(intent); f.resources.set(intent.name, resource); pending.resolve(resource); await rejected;
+  });
+  it("treats a journal intent row with no live owner as cleanup pending, not a launch in progress", async () => {
+    const f = await fixture(); const owner = randomUUID();
+    f.store.saveOpenShellIntent({ id: randomUUID(), owner, name: `gb-${owner.replaceAll("-", "").slice(0, 16)}`, identity, createdAt: 100, phase: "intent", acknowledged: false, interrupted: false });
+    expect((await f.manager.probe()).readiness).toMatchObject({ state: "unavailable", code: "openshell_cleanup_pending" });
+    await expect(f.permit()).rejects.toMatchObject({ code: "openshell_cleanup_pending" });
+  });
+  it("keeps a failed launch as cleanup pending", async () => {
+    const f = await fixture(); vi.mocked(f.driver.create).mockRejectedValue(new OpenShellError("openshell_remote_unknown"));
+    await expect(f.manager.launch(await f.permit())).rejects.toMatchObject({ code: "openshell_cleanup_pending" });
+    expect((await f.manager.probe()).readiness).toMatchObject({ code: "openshell_cleanup_pending" });
   });
 });

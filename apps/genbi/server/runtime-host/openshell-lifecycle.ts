@@ -12,6 +12,8 @@ export interface OpenShellPermit { readonly expiresAt: number; release(): void }
 export interface OpenShellEffectLease { readonly signal: AbortSignal; assertActive(): void; release(): void }
 export interface OpenShellOwnedResources {
   unsettled(): boolean;
+  /** True only when every unsettled item is an in-flight publication that is still progressing: no failure, no cleanup owed. */
+  launching(): boolean;
   reconcile(): Promise<void>;
   workerCleaned(intent: OpenShellIntent): Promise<void>;
   revoke(): void;
@@ -92,18 +94,29 @@ export class OpenShellLifecycle {
     await this.retryCleanup();
     this.reconciled = true;
   }
-  private unsettled(): boolean {
-    return Boolean(this.resources?.unsettled()) || [...this.owned.values()].some((owned) => owned.signal.aborted || owned.intent.phase === "cleanup_pending")
-      || this.options.journal.listOpenShellIntents().some((row) => row.phase === "cleanup_pending" || row.phase === "intent");
+  /** Cleanup that is owed (or aborted work) always outranks a launch that is merely still provisioning. */
+  private admissionBlock(): "cleanup" | "launching" | undefined {
+    const intents = this.options.journal.listOpenShellIntents();
+    const cleanup = (this.resources?.unsettled() === true && !this.resources.launching())
+      || [...this.owned.values()].some((owned) => owned.signal.aborted || owned.intent.phase === "cleanup_pending")
+      || intents.some((row) => row.phase === "cleanup_pending" || (row.phase === "intent" && !this.owned.has(row.id)));
+    if (cleanup) return "cleanup";
+    return this.resources?.launching() === true || intents.some((row) => row.phase === "intent") ? "launching" : undefined;
+  }
+  private unsettled(): boolean { return this.admissionBlock() !== undefined; }
+  private blockedCode(): "openshell_cleanup_pending" | "openshell_launch_in_progress" | undefined {
+    const block = this.admissionBlock();
+    return block === undefined ? undefined : block === "launching" ? "openshell_launch_in_progress" : "openshell_cleanup_pending";
   }
   async probe(): Promise<RuntimeBackendProbeResult<"openshell">> {
     try {
       if (!this.options.exclusive) throw new OpenShellError("openshell_exclusivity_required");
       if (!this.initialized || !this.lock || this.stopped) throw new OpenShellError("openshell_unavailable");
       if (!this.reconciled) throw new OpenShellError("openshell_cleanup_pending");
-      if (this.unsettled()) throw new OpenShellError("openshell_cleanup_pending");
+      const before = this.blockedCode(); if (before) throw new OpenShellError(before);
       await this.options.driver.probe();
-      if (this.stopped || this.unsettled()) throw new OpenShellError("openshell_cleanup_pending");
+      if (this.stopped) throw new OpenShellError("openshell_cleanup_pending");
+      const after = this.blockedCode(); if (after) throw new OpenShellError(after);
       return { readiness: runtimeReady(this.options.driver.version, []), diagnostic: { phase: "probe" } };
     } catch (error) { return { readiness: runtimeNotReady("openshell", "unavailable", error instanceof OpenShellError ? error.code : "openshell_unavailable"), diagnostic: { phase: "probe" } }; }
   }

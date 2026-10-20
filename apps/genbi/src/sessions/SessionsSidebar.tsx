@@ -9,6 +9,7 @@ import { relativeActivity, purposeLabels, statusLabels, vendorLabels } from './s
 import { nativeSessionCapability } from './capability';
 import { structuredAskPath } from './structuredAsk';
 import { DEFAULT_CONVERSATION_PROFILE, useNativeSessions } from './useNativeSessions';
+import { LAUNCH_IN_PROGRESS_POLL_CAP, LAUNCH_IN_PROGRESS_POLL_MS, launchInProgress } from './launchPolling';
 import './sessions.css';
 
 /** Setup stays in the typed onboarding wizard; native Sessions are post-setup tools. */
@@ -176,6 +177,19 @@ export function SessionsSidebar() {
   useEffect(() => {
     if (live) void refreshReadiness();
   }, [live, refreshReadiness]);
+  // Admission is closed while another OpenShell launch provisions; that clears by itself, so
+  // re-poll quietly until the reason changes, the cap is reached, or this unmounts.
+  const awaitingLaunch = live && launchInProgress(readiness, structuredReadiness);
+  useEffect(() => {
+    if (!awaitingLaunch) return undefined;
+    let polls = 0;
+    const timer = setInterval(() => {
+      if (++polls > LAUNCH_IN_PROGRESS_POLL_CAP) { clearInterval(timer); return; }
+      void refreshReadiness({ quiet: true });
+      void loadStructuredReadiness({ quiet: true });
+    }, LAUNCH_IN_PROGRESS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [awaitingLaunch, refreshReadiness, loadStructuredReadiness]);
   const running = sessions.filter((item) => item.status === 'running' || item.status === 'detached' || item.status === 'creating');
   const readinessPurposeMap = readiness?.purposes ?? (readiness as unknown as Record<NativeSessionPurpose, NativeSessionReadiness['purposes'][NativeSessionPurpose]> | undefined);
   const selectedRuntime = readiness?.runtimeHost?.selectedReadiness;

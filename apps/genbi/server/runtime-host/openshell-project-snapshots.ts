@@ -271,6 +271,11 @@ export class OpenShellProjectSnapshots implements OpenShellOwnedResources {
     this.save({ ...row, phase: "cleaned" }); this.failure = false;
   }
   unsettled(): boolean { return this.failure || this.options.journal.listSnapshotPublications().some((row) => ["intent", "publishing", "cleanup_pending"].includes(row.phase)); }
+  launching(): boolean {
+    if (this.failure) return false;
+    const phases = this.options.journal.listSnapshotPublications().map((row) => row.phase) as string[];
+    return !phases.includes("cleanup_pending") && phases.some((phase) => phase === "intent" || phase === "publishing");
+  }
   revoke(): void { for (const effect of this.activeEffects) effect.release(); }
   async reconcile(): Promise<void> {
     await Promise.allSettled([...this.pending]);

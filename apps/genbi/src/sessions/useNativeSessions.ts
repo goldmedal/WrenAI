@@ -11,7 +11,8 @@ interface NativeSessionsState {
   readinessLoading: boolean;
   readinessError?: string;
   load: () => Promise<void>;
-  refreshReadiness: () => Promise<NativeSessionReadiness | undefined>;
+  /** `quiet` keeps the current readiness on screen while the replacement loads (used by bounded re-polls). */
+  refreshReadiness: (options?: { quiet?: boolean }) => Promise<NativeSessionReadiness | undefined>;
   refresh: (id: string) => Promise<NativeSession | undefined>;
   createSession: (purpose: NativeSessionPurpose, returnSource: NativeSessionReturnSource | undefined, actionOwner: NativeSessionCreateOwner, entryVerb?: NonNullable<NativeSession["entryVerb"]>, profile?: string) => Promise<NativeSession>;
   openSession: (purpose: NativeSessionPurpose, id: string, returnSource?: NativeSessionReturnSource) => Promise<NativeSession>;
@@ -184,11 +185,12 @@ export const useNativeSessions = create<NativeSessionsState>((set, get) => ({
     refreshes.set(id, request);
     return request;
   },
-  async refreshReadiness() {
+  async refreshReadiness(options) {
     const requestGeneration = ++readinessRequestGeneration;
     // A previous binding must never remain launchable while a replacement
-    // Runtime snapshot is in flight or cannot be read.
-    set({ readiness: undefined, readinessLoading: true, readinessError: undefined });
+    // Runtime snapshot is in flight or cannot be read. A quiet re-poll is only
+    // used while the current readiness is a refusal, so keeping it is safe.
+    set(options?.quiet ? { readinessLoading: true } : { readiness: undefined, readinessLoading: true, readinessError: undefined });
     try {
       const readiness = await getNativeSessionReadiness();
       if (requestGeneration !== readinessRequestGeneration) return get().readiness;

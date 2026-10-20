@@ -559,7 +559,7 @@ export interface StructuredBackendReadiness {
 export interface StructuredAskReadiness {
   readonly runtime?: 'local' | 'openshell';
   readonly backends?: Readonly<Record<'claude' | 'codex' | 'pi', StructuredBackendReadiness>>;
-  readonly active: { readonly backend: string; readonly state: string; readonly ask: boolean; readonly reason: string;
+  readonly active: { readonly backend: string; readonly state: string; readonly ask: boolean; readonly reason: string; readonly code?: string;
     readonly modelExecution?: 'openshell'; readonly queryExecution?: 'openshell'; readonly enrich?: boolean; readonly supportedAgents?: readonly string[] };
 }
 export function getStructuredAskReadiness(): Promise<StructuredAskReadiness> {

@@ -57,6 +57,18 @@ async function fixture() {
 }
 
 describe("host-authorized snapshot publication and delivery", () => {
+  it("reports an in-flight snapshot publication as launch in progress with admission closed, then ready", async () => {
+    const f = await fixture(); const permit = await f.snapshots.preparePublication(f.scope(), f.current);
+    let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.volume.capture = vi.fn(async (_request, archive) => { writeFileSync(archive, "fixture"); await gate; return f.manifest; });
+    const publishing = f.snapshots.publish(permit); await vi.waitFor(() => expect(f.volume.capture).toHaveBeenCalled());
+    try {
+      expect((await f.lifecycle.probe()).readiness).toMatchObject({ state: "unavailable", code: "openshell_launch_in_progress" });
+      await expect(f.snapshots.preparePublication(f.scope("other"), () => f.scope("other"))).rejects.toMatchObject({ code: "openshell_launch_in_progress" });
+    } finally { release(); }
+    await publishing;
+    expect((await f.lifecycle.probe()).readiness.state).toBe("ready");
+  });
   it("denies forged/copied/expired/revoked publication before durable/staging effects", async () => {
     const f = await fixture(); const permit = await f.snapshots.preparePublication(f.scope(), f.current);
     await expect(f.snapshots.publish({ ...permit })).rejects.toMatchObject({ code: "openshell_scope_invalid" });

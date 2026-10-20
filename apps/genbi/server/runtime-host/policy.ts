@@ -25,6 +25,7 @@ const MESSAGES: Record<RuntimeBackendReasonCode, string> = {
   openshell_ownership_mismatch: "OpenShell resource ownership could not be verified.",
   openshell_remote_unknown: "The OpenShell remote state is unknown; cleanup reconciliation is required.",
   openshell_cleanup_pending: "OpenShell cleanup is pending; new launch admission is closed.",
+  openshell_launch_in_progress: "Another OpenShell session is starting; you can start a new one when it is ready.",
   pi_uncertified: "The pi runtime on this OpenShell build has no certified identity row, so it is not enabled.",
   pi_identity_mismatch: "The installed pi image or its policy and profile do not match the certified identity.",
   pi_dependencies_drifted: "pi is certified for other Warble, IR or context-loader versions than this install uses; re-certify pi on the installed versions to enable it.",

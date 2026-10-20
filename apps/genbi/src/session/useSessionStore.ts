@@ -48,7 +48,7 @@ interface SessionStoreState {
   sessionList: SessionSummary[];
   structuredReadiness?: StructuredAskReadiness['active'];
   structuredReadinessError?: string;
-  loadStructuredReadiness: () => Promise<void>;
+  loadStructuredReadiness: (options?: { quiet?: boolean }) => Promise<void>;
   /** Returns the session, seeding an empty one first if it doesn't exist yet. */
   getOrCreate: (id: string) => AskSessionData;
   /** Append a user turn and drive the (fixture or live) stream seam to its answer. */
@@ -161,10 +161,10 @@ export const useSessionStore = create<SessionStoreState>()((set, get) => ({
   streamErrorKind: {},
   backendSessionId: {},
   sessionList: [],
-  async loadStructuredReadiness() {
+  async loadStructuredReadiness(options) {
     if (!isBffEnabled()) return;
     const request = ++structuredReadinessRequest;
-    set({ structuredReadiness: undefined, structuredReadinessError: undefined });
+    if (!options?.quiet) set({ structuredReadiness: undefined, structuredReadinessError: undefined });
     try {
       const value = await getStructuredAskReadiness();
       if (request !== structuredReadinessRequest) return;
