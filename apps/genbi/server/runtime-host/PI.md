@@ -64,7 +64,14 @@ Treat the operator who builds and configures the image as trusted.
 
 ## Concurrency notes
 
-- The orphan sweep label is `genbi-pi-identity=<dockerNamespace>`. `genbi-openshell-pi verify` and the BFF that owns the same `dockerNamespace` share it, so one sweep can remove the other's in-flight container. The reader then
-  fails closed with `runtime_probe_failed` (`unavailable`) for that one call and succeeds on the next; it is transient and never reports a certified identity. Run `verify` while the BFF is stopped, or accept one retry.
+- Every read container carries the label `genbi-pi-identity=<dockerNamespace>`, and `genbi-openshell-pi verify` and the BFF that owns the same `dockerNamespace` share it. Before each read the reader lists the labelled
+  containers with their creation time (`docker ps -a --no-trunc --format '{{.ID}} {{.CreatedAt}}'`) and removes only those older than `PI_IDENTITY_SWEEP_AGE_MS`: the 25 s total deadline plus a 60 s margin for the removal's
+  own deadline, the second-granularity creation time and host/daemon clock skew. No read can still be using a container that old, so `verify` and the BFF never remove each other's in-flight read and can run together.
+  A younger container, including one dated in the future by a skewed clock, is always kept.
+- A crash between `create` and `rm` leaves one never-started orphan. The label is shared on purpose (a per-process label would never match a successor's sweep), so the first read after the orphan ages past the sweep
+  age removes it, whichever process runs it. Two readers sweeping the same orphan is harmless on current docker, whose `docker rm -f` exits 0 for an already removed container (checked on 29.8); a CLI that
+  exits non-zero there turns that one read into a transient `runtime_probe_failed`.
+- A listing line that is not exactly a full id and a `CreatedAt` with a numeric zone offset (an unexpected docker format, a humanized age, an impossible date) fails the whole read closed before anything is removed; the gate reports it
+  as `runtime_probe_failed`. A cancelled or timed-out read still removes its own container, on a fresh deadline rather than the cancelled signal.
 - Concurrent calls in one process share one in-flight read (`inflight`), so a later caller's abort signal does not cancel it and it is bounded by the first caller's signal and the total deadline.
 
