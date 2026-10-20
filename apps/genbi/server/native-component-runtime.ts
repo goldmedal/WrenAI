@@ -41,9 +41,11 @@ export interface NativeComponentRuntimeOptions extends Pick<NativeComponentBindi
   assertLive?(): void;
   /** Private full executable checkpoint supplied by the OpenShell provisioner. */
   assertExecutableCurrent?(): void;
-  /** Server-only override; OpenShell must supply its admitted data access. */
-  readonly openDataAccess?: (signal: AbortSignal) => Promise<ComponentAccess>;
-  readonly wren: { readonly executable: string; readonly project: string; readonly fingerprint: string; readonly identity: WrenAccessIdentity };
+  /** Server-only override; OpenShell must supply its admitted data access. It is told the declared default rules the governed process must announce. */
+  readonly openDataAccess?: (signal: AbortSignal, declaredDefaults: readonly string[]) => Promise<ComponentAccess>;
+  readonly wren: { readonly executable: string; readonly project: string; readonly fingerprint: string; readonly identity: WrenAccessIdentity;
+    /** The catalog's declared default rule ids; omitted when the project declares none. */
+    readonly declaredDefaults?: readonly string[] };
 }
 
 /** Bind governed steps to one approved account and captured tier map; no outer-session transport. */
@@ -90,7 +92,7 @@ export function createNativeComponentRuntimeBindings(options: NativeComponentRun
       if (component.steps.every((step) => step.tools.length === 0)) return {
         async query() { throw new Error("No component query grant"); }, async inspect() { throw new Error("No component context grant"); }, async close() {},
       };
-      return options.openDataAccess ? options.openDataAccess(signal) : openWrenComponentAccess({ ...wren, signal });
+      return options.openDataAccess ? options.openDataAccess(signal, wren.declaredDefaults ?? []) : openWrenComponentAccess({ ...wren, signal });
     },
     async step(run, component) {
       await checkAccess(run.signal);

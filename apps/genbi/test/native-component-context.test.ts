@@ -1,14 +1,15 @@
 import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { access, writeFile } from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { generatePreparedContext } from "../harness/compile/context-loader.js";
+import { generatePreparedContextAndCatalog } from "../harness/compile/context-loader.js";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
 import { captureWrenAccessIdentity, openWrenComponentAccess } from "../harness/components/wren-access.js";
 import { prepareCapturedCodexDirectTools, prepareCapturedNativeComponentHost, type NativeComponentContextOptions } from "../server/native-component-context.js";
 import { prepareCodexDirectTools } from "../server/runtime-host/codex-direct-tools.js";
+import * as componentRuntime from "../server/native-component-runtime.js";
 import { assertNativeExecutableIdentity, attestNativeExecutable } from "../server/native-runtime-spec.js";
 vi.mock("../server/runtime-host/codex-direct-tools.js", () => ({ prepareCodexDirectTools: vi.fn() }));
-vi.mock("../harness/compile/context-loader.js", () => ({ generatePreparedContext: vi.fn() }));
+vi.mock("../harness/compile/context-loader.js", () => ({ generatePreparedContextAndCatalog: vi.fn() }));
 vi.mock("../harness/compile/fingerprint.js", () => ({ hashDirectory: vi.fn() }));
 vi.mock("../harness/components/wren-access.js", () => ({ captureWrenAccessIdentity: vi.fn(), openWrenComponentAccess: vi.fn() }));
 const document = JSON.parse(readFileSync(new URL("../profiles/genbi-default/ir.golden.json", import.meta.url), "utf8"));
@@ -31,10 +32,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(hashDirectory).mockResolvedValue("fingerprint");
   vi.mocked(captureWrenAccessIdentity).mockResolvedValue({ digest: "digest", environment: {}, assertCurrent: vi.fn(async () => {}) });
-  vi.mocked(generatePreparedContext).mockImplementation(async (_bin, _project, output) => { await writeFile(output, JSON.stringify({ context_version: 2, parseable: true })); });
+  vi.mocked(generatePreparedContextAndCatalog).mockImplementation(async (_bin, _project, output, catalog) => { await writeFile(output, JSON.stringify({ context_version: 2, parseable: true })); await writeFile(catalog, "{}"); });
 });
 async function expectScratchRemoved() {
-  const output = vi.mocked(generatePreparedContext).mock.calls[0]![2];
+  const output = vi.mocked(generatePreparedContextAndCatalog).mock.calls[0]![2];
   await expect(access(output)).rejects.toThrow();
 }
 describe("native captured context preparation", () => {
@@ -44,14 +45,15 @@ describe("native captured context preparation", () => {
     expect(Object.keys(result.contexts)).toEqual(["answer_query", "generate_dashboard"]);
     expect(result.contexts.answer_query).toEqual({ context_version: 2, parseable: true });
     expect(Object.isFrozen(result.contexts.answer_query)).toBe(true);
-    expect(generatePreparedContext).toHaveBeenCalledExactlyOnceWith(options.contextLoaderBinary, project, expect.any(String), options.signal);
+    expect(generatePreparedContextAndCatalog).toHaveBeenCalledExactlyOnceWith(options.contextLoaderBinary, project, expect.any(String), expect.any(String), options.signal);
     expect(options.vendor.open).not.toHaveBeenCalled(); expect(openWrenComponentAccess).not.toHaveBeenCalled();
     await expectScratchRemoved();
   });
   it.each(["old-context", "unparseable", "other-project", "project-change", "identity-change", "credentials", "cancel", "generator-failure"])("refuses %s and cleans generated files", async (failure) => {
     const { ir, scope, options, controller } = setup();
     if (failure === "other-project") ir.components.find((node: { id: string }) => node.id === "answer_query").context_binding.project = "/other";
-    vi.mocked(generatePreparedContext).mockImplementation(async (_bin, _project, output) => {
+    vi.mocked(generatePreparedContextAndCatalog).mockImplementation(async (_bin, _project, output, catalog) => {
+      await writeFile(catalog, "{}");
       await writeFile(output, JSON.stringify({ context_version: failure === "old-context" ? 1 : 2, parseable: failure !== "unparseable" }));
       if (failure === "project-change") vi.mocked(hashDirectory).mockResolvedValue("changed");
       if (failure === "identity-change") vi.mocked(options.currentIdentity).mockReturnValue({ ...options.identity, runtime_generation: "2" });
@@ -65,7 +67,7 @@ describe("native captured context preparation", () => {
   it("does not start capture after cancellation", async () => {
     const { ir, scope, options, controller } = setup(); controller.abort();
     await expect(prepareCapturedNativeComponentHost(JSON.stringify(ir), scope, options)).rejects.toThrow();
-    expect(generatePreparedContext).not.toHaveBeenCalled();
+    expect(generatePreparedContextAndCatalog).not.toHaveBeenCalled();
   });
   it("rejects same-size executable replacement after async context preparation and before starting the loader", async () => {
     const { ir, scope, options } = setup();
@@ -79,7 +81,7 @@ describe("native captured context preparation", () => {
         assertNativeExecutableIdentity(identity);
       };
       await expect(prepareCapturedNativeComponentHost(JSON.stringify(ir), scope, options)).rejects.toThrow();
-      expect(generatePreparedContext).not.toHaveBeenCalled();
+      expect(generatePreparedContextAndCatalog).not.toHaveBeenCalled();
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
@@ -105,4 +107,23 @@ it("captures the explicit host Wren environment instead of ambient model credent
   const wrenEnvironment = { PATH: "/trusted", HOME: "/isolated", WREN_HOME: "/credential-scope" };
   await prepareCapturedCodexDirectTools(JSON.stringify(ir), scope, { ...options, wrenEnvironment, producerBinary: "/fixture/producer", expiresAt: Date.now() + 60_000 });
   expect(captureWrenAccessIdentity).toHaveBeenCalledWith(project, wrenEnvironment);
+});
+
+describe("declared default rules in the captured Wren access", () => {
+  const catalogWith = (catalog: unknown) => vi.mocked(generatePreparedContextAndCatalog).mockImplementation(async (_bin, _project, output, path) => {
+    await writeFile(output, JSON.stringify({ context_version: 2, parseable: true })); await writeFile(path, JSON.stringify(catalog));
+  });
+  const captured = async () => {
+    const spy = vi.spyOn(componentRuntime, "createNativeComponentRuntimeBindings"); const { ir, scope, options } = setup();
+    await prepareCapturedNativeComponentHost(JSON.stringify(ir), scope, options);
+    return spy.mock.calls[0]![0].wren;
+  };
+  it("carries the catalog's declared set into the Wren access, in declaration order", async () => {
+    catalogWith({ declared_defaults: ["usd-at-transaction-date", "exclude-test-accounts"] });
+    expect((await captured()).declaredDefaults).toEqual(["usd-at-transaction-date", "exclude-test-accounts"]);
+  });
+  it.each([["no field", {}], ["an empty list", { declared_defaults: [] }], ["a malformed list", { declared_defaults: ["Bad Id"] }]])("leaves the option out of the Wren access for %s", async (_name, catalog) => {
+    catalogWith(catalog);
+    expect(Object.hasOwn(await captured(), "declaredDefaults")).toBe(false);
+  });
 });

@@ -2,7 +2,8 @@ import { isDeepStrictEqual } from "node:util";
 import { TextDecoder } from "node:util";
 import { z } from "zod";
 import type { ComponentAccess } from "../../harness/components/broker.js";
-import { GovernedWrenError, GOVERNED_ERROR_CLASSES } from "../../harness/components/wren-access.js";
+import { declaredDefaultIds } from "../../harness/components/knowledge-rules.js";
+import { declaredRuleIdsOf, GovernedWrenError, GOVERNED_ERROR_CLASSES, governedHelloMatchesDeclarations, type GovernedUnavailableReason } from "../../harness/components/wren-access.js";
 import type { DataSnapshotLease } from "./openshell-project-snapshots.js";
 import type { OpenShellDuplex } from "./openshell-types.js";
 
@@ -11,11 +12,23 @@ export interface WrenWorkerIdentity {
   readonly wheel: string; readonly toolchain: string; readonly architecture: "linux-arm64"; readonly protocol: "wren-governed/2";
 }
 const response = z.object({ id: z.number().int().nonnegative(), result: z.unknown().optional(),
-  error: z.object({ class: z.enum(GOVERNED_ERROR_CLASSES.filter(x => x !== "transport") as [string, ...string[]]), message: z.string().max(1024) }).strict().optional() }).strict();
+  error: z.object({ class: z.enum(GOVERNED_ERROR_CLASSES.filter(x => x !== "transport") as [string, ...string[]]), message: z.string().max(1024), rule_ids: declaredDefaultIds.optional() }).strict().optional() }).strict();
 
-/** The expected tuple is host configuration + admitted lease; remote bytes have no authority. */
-export async function openOpenShellWrenAccess(options: { lease: DataSnapshotLease; expected: WrenWorkerIdentity; signal: AbortSignal; assertCurrent(): void }): Promise<ComponentAccess> {
+/**
+ * The expected tuple is host configuration + admitted lease; remote bytes have no authority. The worker's governed hello follows its
+ * identity line: the two-key protocol 2 hello for a project that declares nothing, protocol 3 announcing exactly `declaredDefaults`
+ * (the host catalog's declared default rule ids) for one that declares rules. Any other hello is unavailable.
+ */
+export async function openOpenShellWrenAccess(options: { lease: DataSnapshotLease; expected: WrenWorkerIdentity; signal: AbortSignal; assertCurrent(): void; declaredDefaults?: readonly string[] }): Promise<ComponentAccess> {
   const { lease, signal } = options;
+  const declaredDefaults = [...(options.declaredDefaults ?? [])];
+  const declared: ReadonlySet<string> = new Set(declaredDefaults);
+  const helloAccepted = (value: unknown): boolean => {
+    if (declaredDefaults.length === 0) return isDeepStrictEqual(value, { id: 0, protocol: options.expected.protocol });
+    return typeof value === "object" && value !== null && (value as { id?: unknown }).id === 0 && governedHelloMatchesDeclarations(value as Record<string, unknown>, declaredDefaults);
+  };
+  const isDeclarationsMatter = (value: unknown): boolean => declaredDefaults.length > 0
+    || (typeof value === "object" && value !== null && ((value as { protocol?: unknown }).protocol === "wren-governed/3" || "declared_defaults" in value));
   let stream: OpenShellDuplex | undefined;
   let closed = false, closing: Promise<void> | undefined;
   let failure: Error = new GovernedWrenError("transport");
@@ -50,14 +63,22 @@ export async function openOpenShellWrenAccess(options: { lease: DataSnapshotLeas
           const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
           if (stage === 0) { if (!isDeepStrictEqual(value, options.expected)) throw failure; stage = 1; }
           else if (stage === 1) {
-            if (buffer.length || !isDeepStrictEqual(value, { id: 0, protocol: options.expected.protocol })) throw failure;
+            if (buffer.length) throw failure;
+            if (!helloAccepted(value)) {
+              const reason: GovernedUnavailableReason | undefined = isDeclarationsMatter(value) ? "governed_declarations_mismatch" : undefined;
+              if (reason) { failure = new GovernedWrenError("transport", undefined, { reason }); console.error(`[component-failure] ${JSON.stringify({ site: "governed_hello", code: reason, declared: declaredDefaults.length })}`); }
+              throw failure;
+            }
             stage = 2;
             const waiter = pending; pending = undefined; waiter?.resolve(undefined);
           } else {
             const reply = response.parse(value);
             if (!pending || reply.id !== pending.id || Object.hasOwn(reply, "result") === Object.hasOwn(reply, "error")) throw failure;
+            // `rule_ids` names declared rules, so it belongs to that one class; on any other it is a contract violation.
+            if (reply.error?.rule_ids !== undefined && reply.error.class !== "declared_default_missing") throw failure;
             const waiter = pending; pending = undefined;
-            if (reply.error) waiter.reject(new GovernedWrenError(reply.error.class as Exclude<typeof GOVERNED_ERROR_CLASSES[number], "transport">));
+            if (reply.error) waiter.reject(new GovernedWrenError(reply.error.class as Exclude<typeof GOVERNED_ERROR_CLASSES[number], "transport">, undefined,
+              { ruleIds: reply.error.class === "declared_default_missing" ? declaredRuleIdsOf(reply.error.rule_ids, declared) : [] }));
             else waiter.resolve(reply.result);
           }
         }

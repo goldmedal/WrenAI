@@ -7,6 +7,7 @@ import { ModelConfig } from "@warble/claude-agent-sdk";
 import { enforceCompliance } from "../compliance/index.js";
 import { hashDirectory } from "../compile/fingerprint.js";
 import { compileProfile } from "../compile/pipeline.js";
+import { declaredDefaultsOptionOfProject } from "../components/declared-defaults.js";
 import { openWrenComponentAccess } from "../components/wren-access.js";
 import { resolveWarbleBinary } from "../compile/resolve-binary.js";
 import { createAgentEventEmitter } from "../events/index.js";
@@ -326,6 +327,7 @@ async function openAskHostQueries(
       project: userProject,
       fingerprint: await hashDirectory(userProject),
       signal,
+      ...await declaredDefaultsOptionOfProject(userProject, { signal }),
     }),
     ...(options.signal !== undefined ? { signal: options.signal } : {}),
   });

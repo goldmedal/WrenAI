@@ -56,6 +56,10 @@ export class GovernedWrenError extends Error {
     if (detail.reason !== undefined) this.reason = detail.reason;
   }
 }
+/** The announced rule ids the host's own catalog declares, in the order sent and without repeats. */
+export function declaredRuleIdsOf(announced: readonly string[] | undefined, declared: ReadonlySet<string>): string[] {
+  return [...new Set((announced ?? []).filter((id) => declared.has(id)))];
+}
 /**
  * Only the class crosses; a message from the wire is never forwarded, and an unknown class is `internal`.
  * The ids of a `declared_default_missing` refusal are kept only if the host's own catalog declares them.
@@ -63,7 +67,7 @@ export class GovernedWrenError extends Error {
 function governedError(wire: string | { class: string; rule_ids?: readonly string[] | undefined }, dialect?: string, declared: ReadonlySet<string> = new Set()): GovernedWrenError {
   const named = typeof wire === "string" ? undefined : wire.class;
   const known = GOVERNED_ERROR_CLASSES.find((candidate) => candidate === named && candidate !== "transport");
-  const ruleIds = known === "declared_default_missing" && typeof wire !== "string" ? [...new Set((wire.rule_ids ?? []).filter((id) => declared.has(id)))] : [];
+  const ruleIds = known === "declared_default_missing" && typeof wire !== "string" ? declaredRuleIdsOf(wire.rule_ids, declared) : [];
   const error = new GovernedWrenError(known ?? "internal", dialect, { ruleIds });
   // A producer that names rules the host's catalog does not declare is visible in the log (counts only); rendering is unchanged.
   if (known === "declared_default_missing" && typeof wire !== "string" && (wire.rule_ids?.length ?? 0) > 0 && ruleIds.length === 0)
@@ -89,7 +93,7 @@ const reply = z.object({ id: z.number().int().nonnegative(), protocol: z.enum(PR
  * earlier protocol announces none. Either way the announcement must equal the host catalog's set: a client that
  * enforces rules the host does not know of, or one that enforces fewer, is not trusted to run the project.
  */
-function helloMatchesDeclarations(value: z.infer<typeof reply>, declared: readonly string[]): boolean {
+export function governedHelloMatchesDeclarations(value: Readonly<Record<string, unknown>>, declared: readonly string[]): boolean {
   if (value.protocol !== "wren-governed/3") return Object.keys(value).length === 2 && declared.length === 0;
   if (Object.keys(value).length !== 3) return false;
   const announced = declaredDefaultIds.safeParse(value.declared_defaults);
@@ -214,7 +218,7 @@ export async function openWrenComponentAccess(options: {
       if (buffer.length || !pending || value.id !== pending.id) throw unavailable();
       if (value.id === 0) {
         if (value.protocol === undefined || value.result !== undefined || value.error !== undefined) throw unavailable();
-        if (!helloMatchesDeclarations(value, declaredDefaults)) {
+        if (!governedHelloMatchesDeclarations(value, declaredDefaults)) {
           unavailableReason = "governed_declarations_mismatch";
           console.error(`[component-failure] ${JSON.stringify({ site: "governed_hello", code: unavailableReason, declared: declaredDefaults.length })}`);
           throw unavailable();

@@ -18,6 +18,7 @@ import { resolveWrenBinary } from "../tools/index.js";
 import { runAiComponentStep } from "./ai-step.js";
 import { createComponentBroker, snapshotSurfaceText, type ComponentAccess, type ContextSurface } from "./broker.js";
 import { buildCapabilityCard, type CapabilityCard } from "./capability-card.js";
+import { declaredDefaultsOption } from "./declared-defaults.js";
 import { declaredDefaultsOfCatalog, knowledgeRulesOfCatalog, withKnowledgeRules } from "./knowledge-rules.js";
 import { verifyEgress } from "./egress.js";
 import { createModelJudge } from "./egress-judge.js";
@@ -131,7 +132,7 @@ export async function runInProcessComponents(plan: ExecutionPlan, options: InPro
         };
         await resolveWrenBinary();
         return openWrenComponentAccess({ executable: "wren", project, fingerprint, signal: parent, identity: accessIdentity,
-          ...(declaredDefaults.length > 0 ? { declaredDefaults } : {}) });
+          ...declaredDefaultsOption(declaredDefaults) });
       },
       // Public-zone steps never see the prepared snapshot; they get the card. Private steps get the snapshot as before.
       ...(card ? { contextSurface: (component, run): ContextSurface | undefined => {

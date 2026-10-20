@@ -15,6 +15,7 @@ import { createPiGatewayVerifier, type PiGatewayVerifier } from "./runtime-host/
 import { createPiCertificationGate, requirePiCertification, type PiCertificationGate, type PiGateOptions } from "./runtime-host/openshell-pi-identity.js";
 import { createOpenShellPiProvider, type PiProviderOptions } from "./runtime-host/openshell-pi-provider.js";
 import { snapshotHash } from "./runtime-host/openshell-snapshot-driver.js";
+import { declaredDefaultsOption } from "../harness/components/declared-defaults.js";
 import { openOpenShellWrenAccess } from "./runtime-host/openshell-wren-access.js";
 import { OpenShellError } from "./runtime-host/openshell-types.js";
 import { isBackendOffered, type RuntimeSelection } from "./runtime-selection.js";
@@ -143,7 +144,7 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
     /** Host-captured component preparation alone calls this; no browser tool exposes it. */
     bindDataContext(context: string, assertCurrent: () => void) {
       assertCurrent(); const epoch = runtimeEpoch;
-      return async (scope: Omit<Extract<import("./runtime-host/openshell-types.js").OpenShellIdentity, { purpose: "lifecycle" }>, "purpose" | "operation" | "snapshot" | "image" | "policy" | "gateway" | "workspace" | "configuration">, signal: AbortSignal) => {
+      return async (scope: Omit<Extract<import("./runtime-host/openshell-types.js").OpenShellIdentity, { purpose: "lifecycle" }>, "purpose" | "operation" | "snapshot" | "image" | "policy" | "gateway" | "workspace" | "configuration">, signal: AbortSignal, declaredDefaults: readonly string[] = []) => {
         const config = configuration.configuration;
         if (!snapshots || !lifecycle || !config?.dataWorker || !lifecycle.dataIdentity) throw new OpenShellError("openshell_unavailable");
         const check = () => { signal.throwIfAborted(); assertCurrent(); if (epoch !== runtimeEpoch || scope.context !== context) throw new OpenShellError("openshell_scope_invalid"); };
@@ -164,7 +165,7 @@ async function compose(options: Omit<CompositionOptions, "claude"> & { claude?: 
           lease = await snapshots.deliver(delivery);
           check();
           const expected = { worker: "genbi-wren-worker/1" as const, snapshot: publication.digest, script: config.dataWorker.script, wheel: config.dataWorker.wheel, toolchain: config.dataWorker.toolchain, architecture: config.dataWorker.architecture, protocol: config.dataWorker.protocol };
-          const access = await openOpenShellWrenAccess({ lease, expected, signal, assertCurrent: check });
+          const access = await openOpenShellWrenAccess({ lease, expected, signal, assertCurrent: check, ...declaredDefaultsOption(declaredDefaults) });
           let closing: Promise<void> | undefined;
           return { ...access, close: () => closing ??= (async () => { try { await access.close(); await snapshots!.remove(publication!.id); } finally { delivery!.release(); dataApprovals.delete(key); } })() };
         } catch (error) {

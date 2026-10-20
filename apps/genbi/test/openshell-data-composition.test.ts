@@ -1,4 +1,4 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,7 +15,7 @@ const openshellClaude = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GE
 const digest = `sha256:${"a".repeat(64)}`;
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
-async function fixture(available = true) {
+async function fixture(available = true, hello: unknown = { id: 0, protocol: "wren-governed/2" }) {
   const root = mkdtempSync(path.join(tmpdir(), "genbi-data-composition-")); cleanup.push(async () => rmSync(root, { recursive: true, force: true }));
   const project = path.join(root, "project"); mkdirSync(path.join(project, "target"), { recursive: true });
   writeFileSync(path.join(project, "wren_project.yml"), "version: 1\ndata_source: duckdb\nprofile: snapshot\n");
@@ -40,7 +40,7 @@ async function fixture(available = true) {
     exec: async (intent, argv) => argv.some(arg => arg.includes("base64.b64encode")) ? Buffer.from(mdl).toString("base64") : snapshotCanonical(manifests.get(intent.identity.snapshot)!),
     duplex: async intent => {
       const manifest = manifests.get(intent.identity.snapshot)!; expect(manifest).toBeDefined(); deliveries.push(manifest.context);
-      let wake: (() => void) | undefined, closed = false; const chunks: Buffer[] = [Buffer.from(JSON.stringify({ worker: "genbi-wren-worker/1", snapshot: manifest.digest, script: digest, wheel: digest, toolchain: digest, architecture: "linux-arm64", protocol: "wren-governed/2" }) + '\n{"id":0,"protocol":"wren-governed/2"}\n')];
+      let wake: (() => void) | undefined, closed = false; const chunks: Buffer[] = [Buffer.from(JSON.stringify({ worker: "genbi-wren-worker/1", snapshot: manifest.digest, script: digest, wheel: digest, toolchain: digest, architecture: "linux-arm64", protocol: "wren-governed/2" }) + "\n" + JSON.stringify(hello) + "\n")];
       return { done: new Promise(() => {}), output: (async function* () { while (!closed) { if (chunks.length) yield { stream: "stdout" as const, data: chunks.shift()! }; else await new Promise<void>(r => { wake = r; }); } })(),
         write(bytes) { writes++; const request = JSON.parse(bytes.toString()); chunks.push(Buffer.from(JSON.stringify({ id: request.id, result: JSON.parse(mdl) }) + "\n")); wake?.(); }, close() { closed = true; wake?.(); } };
     } };
@@ -106,4 +106,27 @@ it.each(["runtime", "binding", "account"] as const)("explicit %s invalidation re
   if (change === "binding") f.composition.revokeRuntime();
   await expect(a.inspect(new AbortController().signal)).rejects.toThrow(); await expect(b.inspect(new AbortController().signal)).rejects.toThrow();
   await Promise.all([a.close(), b.close()]); expect(f.resources.size).toBe(0);
+});
+
+describe("declared default rules on the composed data worker", () => {
+  const v3 = (ids: string[]) => ({ id: 0, protocol: "wren-governed/3", declared_defaults: ids });
+  it("opens a protocol 3 worker that announces the declared set the caller passes, and still pins protocol 2 without one", async () => {
+    const declaring = await fixture(true, v3(["usd-at-transaction-date", "exclude-test-accounts"]));
+    const access = await declaring.composition.bindDataContext(digest, () => {})(declaring.scope, new AbortController().signal, ["exclude-test-accounts", "usd-at-transaction-date"]);
+    expect(await access.inspect(new AbortController().signal)).toEqual({ models: [] }); await access.close();
+    const plain = await fixture(), open = await plain.composition.bindDataContext(digest, () => {})(plain.scope, new AbortController().signal);
+    expect(await open.inspect(new AbortController().signal)).toEqual({ models: [] }); await open.close();
+  });
+  it.each([
+    ["one id of two", v3(["exclude-test-accounts"]), ["exclude-test-accounts", "usd-at-transaction-date"]],
+    ["an extra id", v3(["exclude-test-accounts", "usd-at-transaction-date"]), ["exclude-test-accounts"]],
+    ["an empty list", v3([]), ["exclude-test-accounts"]],
+    ["a protocol 2 hello on a declaring project", { id: 0, protocol: "wren-governed/2" }, ["exclude-test-accounts"]],
+    ["a protocol 3 hello on a project that declares nothing", v3(["exclude-test-accounts"]), undefined],
+  ])("refuses %s with the declarations reason and cleans the worker", async (_name, hello, declared) => {
+    const f = await fixture(true, hello);
+    const error = await f.composition.bindDataContext(digest, () => {})(f.scope, new AbortController().signal, declared).catch((reason: unknown) => reason as { reason?: string });
+    expect(error).toMatchObject({ errorClass: "transport", reason: "governed_declarations_mismatch" });
+    expect(f.resources.size).toBe(0); expect(f.writes()).toBe(0);
+  });
 });
