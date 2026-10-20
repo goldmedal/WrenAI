@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { openShellIdentitySchema, OpenShellError, OPEN_SHELL_OWNER_LABEL, type OpenShellIdentity, type OpenShellIntent, type OpenShellJournal, type OpenShellDriver, type OpenShellResource } from "./openshell-types.js";
 import { runtimeNotReady, runtimeReady } from "./policy.js";
+import { RUNTIME_BUDGETS_MS } from "../../harness/runtime-budgets.js";
 import type { RuntimeBackendProbeResult } from "./types.js";
 
 export interface OpenShellPermit { readonly expiresAt: number; release(): void }
@@ -23,6 +24,8 @@ export interface OpenShellLease {
   /** Check immediately before invoking any host effect and after its async settlement. */
   effect<T>(effect: (signal: AbortSignal, assertActive: () => void) => Promise<T>): Promise<T>;
   exec(argv: readonly string[]): Promise<string>;
+  /** Bounded read-only check that the owned sandbox and its containers still exist; rejects with the inspect failure. */
+  probe(): Promise<void>;
   duplex(argv: readonly string[]): Promise<import("./openshell-types.js").OpenShellDuplex>;
   close(): Promise<void>;
 }
@@ -182,6 +185,12 @@ export class OpenShellLifecycle {
       const lease: OpenShellLease = Object.freeze({ id: intent.id, signal, assertActive: check,
         effect: async <T>(effect: (signal: AbortSignal, assertActive: () => void) => Promise<T>) => { check(); const result = await effect(signal, check); check(); return result; },
         exec: async (argv: readonly string[]) => { check(); const result = await this.options.driver.exec(owned.intent, argv, signal); check(); return result; },
+        probe: async () => {
+          check(); let timer: ReturnType<typeof setTimeout> | undefined;
+          try { await Promise.race([this.options.driver.inspect(owned.intent), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new OpenShellError("openshell_remote_unknown")), RUNTIME_BUDGETS_MS.sandboxProbeTimeout); })]); }
+          finally { clearTimeout(timer); }
+          check();
+        },
         duplex: async (argv: readonly string[]) => {
           check(); if (!["model", "model_session", "data", "validate"].includes(grant.identity.purpose) || !this.options.driver.duplex) throw new OpenShellError("openshell_scope_invalid");
           const stream = await this.options.driver.duplex(owned.intent, argv, signal); check();

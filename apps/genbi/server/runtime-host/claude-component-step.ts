@@ -6,6 +6,7 @@ import { claimClaudeHostRuntime, readClaudeRuntimeTiming } from "./openshell-cla
 import type { StepRun, StepResponse } from "../../harness/components/runner.js";
 import { types } from "node:util";
 import { GovernedWrenError } from "../../harness/components/wren-access.js";
+import { RUNTIME_BUDGETS_MS } from "../../harness/runtime-budgets.js";
 
 /** Supplied only by the certified same-account process provisioner. No default spawn. */
 export interface ClaudeComponentRuntime {
@@ -72,9 +73,9 @@ export async function runClaudeComponentStep(runtime: ClaudeComponentRuntime, ru
   const inputReady = new Promise<void>((resolve) => { releaseInput = resolve; });
   const check = () => { if (!active || failed) deny("inactive"); if (signal.aborted) throw new ClaudeComponentError("cancelled"); assertCurrent(); };
   let session: Query | undefined;
-  recordComponentTimingTimer(timing, "registering", 120_000);
-  const timeout = setTimeout(() => { timedOut = true; recordComponentTimingTimer(timing, "callback"); recordComponentTimingAbort(timing, "component_timeout"); controller.abort(); }, 120_000);
-  recordComponentTimingTimer(timing, "registered", 120_000);
+  recordComponentTimingTimer(timing, "registering", RUNTIME_BUDGETS_MS.claudeComponentStep);
+  const timeout = setTimeout(() => { timedOut = true; recordComponentTimingTimer(timing, "callback"); recordComponentTimingAbort(timing, "component_timeout"); controller.abort(); }, RUNTIME_BUDGETS_MS.claudeComponentStep);
+  recordComponentTimingTimer(timing, "registered", RUNTIME_BUDGETS_MS.claudeComponentStep);
   const timedAbort = () => { const sources = [run.signal.aborted ? "run" : undefined, runtime.signal?.aborted ? "runtime" : undefined, controller.signal.aborted ? "component_timeout" : undefined].filter(Boolean); recordComponentTimingAbort(timing, sources.length === 1 ? sources[0] as "run" | "runtime" | "component_timeout" : "unknown"); };
   if (signal.aborted) timedAbort(); else signal.addEventListener("abort", timedAbort, { once: true });
   const abort = new Promise<never>((_, reject) => {

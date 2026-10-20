@@ -39,6 +39,7 @@ import { runtimeNotReady } from "./runtime-host/policy.js";
 import type { RuntimeReadiness } from "./runtime-host/types.js";
 import { BACKENDS, type BackendName, type RuntimeSelection } from "./runtime-selection.js";
 import type { OpenShellNativeSessions, ScopedAttachment, ScopedFrame, ScopedReplay } from "./openshell-native-sessions.js";
+import { RUNTIME_BUDGETS_MS } from "../harness/runtime-budgets.js";
 
 export const NATIVE_VENDORS = ["claude", "codex"] as const;
 export { NATIVE_PURPOSES };
@@ -56,7 +57,7 @@ export const NATIVE_SESSION_INITIAL_ATTACHMENT_GRACE_MS = 15_000;
  * a 60-second page view.  It remains process-local; a BFF restart cannot
  * recover this PTY without a separately sealed provider resume contract.
  */
-export const NATIVE_SESSION_IDLE_TTL_MS = 30 * 60_000;
+export const NATIVE_SESSION_IDLE_TTL_MS = RUNTIME_BUDGETS_MS.sessionIdleTtl;
 /** @deprecated Use `NATIVE_SESSION_IDLE_TTL_MS`. Retained for test/API compatibility. */
 export const NATIVE_SESSION_POST_CLAIM_DETACH_GRACE_MS = NATIVE_SESSION_IDLE_TTL_MS;
 const START_SEPARATE_REPLAY_TTL_MS = 5 * 60_000;

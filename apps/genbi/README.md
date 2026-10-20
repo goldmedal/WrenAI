@@ -230,6 +230,21 @@ Structured Ask allows up to five minutes for the outer conversation (including t
 component call and explanation). Individual component/step deadlines remain unchanged. An
 explicit caller timeout is preserved, and outer timeout failures are reported distinctly.
 
+### Runtime budgets
+
+The time budgets for long OpenShell sessions are one table, `harness/runtime-budgets.ts`;
+`test/runtime-budgets.test.ts` pins the values and the relationships between them.
+
+| Budget | Value | Owner | At the limit |
+| --- | --- | --- | --- |
+| Claude component step | 120 s | package | The step aborts with `component_timeout`. |
+| BFF to sandbox Claude duplex deadline | 120 s from open | package | The stream is cancelled and the step errors. |
+| Default component run timeout | 120 s (operator may set 30 s to 30 min, within the ceiling) | package, operator-adjustable | The run aborts. A root may span several steps, but each step stays capped at 120 s. |
+| Native and scoped session idle TTL | 30 min with no attached listener | package | The session is stopped and cleaned up. |
+| SQL statement timeout | 30 s default, 120 s cap | package | The governed worker stream is closed and the query fails with a timeout. |
+| OpenShell boundary token | 15 min when the gateway sets no `ttl_secs`; renewed at 80% of remaining life plus up to 10% jitter | OpenShell supervisor (upstream default) | GenBI neither enforces nor changes it. |
+| Gateway sandbox JWT TTL (`ttl_secs`) | operator-provided | operator | Must be set explicitly in the gateway config; GenBI never extends it. |
+
 ### Runtime and backend selection
 
 Two independent settings choose where agents run and which agent backends a boot offers.

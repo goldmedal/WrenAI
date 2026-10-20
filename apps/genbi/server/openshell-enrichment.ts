@@ -5,6 +5,7 @@ import { canonicalizeProposal, EnrichmentContractError } from "./enrichment.js";
 import { composeDraftPrompt, hasEditableFiles, selectEditableFiles, composeInspectPrompt, describeDraftShape, translateDraftTerminal } from "./enrichment-runner.js";
 import type { OpenShellPreparedHost, OpenShellStructuredProvisioner } from "./openshell-structured-ask.js";
 import { StructuredRuntimeError, type EnrichOptions, type EnrichResult, type StructuredScope } from "./structured-runtime.js";
+import { RUNTIME_BUDGETS_MS } from "../harness/runtime-budgets.js";
 
 type RootResult = Extract<ComponentInvocationResult, { status: "ok" }>;
 const results = new WeakMap<object, { readonly snapshot: EnrichResult; assertCurrent(): void }>();
@@ -65,7 +66,7 @@ export async function runOpenShellEnrichment(provisioner: OpenShellStructuredPro
   const approvedFiles = provisioner.enrichmentApprovedFiles?.();
   const editableFiles = approvedFiles ? selectEditableFiles(approvedFiles) : undefined;
   if (!editableFiles || !hasEditableFiles(editableFiles)) throw new StructuredRuntimeError("unsupported");
-  const componentTimeoutMs = options.componentLimits?.timeoutMs ?? 120_000;
+  const componentTimeoutMs = options.componentLimits?.timeoutMs ?? RUNTIME_BUDGETS_MS.defaultComponentTimeout;
   const timeoutMs = options.chatTimeoutMs ?? componentTimeoutMs * STAGES;
   if (!Number.isSafeInteger(componentTimeoutMs) || componentTimeoutMs <= 0 || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new StructuredRuntimeError("unsupported");
   const timeout = new AbortController();

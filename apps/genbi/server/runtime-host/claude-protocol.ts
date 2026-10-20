@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { isDeepStrictEqual } from "node:util";
 import type { StepRun } from "../../harness/components/runner.js";
+import { RUNTIME_BUDGETS_MS } from "../../harness/runtime-budgets.js";
 
-export const CLAUDE_TRANSPORT_LIMITS = Object.freeze({ chunk: 65536, line: 2097152, input: 16777216, output: 16777216, unread: 4194304, frames: 1024, calls: 32, bootstrap: 16384, deadlineMs: 120000, cleanupMs: 15000 });
+export const CLAUDE_TRANSPORT_LIMITS = Object.freeze({ chunk: 65536, line: 2097152, input: 16777216, output: 16777216, unread: 4194304, frames: 1024, calls: 32, bootstrap: 16384, deadlineMs: RUNTIME_BUDGETS_MS.claudeDuplexDeadline, cleanupMs: 15000 });
 /**
  * Closed, internal-only label for the first rule a Claude stream broke. It is built from fixed vocabulary only: never
  * model text, tool input, paths, SQL or credentials, and it never changes the public error text or status.

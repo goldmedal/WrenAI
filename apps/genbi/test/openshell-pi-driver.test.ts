@@ -57,7 +57,7 @@ const identity = (image: string, purpose: "model" | "model_session" = "model"): 
 const intent = (image: string, purpose: "model" | "model_session" = "model"): OpenShellIntent => ({ id: "11111111-2222-4333-8444-555555555557", owner: "owner", name: "gb-0123456789abcdef", identity: identity(image, purpose), createdAt: 0, phase: "intent", acknowledged: false, interrupted: false, remoteId: "remote" });
 const resourceFor = (value: OpenShellIntent) => ({ id: "remote", name: value.name, workspace: "default", labels: { [OPEN_SHELL_OWNER_LABEL]: "owner" } });
 const containers = (image: string, name = "gb-0123456789abcdef") => [false, true].map(supervisorContainer => ({ Id: (supervisorContainer ? "e" : "d").repeat(64), Name: `/openshell-default--${name}-remote${supervisorContainer ? "-supervisor" : ""}`, Image: supervisorContainer ? supervisor : image,
-  Config: { Labels: { "openshell.ai/sandbox-id": "remote", "openshell.ai/sandbox-namespace": "fixture" } }, Mounts: [] }));
+  Config: { Labels: { "openshell.ai/sandbox-id": "remote", "openshell.ai/sandbox-namespace": "fixture" } }, Mounts: [], State: { Running: true } }));
 const runnable = (f: ReturnType<typeof fixture>, value: OpenShellIntent, image: string) => { const rows = containers(image); f.scenario({ resource: resourceFor(value), container: rows.map(row => `${row.Id} ${row.Name.slice(1)}`).join("\n"), records: rows }); };
 const dataWorker = (image: string) => ({ image, script: sha("7"), wheel: sha("8"), toolchain: sha("9"), architecture: "linux-arm64" as const, protocol: "wren-governed/2" as const });
 const dataPolicyFields = (f: ReturnType<typeof fixture>) => ({ dataPolicy: f.files.policy, dataPolicyDigest: fileDigest(f.files.policy),
