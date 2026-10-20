@@ -7,7 +7,7 @@ import { RUNTIME_BUDGETS_MS } from "../harness/runtime-budgets.js";
 import { Store } from "../server/db.js";
 import { resolveEnrichmentBinding } from "../server/enrichment.js";
 import { OpenShellNativeSessions, SANDBOX_PROBE_FAILURE_LIMIT, type ScopedFrame, type ScopedReplay } from "../server/openshell-native-sessions.js";
-import type { OpenShellStructuredProvisioner } from "../server/openshell-structured-ask.js";
+import { createOpenShellStructuredAdapter, type OpenShellStructuredProvisioner } from "../server/openshell-structured-ask.js";
 import { scopedSessionSocket } from "../server/scoped-session-socket.js";
 import type { NativeSessionService } from "../server/native-sessions.js";
 import { observeStructuredQueryAccess } from "../server/structured-error-feedback.js";
@@ -38,7 +38,9 @@ const REQUEST = (n: number) => `${String(n).repeat(8)}-${String(n).repeat(4)}-4$
 
 type QueryMode = "hold" | "error" | "ok";
 type ModelMode = "hold" | "skip";
-interface Plan { snapshot: "publish" | "hold" | "skip"; query: QueryMode | "skip"; model: ModelMode }
+type RootPlan = "ok" | "refused" | ComponentErrorCode;
+type ComponentErrorCode = "invalid_result" | "callee_failed" | "transient_transport" | "cancelled" | "budget_exhausted" | "invalid_request" | "unsupported_callee";
+interface Plan { snapshot: "publish" | "hold" | "skip"; query: QueryMode | "skip"; model: ModelMode; queryClass?: string; root?: RootPlan; rootDisposeFails?: boolean }
 interface ModelPeer { step: string; closed: boolean; drop(): void; written: Promise<void> }
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -76,7 +78,7 @@ async function rig() {
     let wake: (() => void) | undefined; const chunks = [Buffer.from(JSON.stringify(worker) + "\n" + JSON.stringify({ id: 0, protocol: worker.protocol }) + "\n")];
     return { done: new Promise(() => {}), output: (async function* () { while (!state.closed) { if (chunks.length) yield { stream: "stdout" as const, data: chunks.shift()! }; else await new Promise<void>(resolve => { wake = resolve; }); } })(),
       write(data) { const request = JSON.parse(data.toString()) as { id: number; sql: string }; queryWrites++; queryStarted.resolve(); if (plan.query === "hold") return;
-        chunks.push(Buffer.from(JSON.stringify(plan.query === "error" ? { id: request.id, error: { class: "execution_failed", message: "synthetic" } } : { id: request.id, result: { columns: ["n"], rows: [{ n: 1 }], definition: { sql: request.sql, source_tables: ["orders"], filters: [] } } }) + "\n")); wake?.(); },
+        chunks.push(Buffer.from(JSON.stringify(plan.query === "error" ? { id: request.id, error: { class: plan.queryClass ?? "execution_failed", message: "synthetic" } } : { id: request.id, result: { columns: ["n"], rows: [{ n: 1 }], definition: { sql: request.sql, source_tables: ["orders"], filters: [] } } }) + "\n")); wake?.(); },
       close() { if (!state.closed) { state.closed = true; counts.workerClosed++; } wake?.(); } };
   };
   const modelPeer = (): OpenShellDuplex => {
@@ -124,8 +126,21 @@ async function rig() {
   const protocol = () => ({ host: vi.fn(), worker: vi.fn(), secretSafe: vi.fn() }) as unknown as ClaudeRawProtocol;
   const outcomes: { stage: string; detail?: string }[] = [];
   const routed = vi.fn();
-  async function route(scope: StructuredScope): Promise<never> {
-    routed();
+  // Drives the production structured adapter with a scripted runner result, so a runner outcome reaches the session manager through the real code mapping.
+  function adapterRoute(scope: StructuredScope) {
+    let input!: Parameters<OpenShellStructuredProvisioner["prepare"]>[0];
+    const prepare = async (value: typeof input) => { input = value; return { assertCurrent: scope.assertCurrent, dispose: async () => { if (plan.rootDisposeFails) throw new Error("synthetic cleanup"); },
+      run: async () => {
+        if (plan.root === "refused") return { status: "refused", code: "callee_refused", message: "synthetic" };
+        if (plan.root !== "ok") return { status: "error", code: plan.root, message: "synthetic" };
+        const ok = { status: "ok", output: { kind: "value", value: { columns: ["n"], rows: [{ n: 7 }] } }, provenance: { verified: true, definition: { sql: "SELECT COUNT(*) AS n FROM orders" } } };
+        await input.persistRoot(ok as never, { isCurrent: () => true } as never, input.scope.signal!); return ok;
+      } }; };
+    const adapter = createOpenShellStructuredAdapter({ probe: async () => ({}), prepare } as never);
+    return adapter.ask!({ authChoice: { mode: "subscription", provider: "claude" }, profileSource: "fixture", userProject: project, question: "count" } as never, scope);
+  }
+  async function route(scope: StructuredScope): Promise<unknown> {
+    routed(); if (plan.root) return adapterRoute(scope);
     const signal = scope.signal!, id = scope.sessionId, scopeIdentity = lifecycleIdentity(id), current = () => scopeIdentity;
     let access: Awaited<ReturnType<typeof openOpenShellWrenAccess>> | undefined, process: ClaudeDuplexProcess | undefined, failure: Error | undefined, handle: { id: string; digest: string } | undefined, lease: { close(): Promise<void> } | undefined;
     try {
@@ -393,5 +408,73 @@ describe("sandbox dies silently (host sleep): no duplex close is ever delivered"
     await vi.advanceTimersByTimeAsync(IDLE_TTL_MS * 2);
     expect(f.native.history(session.id)!.state).toBe("ready"); expect(f.store.getNativeSession(session.id)?.status).toBe("running");
     expect(f.sandbox.probes).toBeGreaterThanOrEqual(Math.floor(IDLE_TTL_MS * 2 / (RUNTIME_BUDGETS_MS.sandboxProbeInterval + 1))); expect(f.sandbox.removed).toBe(0); expect(f.routed).not.toHaveBeenCalled();
+  });
+});
+
+describe("an unaccepted answer ends the turn, not the session", () => {
+  const UNACCEPTED = { code: "runtime.unaccepted", message: "I could not produce a verified answer for that question. Your session is still open; try rephrasing or ask another question." };
+  const errors = (f: Awaited<ReturnType<typeof rig>>, session: string) => f.store.listNativeScopedEvents(session).filter(event => event.kind === "error").map(event => event.payload);
+  const ready = (f: Awaited<ReturnType<typeof rig>>, session: string) => { expect(f.store.getNativeSession(session)?.status).toBe("running"); expect(f.native.history(session)!.state).toBe("ready"); };
+
+  it.each(["refused", "invalid_result"] as const)("a clean %s runner result keeps the session ready, records a fixed error and the next turn is verified", async root => {
+    const f = await rig(); f.plan.root = root; const session = await f.open(); const attachment = f.attach(session);
+    await attachment.submit(REQUEST(1), "count orders");
+    ready(f, session.id); expect(errors(f, session.id)).toEqual([UNACCEPTED]);
+    expect(kinds(session.id, f.store)).not.toContain("refusal"); noLateSuccess(f.store, session.id, REQUEST(1)); expect(f.leaked()).toEqual({ resources: 1, openWorkers: 0, openModelPeers: 0, volumes: 0 }); expect(f.sandbox.removed).toBe(0);
+    const probes = f.sandbox.probes; f.plan.root = "ok";
+    await attachment.submit(REQUEST(2), "count orders again");
+    expect(f.sandbox.probes).toBeGreaterThan(probes); ready(f, session.id); expect(f.store.getNativeScopedRequest(session.id, REQUEST(2))?.status).toBe("complete");
+    expect(kinds(session.id, f.store)).toContain("answer"); expect(errors(f, session.id)).toHaveLength(1);
+  });
+
+  it.each(["callee_failed", "transient_transport", "cancelled", "budget_exhausted", "invalid_request", "unsupported_callee"] as const)("a runner %s result still ends the session", async root => {
+    const f = await rig(); f.plan.root = root; const session = await f.open(); const attachment = f.attach(session);
+    await attachment.submit(REQUEST(1), "count orders");
+    expect(f.store.getNativeSession(session.id)?.status).toBe("interrupted"); expect(errors(f, session.id)).not.toContainEqual(UNACCEPTED); confirmedClean(f, session.id); noLateSuccess(f.store, session.id, REQUEST(1));
+  });
+
+  it("an unaccepted result whose cleanup fails still ends the session with cleanup, never keeps it", async () => {
+    const f = await rig(); f.plan.root = "refused"; f.plan.rootDisposeFails = true; const session = await f.open(); const attachment = f.attach(session);
+    await attachment.submit(REQUEST(1), "count orders");
+    expect(f.store.getNativeSession(session.id)?.status).toBe("interrupted"); expect(errors(f, session.id)).toEqual([expect.objectContaining({ code: "runtime.cleanup" })]); expect(errors(f, session.id)).not.toContainEqual(UNACCEPTED);
+  });
+
+  it("a user cancel during an unaccepted turn still interrupts the session", async () => {
+    const f = await rig(); f.plan.query = "hold"; f.plan.model = "skip"; const session = await f.open(); const attachment = f.attach(session);
+    const pending = attachment.submit(REQUEST(1), "count orders"); await f.queryStarted; await attachment.cancel(); await pending;
+    expect(f.store.getNativeSession(session.id)?.status).toBe("interrupted");
+  });
+
+  it.each(["invalid_request", "policy_rejected"])("a pure query rejection %s keeps the session ready with an error event", async queryClass => {
+    const f = await rig(); f.plan.query = "error"; f.plan.model = "skip"; f.plan.queryClass = queryClass; const session = await f.open(); const attachment = f.attach(session);
+    await attachment.submit(REQUEST(1), "count orders");
+    ready(f, session.id); expect(errors(f, session.id)).toEqual([expect.objectContaining({ code: `query.${queryClass}` })]); noLateSuccess(f.store, session.id, REQUEST(1));
+    f.plan.query = "error"; f.plan.queryClass = "execution_failed"; await attachment.submit(REQUEST(2), "again"); ready(f, session.id);
+  });
+
+  it.each(["timeout", "datasource_unavailable", "internal", "result_too_large", "transport"])("a query %s failure still ends the session", async queryClass => {
+    const f = await rig(); f.plan.query = "error"; f.plan.model = "skip"; f.plan.queryClass = queryClass; const session = await f.open(); const attachment = f.attach(session);
+    await attachment.submit(REQUEST(1), "count orders");
+    expect(f.store.getNativeSession(session.id)?.status).toBe("interrupted"); confirmedClean(f, session.id);
+  });
+
+  it("an unclassified failure still ends the session", async () => {
+    const f = await rig(); f.plan.query = "skip"; f.plan.model = "skip"; const session = await f.open(); const attachment = f.attach(session);
+    await attachment.submit(REQUEST(1), "count orders");
+    expect(f.store.getNativeSession(session.id)?.status).toBe("interrupted"); confirmedClean(f, session.id);
+  });
+
+  it("the third consecutive unaccepted turn ends the session", async () => {
+    const f = await rig(); f.plan.root = "refused"; const session = await f.open(); const attachment = f.attach(session);
+    await attachment.submit(REQUEST(1), "one"); ready(f, session.id); await attachment.submit(REQUEST(2), "two"); ready(f, session.id);
+    await attachment.submit(REQUEST(3), "three");
+    expect(f.store.getNativeSession(session.id)?.status).toBe("interrupted"); expect(errors(f, session.id)).toHaveLength(3); confirmedClean(f, session.id);
+    await expect(attachment.submit(REQUEST(4), "four")).rejects.toThrow();
+  });
+
+  it("a successful turn resets the consecutive count", async () => {
+    const f = await rig(); const session = await f.open(); const attachment = f.attach(session);
+    for (const [index, root] of (["refused", "refused", "ok", "refused", "refused"] as const).entries()) { f.plan.root = root; await attachment.submit(REQUEST(index + 1), `question ${index}`); ready(f, session.id); }
+    expect(errors(f, session.id)).toHaveLength(4);
   });
 });

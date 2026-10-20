@@ -151,3 +151,29 @@ describe("pi OpenShell structured root authority", () => {
     expect(f.preparedInput().scope.signal!.aborted).toBe(true); expect(f.dispose).toHaveBeenCalledOnce(); expect(f.local).not.toHaveBeenCalled();
   });
 });
+
+describe("pi clean non-ok runner result classification", () => {
+  const cases: [string, ComponentInvocationResult, string][] = [
+    ["callee_refused", { status: "refused", code: "callee_refused", message: "synthetic" } as never, "unaccepted"],
+    ["invalid_result", { status: "error", code: "invalid_result", message: "synthetic" } as never, "unaccepted"],
+    ["callee_failed", { status: "error", code: "callee_failed", message: "synthetic" } as never, "failed"],
+    ["transient_transport", { status: "error", code: "transient_transport", message: "synthetic" } as never, "failed"],
+    ["cancelled", { status: "error", code: "cancelled", message: "synthetic" } as never, "failed"],
+    ["budget_exhausted", { status: "error", code: "budget_exhausted", message: "synthetic" } as never, "failed"],
+    ["invalid_request", { status: "error", code: "invalid_request", message: "synthetic" } as never, "failed"],
+    ["unsupported_callee", { status: "error", code: "unsupported_callee", message: "synthetic" } as never, "failed"],
+    ["an unclassified refusal code", { status: "refused", code: "something_else", message: "synthetic" } as never, "failed"],
+  ];
+  it.each(cases)("maps %s through the closed code only", async (_name, result, code) => {
+    const f = fixture(); f.run.mockImplementation(async () => result);
+    const error = await f.runtime.route(request, f.scope).catch(value => value);
+    expect(error).toMatchObject({ code }); expect(f.dispose).toHaveBeenCalledOnce(); expect(f.local).not.toHaveBeenCalled();
+    expect(structuredFailureFeedback(error).code).toBe(`runtime.${code}`);
+  });
+  it.each(["cleanup", "stale", "cancel"])("never keeps an unaccepted result when %s also failed", async kind => {
+    const f = fixture(); f.run.mockImplementation(async () => { if (kind === "stale") f.revoke(); if (kind === "cancel") f.controller.abort(); return { status: "refused", code: "callee_refused", message: "synthetic" } as never; });
+    if (kind === "cleanup") f.dispose.mockRejectedValue(Error("private"));
+    const error = await f.runtime.route(request, f.scope).catch(value => value);
+    expect(error).toMatchObject({ code: kind === "cancel" ? "cancelled" : kind }); expect(structuredFailureFeedback(error).code).not.toBe("runtime.unaccepted");
+  });
+});

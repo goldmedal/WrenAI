@@ -26,6 +26,11 @@ export function readOpenShellStructuredResult(result: OpenShellResult): OpenShel
   return structuredClone(proof.snapshot);
 }
 
+/** A clean non-ok runner result whose class proves the model output (not the sandbox) was unacceptable; the runner has already awaited binding release. Any other result stays an unclassified failure. */
+function isUnacceptedRootResult(value: ComponentInvocationResult): boolean {
+  return (value.status === "refused" && value.code === "callee_refused") || (value.status === "error" && value.code === "invalid_result");
+}
+
 export interface OpenShellPreparedHost {
   assertCurrent(): void;
   /** Actual OpenShell preparation supplies a full executable checkpoint. */
@@ -120,6 +125,7 @@ export function createOpenShellStructuredAdapter(provisioner: OpenShellStructure
         const value = await observeStructuredAsync(diagnostics, "adapter_run", () => prepared!.run(options.question));
         assertCurrent(); prepared.assertCurrent();
         const envelope = observeStructured(diagnostics, "adapter_result", () => {
+        if (!root && isUnacceptedRootResult(value)) throw new StructuredRuntimeError("unaccepted");
         if (!root || !isDeepStrictEqual(value, root)) throw new StructuredRuntimeError("failed");
         const envelope = structuredQueryEnvelope([root], "");
         if (!envelope) throw new StructuredRuntimeError("failed");
@@ -133,7 +139,7 @@ export function createOpenShellStructuredAdapter(provisioner: OpenShellStructure
         return result;
       } catch (error) {
         try { await close(); } catch { throw new StructuredRuntimeError("cleanup"); }
-        if (isStructuredQueryFailure(error)) {
+        if (isStructuredQueryFailure(error) || (error instanceof StructuredRuntimeError && error.code === "unaccepted")) {
           if (timeout.signal.aborted) throw new StructuredRuntimeError("timeout");
           if (scope.signal?.aborted) throw new StructuredRuntimeError("cancelled");
           try { scope.assertCurrent(); } catch { throw new StructuredRuntimeError("stale"); }

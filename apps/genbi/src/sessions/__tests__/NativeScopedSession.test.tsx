@@ -44,3 +44,10 @@ it('history-only browser can read saved events and cannot acquire an attachment 
   render(<ThemeProvider><NativeScopedSession sessionId="session" reconnectNonce={0} readOnly {...callbacks}/></ThemeProvider>);
   await waitFor(()=>expect(screen.getByText('Saved question')).toBeInTheDocument());expect(Socket.instances).toHaveLength(0);expect(screen.getByRole('button',{name:'Send question'})).toBeDisabled();
 });
+it('shows an unaccepted-answer error inline and leaves the composer enabled',async()=>{
+  const message='I could not produce a verified answer for that question. Your session is still open; try rephrasing or ask another question.';
+  render(<ThemeProvider><NativeScopedSession sessionId="session" reconnectNonce={0} {...callbacks}/></ThemeProvider>);const ws=Socket.instances[0]!;
+  act(()=>ws.frame({type:'replay',through:3,floor:1,truncated:false,state:'ready',events:[event(1,'user',{text:'count orders'}),event(2,'error',{code:'runtime.unaccepted',message}),event(3,'state',{state:'ready'})]}));
+  expect(screen.getByText(message)).toBeInTheDocument();expect(callbacks.onExit).not.toHaveBeenCalled();
+  expect(screen.getByRole('textbox',{name:'Question for scoped analysis'})).toBeEnabled();
+});

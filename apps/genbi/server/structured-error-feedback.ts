@@ -65,13 +65,16 @@ export function createStructuredQueryFailureTracker() {
     terminalFailure() { return failedStep ? failure : undefined; },
   };
 }
-const runtimeCodes = ["unavailable", "unsupported", "stale", "cancelled", "failed", "cleanup", "timeout"] as const;
+const runtimeCodes = ["unavailable", "unsupported", "stale", "cancelled", "failed", "cleanup", "timeout", "unaccepted"] as const;
+const unacceptedMessage = "I could not produce a verified answer for that question. Your session is still open; try rephrasing or ask another question.";
 export function storedStructuredFailure(code?: string | null): StructuredErrorFeedback {
   const queryClass = GOVERNED_ERROR_CLASSES.find(value => code === `query.${value}`);
   if (queryClass) return { code: `query.${queryClass}`, kind: queryClass === "transport" ? "connection" : "query", message: queryMessages[queryClass] };
   const runtimeCode = runtimeCodes.find(value => code === `runtime.${value}`) ?? "failed";
-  return { code: `runtime.${runtimeCode}`, kind: "runtime", message: `Structured runtime ${runtimeCode}.` };
+  return { code: `runtime.${runtimeCode}`, kind: "runtime", message: runtimeCode === "unaccepted" ? unacceptedMessage : `Structured runtime ${runtimeCode}.` };
 }
+/** Closed set of failures that end only the turn: cleanup is confirmed and no sandbox, transport or query-source fault is implied. Everything else, including any unknown code, ends the session. */
+export const SESSION_KEEPING_FAILURE_CODES: ReadonlySet<string> = new Set(["runtime.unaccepted", "query.invalid_request", "query.policy_rejected"]);
 /** Closed data-query inability, never an infrastructure diagnosis or a specific missing-field claim. */
 export function structuredDataRefusal(code?: string | null): { readonly reason: string; readonly fix: string } | undefined {
   if (code === "query.execution_failed") return {
