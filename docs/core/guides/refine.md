@@ -115,12 +115,17 @@ silently turn enforcement off.
   `c IS FALSE`, `c IS NOT TRUE`, `c IS DISTINCT FROM TRUE`, `c <> TRUE`,
   `COALESCE(c, FALSE) = FALSE`, `c = FALSE OR c IS NULL`, and
   `NOT EXISTS` / `NOT IN` over a subquery that selects `c = TRUE`. `exclude` must be a
-  boolean.
+  boolean. In the `OR` form the null check may be on any column of the flag's own model,
+  so a `LEFT JOIN` that keeps rows without a match can write
+  `k.id IS NULL OR k.c = FALSE`; a null check on another model's column, or any other
+  extra disjunct, does not qualify.
 - **`require_rate_join`**: statements that aggregate a listed amount column must read the
   rate model joined on one of the declared currency columns and bounded
   `rate.date <= <expression over a declared transaction-date column>` (an inner
   `MAX(date)`, `ORDER BY date DESC LIMIT 1`, `LATERAL`, `ASOF JOIN` and
-  `rate.date BETWEEN ... AND <upper bound>` all qualify; only the upper bound is checked).
+  `rate.date BETWEEN ... AND <upper bound>` all qualify; only the upper bound is checked,
+  and a cast of the rate date to a date or timestamp type, such as `rate.date::date` or
+  `CAST(rate.date AS DATE)`, is looked through).
   Same-day equality and an unbounded latest rate do not.
 
 Optional fields: `when: aggregated` limits a rule to statements that use an aggregate

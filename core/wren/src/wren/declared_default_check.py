@@ -51,6 +51,20 @@ def _unparen(node: exp.Expression) -> exp.Expression:
     return node
 
 
+_DATE_TYPES = exp.DataType.TEMPORAL_TYPES - {
+    exp.DataType.Type.TIME,
+    exp.DataType.Type.TIMETZ,
+}
+
+
+def _uncast_temporal(node: exp.Expression) -> exp.Expression:
+    """``node`` without a ``CAST`` / ``::`` to a date or timestamp type, if it has one."""
+    node = _unparen(node)
+    while isinstance(node, exp.Cast) and node.to.this in _DATE_TYPES:
+        node = _unparen(node.this)
+    return node
+
+
 def _conjuncts(node: exp.Expression) -> Iterable[exp.Expression]:
     node = _unparen(node)
     if isinstance(node, exp.And):
@@ -232,11 +246,7 @@ class _Statement:
             for part in _disjuncts(node):
                 if self.polarity(part, rule) == "excl":
                     found = True
-                elif not (
-                    isinstance(part, exp.Is)
-                    and self._is_flag(part.this, flag)
-                    and isinstance(part.expression, exp.Null)
-                ):
+                elif not self._null_check_on_flag_model(part, flag):
                     return None
             return "excl" if found else None
         if isinstance(node, (exp.EQ, exp.NEQ, exp.Is, exp.NullSafeEQ, exp.NullSafeNEQ)):
@@ -250,6 +260,17 @@ class _Statement:
                 return "excl" if same else "incl"
             return "excl" if same else None
         return None
+
+    def _null_check_on_flag_model(self, node: exp.Expression, flag: Pair) -> bool:
+        """``<column> IS NULL`` where the column belongs to the flag's own model.
+
+        A LEFT JOIN that keeps rows without a flag row tests the join key, not the
+        flag itself.
+        """
+        if not (isinstance(node, exp.Is) and isinstance(node.expression, exp.Null)):
+            return False
+        column = self.direct(node.this)
+        return column is not None and column[0] == flag[0]
 
     def _negated(
         self, inner: exp.Expression, rule: ExcludeRows, flag: Pair
@@ -338,17 +359,19 @@ class _Statement:
         )
         date_bounded = (
             any(
-                self.direct(low) == rate_date and self.taint(high) & dates
+                self.direct(_uncast_temporal(low)) == rate_date
+                and self.taint(high) & dates
                 for node in self._condition_nodes(exp.LTE)
                 for low, high in [(node.this, node.expression)]
             )
             or any(
-                self.direct(low) == rate_date and self.taint(high) & dates
+                self.direct(_uncast_temporal(low)) == rate_date
+                and self.taint(high) & dates
                 for node in self._condition_nodes(exp.GTE)
                 for high, low in [(node.this, node.expression)]
             )
             or any(
-                self.direct(node.this) == rate_date
+                self.direct(_uncast_temporal(node.this)) == rate_date
                 and self.taint(node.args["high"]) & dates
                 for node in self._condition_nodes(exp.Between)
                 if node.args.get("high") is not None
