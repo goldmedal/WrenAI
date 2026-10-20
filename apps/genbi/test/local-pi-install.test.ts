@@ -84,7 +84,10 @@ describe("verdicts and reason codes", () => {
   it("pi_uncertified: an untampered install without a matching row, for other hosts, other Node versions, and for non-certified records", async () => {
     const f = await installFake(tmp());
     expect(verifyLocalPi({ stateDir: f.stateDir, rows: [] }).verdict).toEqual({ ready: false, code: "pi_uncertified" });
-    expect(verifyLocalPi({ stateDir: f.stateDir, rows: [f.row], host: { platform: "linux", arch: "x64" } }).verdict).toEqual({ ready: false, code: "pi_uncertified" });
+    const otherPlatform = f.row.host.platform === "linux" ? "darwin" : "linux";
+    const otherArch = f.row.host.arch === "x64" ? "arm64" : "x64";
+    for (const host of [{ platform: otherPlatform, arch: f.row.host.arch }, { platform: f.row.host.platform, arch: otherArch }])
+      expect(verifyLocalPi({ stateDir: f.stateDir, rows: [f.row], host }).verdict).toEqual({ ready: false, code: "pi_uncertified" });
     for (const record of [{ ...f.row, state: "tested_baseline" }, { ...f.row, extra: 1 }, { state: "certified_row" }, { ...f.row, evidence: {} }, "x", null])
       expect(verifyLocalPi({ stateDir: f.stateDir, rows: [record] }).verdict).toEqual({ ready: false, code: "pi_uncertified" });
   });
