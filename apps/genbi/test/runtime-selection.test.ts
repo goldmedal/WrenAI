@@ -14,7 +14,7 @@ const subsets = (items: readonly BackendName[]): BackendName[][] => items.reduce
 
 /** Independent oracle for the support matrix, written out by hand rather than read from the table under test. */
 const expectedOffer = (runtime: "local" | "openshell", listed: readonly BackendName[], backend: BackendName): boolean =>
-  listed.includes(backend) && (runtime === "local" ? backend !== "pi" : backend === "claude" || backend === "pi");
+  listed.includes(backend) && (runtime === "local" ? true : backend === "claude" || backend === "pi");
 
 describe("runtime selection: environment matrix", () => {
   it("defaults to the local runtime offering claude and codex with the exec Codex mode", () => {
@@ -93,8 +93,9 @@ describe("runtime selection: environment matrix", () => {
     expect(resolveRuntimeSelection({ GENBI_CODEX_EXECUTABLE: "/synthetic/codex", GENBI_CODEX_SOURCE: "https://example.invalid", WREN_HARNESS_CODEX_HOME: "/synthetic", GENBI_CODEX_ACCOUNT_EMAIL: "a@example.invalid" }).listed).toEqual(["claude", "codex"]);
   });
   it("warns once per listed backend the runtime does not offer, with a browser-safe reason", () => {
-    const selection = resolveRuntimeSelection({ GENBI_BACKEND: "claude,pi" });
-    expect(selection.warnings).toHaveLength(1); expect(selection.warnings[0]).toContain('"pi"'); expect(selection.warnings[0]).toContain(UNSUPPORTED_REASON);
+    const selection = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "claude,codex" });
+    expect(selection.warnings).toHaveLength(1); expect(selection.warnings[0]).toContain('"codex"'); expect(selection.warnings[0]).toContain(UNSUPPORTED_REASON);
+    expect(resolveRuntimeSelection({ GENBI_BACKEND: "claude,pi" }).warnings).toEqual([]);
     expect(resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "codex" }).offers.codex).toEqual({ offered: false, reason: UNSUPPORTED_REASON });
   });
   it("routes in-process, gateway and local-mode auth by the runtime, never by the list", () => {
@@ -164,12 +165,13 @@ describe("runtime selection: admission and readiness", () => {
     await expect(f.runtime.route(request(claude), scope())).rejects.toMatchObject({ code: "unavailable" });
     expect(f.localRoute).not.toHaveBeenCalled();
   });
-  it("the local runtime keeps api-key, gateway and local-mode auth whatever the list says, and never offers pi", async () => {
+  it("the local runtime offers pi when listed: api-key and gateway Ask then needs it (no fallback), local-mode auth stays in-process", async () => {
     const f = runtimeFor({ GENBI_BACKEND: "pi" });
-    for (const auth of [apiKey, gateway, { mode: "local" } as const]) await expect(f.runtime.route(request(auth), scope())).resolves.toMatchObject({ finalText: "local" });
+    for (const auth of [apiKey, gateway]) await expect(f.runtime.route(request(auth), scope())).rejects.toMatchObject({ code: "unavailable" });
+    await expect(f.runtime.route(request({ mode: "local" } as const), scope())).resolves.toMatchObject({ finalText: "local" });
     const readiness = await f.runtime.readiness(gateway);
-    expect(readiness.active).toMatchObject({ offered: true, backend: "in-process", state: "ready", ask: true });
-    expect(readiness.backends.pi).toMatchObject({ offered: false, state: "not_offered" });
+    expect(readiness.backends.pi).toMatchObject({ offered: true, backend: "pi-local", state: "unavailable", ask: false });
+    expect(f.localRoute).toHaveBeenCalledTimes(1);
     await expect(f.runtime.route(request(claude), scope())).rejects.toMatchObject({ code: "unavailable" });
   });
 

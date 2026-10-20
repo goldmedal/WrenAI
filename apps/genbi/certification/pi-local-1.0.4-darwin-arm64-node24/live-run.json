@@ -1,0 +1,197 @@
+{
+  "kind": "live_no_model_run",
+  "date": "2026-10-20",
+  "vendor": "pi-local",
+  "modelCalls": 0,
+  "runner": "a scripted run of the packed @wrenai/genbi under an official Node 24 binary, with a loopback stub vendor",
+  "node": {
+    "major": 24,
+    "version": "v24.22.0"
+  },
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "piVersion": "1.0.4",
+  "dependencies": {
+    "warble": "0.19.0",
+    "ir": "0.9.0",
+    "context-loader": "0.1.4"
+  },
+  "boot": "real BFF (GENBI_RUNTIME=local, GENBI_BACKEND=pi) from the packed install, loopback stub vendor holding a generated dummy key; the dummy key was in the BFF environment",
+  "phases": {
+    "readinessBeforeInstall": {
+      "offered": true,
+      "backend": "pi-local",
+      "state": "ready",
+      "ask": true,
+      "setup": false,
+      "reason": "Structured Ask runs through pi for API key and gateway; every other purpose runs in-process."
+    },
+    "install": {
+      "steps": [
+        {
+          "name": "npm ci --ignore-scripts from the packaged lockfile",
+          "status": "done"
+        },
+        {
+          "name": "compute and write pins.json",
+          "status": "done"
+        },
+        {
+          "name": "install in place",
+          "status": "unchanged"
+        }
+      ],
+      "pins": {
+        "piVersion": "1.0.4",
+        "piBundle": "99a5efa3dca87774c0332423d0f65a60b14c023fc9bba6fe4bf2aa3069dfb937",
+        "shim": "8dff4346866cc0b12483146960a396928e34edc5d37cd03f01fd364a1b458897",
+        "lockfile": "a714e93d80449d851cf5c51d0cd6122f0696c4a2e20f7bf848e9b6588490e98b",
+        "packageJson": "8dbf9d9af435d8f53423ec0d9ca32c25c72bd72850d31343af49369d18e01c0f"
+      }
+    },
+    "installAgain": [
+      {
+        "name": "npm ci --ignore-scripts from the packaged lockfile",
+        "status": "done"
+      },
+      {
+        "name": "compute and write pins.json",
+        "status": "done"
+      },
+      {
+        "name": "install in place",
+        "status": "unchanged"
+      }
+    ],
+    "verifyAfterInstall": {
+      "ok": true,
+      "checks": [
+        {
+          "name": "managed install",
+          "ok": true
+        },
+        {
+          "name": "certified identity",
+          "ok": true
+        }
+      ]
+    },
+    "readinessCertified": {
+      "offered": true,
+      "backend": "pi-local",
+      "state": "ready",
+      "ask": true,
+      "setup": false,
+      "reason": "Structured Ask runs through pi for API key and gateway; every other purpose runs in-process."
+    },
+    "ask": {
+      "turn": {
+        "status": 200
+      },
+      "session": 201,
+      "events": [
+        "worklog:",
+        "worklog:",
+        "worklog:",
+        "event:answer",
+        "done:"
+      ],
+      "persistedAnswerEvents": 1,
+      "answer": {
+        "verified": true,
+        "table": {
+          "type": "table",
+          "columns": [
+            "n"
+          ],
+          "rows": [
+            {
+              "n": 7
+            }
+          ]
+        },
+        "forgedValueInAnswer": false
+      }
+    },
+    "piSideEvidence": {
+      "sampledFilesContainingDummyKey": 0,
+      "psProcessLinesSampled": 3,
+      "psLinesContainingDummyKey": 0,
+      "psShowsStepTokenVariable": true,
+      "psShowsAnyOpenAIKeyVariable": false,
+      "maxConcurrentStepDirs": 1,
+      "sampledFileCount": 68
+    },
+    "stub": {
+      "requests": 3,
+      "allCarriedDummyKey": true,
+      "anyCarriedStepToken": false,
+      "anyXApiKey": false,
+      "anyBodyHadDummyKey": false,
+      "urls": [
+        "/v1/chat/completions"
+      ]
+    },
+    "tampered": {
+      "offered": true,
+      "backend": "pi-local",
+      "state": "unavailable",
+      "ask": false,
+      "setup": false,
+      "reason": "Selected vendor backend is not ready.",
+      "code": "pi_identity_mismatch"
+    },
+    "askWhileTampered": {
+      "events": [
+        "error:runtime"
+      ],
+      "answerEvents": 0
+    },
+    "restoredByteIdentical": true,
+    "readinessRestored": {
+      "offered": true,
+      "backend": "pi-local",
+      "state": "ready",
+      "ask": true,
+      "setup": false,
+      "reason": "Structured Ask runs through pi for API key and gateway; every other purpose runs in-process."
+    },
+    "stubRequestsTotalAfterTamper": 3,
+    "stepDirectoriesAtEnd": [],
+    "bffLogContainsDummyKey": false,
+    "sameMajorOtherBoot_node23": {
+      "nodeVersion": "v23.7.0",
+      "pi": {
+        "offered": true,
+        "backend": "pi-local",
+        "state": "unavailable",
+        "ask": false,
+        "setup": false,
+        "reason": "Selected vendor backend is not ready.",
+        "code": "pi_uncertified"
+      }
+    },
+    "bootWithoutPiListed": {
+      "pi": {
+        "offered": false,
+        "state": "not_offered",
+        "ask": false,
+        "setup": false,
+        "reason": "Not enabled for this boot."
+      },
+      "active": {
+        "offered": true,
+        "backend": "in-process",
+        "state": "ready",
+        "ask": true,
+        "reason": "Configured in-process execution."
+      },
+      "listeners": [
+        "127.0.0.1:4790 (LISTEN)"
+      ],
+      "containsPiLocal": false
+    }
+  }
+}

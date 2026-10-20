@@ -68,8 +68,16 @@ export const RUNTIME_BACKEND_REASON_CODES = {
   ],
 } as const;
 
-export type RuntimeBackendReasonCode<B extends RuntimeBackendId = RuntimeBackendId> =
-  (typeof RUNTIME_BACKEND_REASON_CODES)[B][number];
+/**
+ * Reasons that belong to a structured-Ask backend which is not a native-session runtime backend. It shares the reason vocabulary
+ * but is deliberately absent from `RUNTIME_BACKEND_IDS`, so `RuntimeReadiness.backends` keeps its shape.
+ */
+export const LOCAL_PI_REASON_CODES = ["pi_not_installed", "pi_uncertified", "pi_identity_mismatch", "pi_dependencies_drifted", "pi_provider_unsupported", "pi_node_unsupported", "runtime_probe_failed"] as const;
+export const REASON_FAMILIES = { ...RUNTIME_BACKEND_REASON_CODES, "pi-local": LOCAL_PI_REASON_CODES } as const;
+export type RuntimeReasonFamily = keyof typeof REASON_FAMILIES;
+
+export type RuntimeBackendReasonCode<B extends RuntimeReasonFamily = RuntimeBackendId> =
+  (typeof REASON_FAMILIES)[B][number];
 
 export interface RuntimeBackendReady {
   readonly state: "ready";
@@ -79,14 +87,14 @@ export interface RuntimeBackendReady {
   readonly capabilities: readonly RuntimeCapability[];
 }
 
-export interface RuntimeBackendNotReady<B extends RuntimeBackendId = RuntimeBackendId> {
+export interface RuntimeBackendNotReady<B extends RuntimeReasonFamily = RuntimeBackendId> {
   readonly state: "unavailable" | "incompatible" | "unprovisioned";
   readonly code: RuntimeBackendReasonCode<B>;
   /** Fixed text derived from `code`, never from a command, path, or environment. */
   readonly message: string;
 }
 
-export type RuntimeBackendReadiness<B extends RuntimeBackendId = RuntimeBackendId> =
+export type RuntimeBackendReadiness<B extends RuntimeReasonFamily = RuntimeBackendId> =
   | RuntimeBackendReady
   | RuntimeBackendNotReady<B>;
 

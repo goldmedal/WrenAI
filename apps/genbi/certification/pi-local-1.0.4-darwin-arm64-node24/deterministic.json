@@ -1,0 +1,99 @@
+{
+  "kind": "deterministic_pi_local_evidence",
+  "date": "2026-10-20",
+  "vendor": "pi-local",
+  "runner": "scripts/pi-local-probe.mjs",
+  "modelCalls": 0,
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "node": {
+    "version": "v24.22.0",
+    "major": 24
+  },
+  "piVersion": "1.0.4",
+  "ok": true,
+  "checks": [
+    {
+      "name": "packaged certification row covers this host and Node major and matches the installed identity",
+      "ok": true,
+      "detail": {
+        "verdict": {
+          "ready": true,
+          "version": "1.0.4"
+        },
+        "packagedRows": 1
+      }
+    },
+    {
+      "name": "another Node major is pi_uncertified and a Node below pi's minimum is pi_node_unsupported",
+      "ok": true
+    },
+    {
+      "name": "the same Node major with another patch level is ready",
+      "ok": true
+    },
+    {
+      "name": "a row is read from the package only: GENBI_PI_LOCAL_ROWS changes nothing",
+      "ok": true
+    },
+    {
+      "name": "a real pi 1.0.4 step runs through the proxy and the host answers its one tool call",
+      "ok": true,
+      "detail": {
+        "value": "probe answer",
+        "toolInputs": [
+          {
+            "code": "K7"
+          }
+        ]
+      }
+    },
+    {
+      "name": "the stub received only requests that carry the dummy key injected by the proxy, never the step token",
+      "ok": true,
+      "detail": {
+        "requests": 2,
+        "urls": [
+          "/v1/chat/completions"
+        ]
+      }
+    },
+    {
+      "name": "the step finished with processes clear, directory removed and grant revoked",
+      "ok": true,
+      "detail": {
+        "reason": "settled",
+        "processes": "clear",
+        "directory": "removed",
+        "grant": "revoked"
+      }
+    },
+    {
+      "name": "a step cancelled while pi waits on the vendor fails as cancelled and proves cleanup",
+      "ok": true,
+      "detail": {
+        "reason": "cancelled",
+        "processes": "clear",
+        "directory": "removed",
+        "grant": "revoked"
+      }
+    },
+    {
+      "name": "nothing pi could read held the key: sampled step files and process lines carry the step token variable and no vendor key",
+      "ok": true,
+      "detail": {
+        "sampledFiles": [
+          "<step>/agent/auth.json",
+          "<step>/agent/mcp.json",
+          "<step>/agent/models-store.json",
+          "<step>/agent/models.json",
+          "<step>/agent/settings.json",
+          "<step>/system-prompt.txt"
+        ],
+        "processLines": 3
+      }
+    }
+  ]
+}

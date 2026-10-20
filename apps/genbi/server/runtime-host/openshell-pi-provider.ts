@@ -138,11 +138,15 @@ export function createOpenShellPiProvider(options: PiProviderOptions): NativeCom
   return Object.freeze(provider);
 }
 
-type Proof = { identity: Readonly<Extract<OpenShellIdentity, { purpose: "model" }>>; claimed: boolean; claimedRun?: StepRun; check(): void; snapshot: readonly unknown[] };
+type Proof = { identity: Readonly<{ tier: string }>; claimed: boolean; claimedRun?: StepRun; check(): void; snapshot: readonly unknown[] };
 const proofs = new WeakMap<PiComponentRuntime, Proof>();
 const fields = (runtime: PiComponentRuntime) => [runtime.model, runtime.tier, runtime.signal, runtime.assertCurrent, runtime.assertExecutableCurrent, runtime.openStep, runtime.close] as const;
 const fingerprint = (run: StepRun) => JSON.stringify({ tier: run.tier, request: run.request, brief: run.brief ?? null, prompt: run.prompt, input: run.input, consumes: run.consumes, schemas: run.toolSchemas, descriptions: run.toolDescriptions, names: Object.keys(run.tools), perSlot: run.perSlot ?? null });
 const functions = (run: StepRun) => Object.values(run.tools);
+/** Registers a runtime minted outside the OpenShell provider (the local pi provider) so `claimPiHostRuntime` accepts exactly that object, once. */
+export function registerPiHostRuntime(runtime: PiComponentRuntime, proof: { readonly tier: string; check(): void }): void {
+  proofs.set(runtime, { identity: { tier: proof.tier }, claimed: false, check: proof.check, snapshot: fields(runtime) });
+}
 /** Claims an exact provider-minted runtime once for one exact StepRun. No structural proof is accepted. */
 export function claimPiHostRuntime(runtime: PiComponentRuntime, run: StepRun): { check(): void; afterClose(): void } {
   const proof = proofs.get(runtime); if (!proof || proof.claimed) throw new PiProtocolFault("protocol");

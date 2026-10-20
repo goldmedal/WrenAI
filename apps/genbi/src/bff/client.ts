@@ -547,6 +547,8 @@ export interface PiPinnedRuntime {
 }
 export interface StructuredBackendReadiness {
   readonly offered: boolean;
+  /** Where the backend runs: `pi-local` for pi on this machine, `openshell` for pi on OpenShell. */
+  readonly backend?: string;
   readonly state: 'ready' | 'unavailable' | 'not_offered';
   readonly ask: boolean;
   readonly setup: boolean;

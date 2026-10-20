@@ -328,6 +328,9 @@ export type RouteResult =
   | { readonly backend: "openshell"; readonly warnings: readonly string[];
       /** Host-root evidence; server folding requires its registered result authority. */
       readonly envelope: import("../render/envelope.js").RenderEnvelope }
+  | { readonly backend: "pi-local"; readonly warnings: readonly string[];
+      /** Host-root evidence from pi on this machine; server folding requires its registered result authority. */
+      readonly envelope: import("../render/envelope.js").RenderEnvelope }
   | ({ readonly backend: "codex-app-server"; readonly warnings: readonly string[];
       /** Host-captured normalized component evidence; never recovered from model prose. */
       readonly envelope?: import("../render/envelope.js").RenderEnvelope;

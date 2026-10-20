@@ -127,6 +127,8 @@ interface BootReadiness {
   readonly offered: Partial<Record<SubscriptionProvider, boolean>>;
   /** The pi backend, only when this boot offers it and carries a protected descriptor to show. */
   readonly pi?: StructuredBackendReadiness;
+  /** pi served on this machine: no protected descriptor, so the pickers stay and only its readiness is added. */
+  readonly localPi?: StructuredBackendReadiness;
 }
 
 /** What the boot offers; absent until known, so nothing is disabled on a guess. */
@@ -142,7 +144,8 @@ function useBootReadiness(): BootReadiness | undefined {
           const backends = value.backends;
           if (!cancelled && backends) {
             const pi = backends.pi?.offered && backends.pi.pinned ? backends.pi : undefined;
-            setBoot({ offered: { claude: backends.claude?.offered, codex: backends.codex?.offered }, ...(pi ? { pi } : {}) });
+            const localPi = backends.pi?.offered && backends.pi.backend === 'pi-local' && !backends.pi.pinned ? backends.pi : undefined;
+            setBoot({ offered: { claude: backends.claude?.offered, codex: backends.codex?.offered }, ...(pi ? { pi } : {}), ...(localPi ? { localPi } : {}) });
           }
         },
         () => {},
@@ -151,6 +154,24 @@ function useBootReadiness(): BootReadiness | undefined {
     return () => { cancelled = true; };
   }, []);
   return boot;
+}
+
+/** Read-only readiness of pi on this machine; shown above the existing pickers, which stay in charge of model and provider. */
+function LocalPiStatus({ readiness }: { readiness: StructuredBackendReadiness }) {
+  const ready = readiness.state === 'ready';
+  return (
+    <div>
+      <div style={{ marginBottom: 4, fontWeight: 500 }}>{t('setup.piLocalRuntimeTitle')}</div>
+      <Space>
+        <Tag color={ready ? 'success' : 'warning'}>{ready ? t('setup.piRuntimeStateReady') : t('setup.piRuntimeStateNotReady')}</Tag>
+        <span style={{ opacity: 0.65, fontSize: 12 }}>{t('setup.piLocalRuntimeNote')}</span>
+      </Space>
+      {!ready && (
+        <Alert style={{ marginTop: 8 }} type="warning" showIcon message={readiness.reason}
+          description={readiness.code ? `${t('setup.piRuntimeReasonPrefix')}${readiness.code}` : undefined} />
+      )}
+    </div>
+  );
 }
 
 /**
@@ -287,6 +308,7 @@ export function RuntimeStepCard() {
   return (
     <Panel title={t('setup.runtimeTitle')} note={t('setup.runtimeDescription')}>
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
+        {bootReadiness?.localPi && <LocalPiStatus readiness={bootReadiness.localPi} />}
         <div>
           <div style={{ marginBottom: 8, fontWeight: 500 }}>{t('setup.authModeLabel')}</div>
           {/* Do not overwrite an unsaved BYO/local boot binding merely to project this form: only an explicit choice changes authMode. */}

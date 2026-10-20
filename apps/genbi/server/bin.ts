@@ -3,6 +3,7 @@ import { OpenShellNativeSessions } from "./openshell-native-sessions.js";
 import { effectiveRouteOptions } from "./turn.js";
 import { createCodexRuntimeComposition, readCodexBootConfiguration } from "./codex-runtime-composition.js";
 import { createCodexStructuredAdapter } from "./codex-structured-ask.js";
+import { createLocalPiRuntimeComposition } from "./local-pi-runtime-composition.js";
 import { createOpenShellRuntimeComposition, selectNativeRuntimeBackend } from "./openshell-runtime-composition.js";
 import { inProcessAuthViaBackend, isBackendOffered, localTerminalAvailable, resolveRuntimeSelection, RuntimeSelectionError, type RuntimeSelection } from "./runtime-selection.js";
 import { createOpenShellStructuredAdapter } from "./openshell-structured-ask.js";
@@ -706,6 +707,11 @@ async function main(): Promise<void> {
   });
   const piOnOpenShell = runtimeSelection.runtime === "openshell" && isBackendOffered(runtimeSelection, "pi");
   const claudeOnOpenShell = runtimeSelection.runtime === "openshell" && isBackendOffered(runtimeSelection, "claude");
+  // pi on the local runtime is opt-in (GENBI_BACKEND lists it). Nothing below exists, listens or reads an install on any other boot.
+  const localPi = runtimeSelection.runtime === "local" && isBackendOffered(runtimeSelection, "pi")
+    ? createLocalPiRuntimeComposition({ env: process.env, store, producerBinary: producerExecutable?.executable ?? "", wrenBinary: nativeWrenExecutable?.executable ?? "",
+      profileSource, hostHome: nativeHome, sourceWrenHome: nativeSourceWrenHome, getBinding: currentInteractiveBinding, getComponentLimits })
+    : undefined;
   const openshellValidator = createOpenShellEnrichmentValidator({ composition: openshellComposition, getBinding: currentInteractiveBinding,
     scratchRoot: path.join(nativeMaterializationState.root, "enrichment-drafts"),
     assertConfigurationCurrent() { if (!openshellComposition.claudeBoot) throw new Error("OpenShell model configuration unavailable"); openshellComposition.claudeBoot.assertCurrent(); } });
@@ -778,9 +784,9 @@ async function main(): Promise<void> {
   // Explicit opt-in remains behind the packaged exact-version certification gate.
   const structuredRuntime = new StructuredRuntime({
     selection: runtimeSelection, deployment,
-    adapters: { codex: createCodexStructuredAdapter(codexComposition.structured), ...(claudeOnOpenShell ? { claude: openshellStructured } : {}), ...(piOnOpenShell ? { pi: openshellStructured } : {}) },
+    adapters: { codex: createCodexStructuredAdapter(codexComposition.structured), ...(claudeOnOpenShell ? { claude: openshellStructured } : {}), ...(piOnOpenShell ? { pi: openshellStructured } : localPi ? { pi: localPi.adapter } : {}) },
     piPins: () => { const descriptor = openshellComposition.piBoot?.descriptor; return descriptor ? { provider: descriptor.displayLabel, auth: PI_BOOT_AUTH_MODE[descriptor.auth] as "byo" | "gateway", models: descriptor.models } : undefined; },
-    onRevoke: openshellComposition.revokeRuntime,
+    onRevoke: localPi ? () => { openshellComposition.revokeRuntime(); localPi.revoke(); } : openshellComposition.revokeRuntime,
     localRoute: route, localSetupFor: (choice) => setupRunnerFor?.(choice) ?? setupRunner,
   });
   // Apply-all/Discard for OpenShell-validated reviews. Recovery runs before the server accepts requests: an interrupted apply is rolled back
@@ -900,7 +906,7 @@ async function main(): Promise<void> {
     const deadline = setTimeout(() => process.exit(1), 12_000);
     void shutdownNativeResources({
       shutdownSessions: async () => {
-        const results = await Promise.allSettled([nativeSessions.shutdown(), structuredRuntime.shutdown(), codexComposition.shutdown(), openshellComposition.shutdown()]);
+        const results = await Promise.allSettled([nativeSessions.shutdown(), structuredRuntime.shutdown(), codexComposition.shutdown(), openshellComposition.shutdown(), ...(localPi ? [localPi.shutdown()] : [])]);
         if (results.some((result) => result.status === "rejected")) throw new Error("Session cleanup failed");
       },
       closeTerminals: () => interactiveTerminal?.closeAll(),

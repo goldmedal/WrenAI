@@ -31,9 +31,16 @@ export interface RuntimeSupport {
 
 /** The support matrix. Every offer decision reads this table; there are no scattered conditionals. */
 export const RUNTIME_SUPPORT: Readonly<Record<RuntimeKind, RuntimeSupport>> = Object.freeze({
-  local: Object.freeze({ backends: Object.freeze({ claude: "supported", codex: "supported", pi: "unsupported" } as const), inProcessAuth: true, localModeAuth: true }),
+  local: Object.freeze({ backends: Object.freeze({ claude: "supported", codex: "supported", pi: "supported" } as const), inProcessAuth: true, localModeAuth: true }),
   openshell: Object.freeze({ backends: Object.freeze({ claude: "supported", codex: "unsupported", pi: "supported" } as const), inProcessAuth: Object.freeze({ via: "pi" } as const), localModeAuth: false }),
 });
+
+/**
+ * The purposes whose api-key and gateway execution runs through pi on the local runtime when pi is listed. A purpose is added here only when
+ * its pi path lands with its own verification; every purpose not named stays in-process exactly as before.
+ */
+export const LOCAL_PI_PURPOSES = Object.freeze(["ask"] as const);
+export type LocalPiPurpose = (typeof LOCAL_PI_PURPOSES)[number];
 
 const DEFAULT_LOCAL_BACKENDS: readonly BackendName[] = Object.freeze(["claude", "codex"] as const);
 
@@ -143,6 +150,11 @@ export const inProcessAuthViaBackend = (selection: RuntimeSelection): BackendNam
   const support = RUNTIME_SUPPORT[selection.runtime].inProcessAuth;
   return typeof support === "object" && isBackendOffered(selection, support.via) ? support.via : undefined;
 };
+
+/** True when api-key or gateway work for this purpose runs through pi on the local runtime (pi listed on a local boot, purpose with a pi path). */
+export const localPiServes = (selection: RuntimeSelection, auth: { readonly mode: string }, purpose: LocalPiPurpose | "other"): boolean =>
+  selection.runtime === "local" && isBackendOffered(selection, "pi") && (auth.mode === "api-key" || auth.mode === "gateway")
+  && (LOCAL_PI_PURPOSES as readonly string[]).includes(purpose);
 
 export function localModeAuthOffer(selection: RuntimeSelection): BackendOffer {
   return RUNTIME_SUPPORT[selection.runtime].localModeAuth ? Object.freeze({ offered: true }) : Object.freeze({ offered: false, reason: UNSUPPORTED_REASON });

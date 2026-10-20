@@ -24,7 +24,8 @@
   },
   "bin": {
     "genbi": "bin/genbi.mjs",
-    "genbi-openshell-pi": "bin/genbi-openshell-pi.mjs"
+    "genbi-openshell-pi": "bin/genbi-openshell-pi.mjs",
+    "genbi-local-pi": "bin/genbi-local-pi.mjs"
   },
   "type": "module",
   "scripts": {

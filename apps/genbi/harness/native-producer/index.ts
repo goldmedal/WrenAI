@@ -271,7 +271,7 @@ export function createRouteNativeProducer(
 }
 
 function resultText(result: RouteResult): string {
-  if (result.backend === "openshell") throw new Error("Structured host results are unavailable to the native producer");
+  if (result.backend === "openshell" || result.backend === "pi-local") throw new Error("Structured host results are unavailable to the native producer");
   if (result.backend === "agent") {
     if (result.kind === "refusal") throw new Error("producer refused result");
     return JSON.stringify(result.envelope);
