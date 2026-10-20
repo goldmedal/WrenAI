@@ -346,6 +346,41 @@ def test_identifier_case_follows_the_dialect():
     assert snowflake.check(parse_one(COUNT, dialect="snowflake")) == [EXCLUDE]
 
 
+LEFT_JOINED = (
+    "SELECT COUNT(*) FROM orders o LEFT JOIN customers c "
+    "ON c.id = o.customer_id WHERE {atom}"
+)
+NULL_TOLERANT = {
+    "key is null first": "(c.id IS NULL OR c.is_test = FALSE)",
+    "key is null last": "(c.is_test = FALSE OR c.id IS NULL)",
+    "unparenthesised": "c.id IS NULL OR NOT c.is_test",
+    "another column of the flag's model": "c.country IS NULL OR c.is_test = FALSE",
+}
+
+
+@pytest.mark.parametrize("atom", NULL_TOLERANT.values(), ids=NULL_TOLERANT.keys())
+def test_a_left_join_that_keeps_rows_without_a_customer_satisfies_the_rule(
+    checker, atom
+):
+    assert check(checker, LEFT_JOINED.format(atom=atom)) == []
+
+
+NULL_TOLERANT_MISSES = {
+    "is null on another model": "(o.id IS NULL OR c.is_test = FALSE)",
+    "another model's column in a null-check": "(o.customer_id IS NULL OR c.is_test = FALSE)",
+    "non-null disjunct": "(c.is_test = FALSE OR c.country = 'US')",
+    "is not null": "(c.id IS NOT NULL OR c.is_test = FALSE)",
+    "null-check alone": "c.id IS NULL",
+}
+
+
+@pytest.mark.parametrize(
+    "atom", NULL_TOLERANT_MISSES.values(), ids=NULL_TOLERANT_MISSES.keys()
+)
+def test_a_null_tolerant_exclusion_must_stay_on_the_flags_model(checker, atom):
+    assert check(checker, LEFT_JOINED.format(atom=atom)) == [EXCLUDE]
+
+
 # -- require_rate_join -------------------------------------------------------
 
 RATED = (
@@ -381,6 +416,39 @@ FX_BAD_DATES = {
 
 @pytest.mark.parametrize("date", FX_BAD_DATES.values(), ids=FX_BAD_DATES.keys())
 def test_a_rate_join_outside_the_declared_shape_fires(checker, date):
+    assert check(checker, RATED.format(date=date)) == [RATE]
+
+
+CAST_DATES = {
+    "cast to date": "CAST(f.date AS DATE) <= p.captured_at",
+    "double colon date": "f.date::date <= p.captured_at",
+    "double colon timestamp": "f.date::timestamp <= p.captured_at",
+    "cast to timestamp": "CAST(f.date AS TIMESTAMP) <= p.captured_at",
+    "reversed": "p.captured_at >= f.date::date",
+    "between": "f.date::date BETWEEN CAST(p.captured_at AS DATE) - INTERVAL 7 DAY AND CAST(p.captured_at AS DATE)",
+    "cast on both sides": "CAST(f.date AS DATE) <= CAST(p.captured_at AS DATE)",
+    "cast in the as-of subquery": "f.date = (SELECT MAX(x.date) FROM fx_rates x WHERE x.currency = p.currency AND x.date::date <= p.captured_at)",
+}
+
+
+@pytest.mark.parametrize("date", CAST_DATES.values(), ids=CAST_DATES.keys())
+def test_a_temporal_cast_on_the_rate_date_still_bounds_the_rate(checker, date):
+    assert check(checker, RATED.format(date=date)) == []
+
+
+NON_TEMPORAL_CAST_DATES = {
+    "cast to varchar": "CAST(f.date AS VARCHAR) <= p.captured_at",
+    "double colon varchar": "f.date::varchar <= p.captured_at",
+    "cast to integer": "CAST(f.date AS INTEGER) <= p.captured_at",
+    "varchar between": "CAST(f.date AS VARCHAR) BETWEEN '2020-01-01' AND p.captured_at",
+    "varchar in the as-of subquery": "f.date = (SELECT MAX(x.date) FROM fx_rates x WHERE x.currency = p.currency AND CAST(x.date AS VARCHAR) <= p.captured_at)",
+}
+
+
+@pytest.mark.parametrize(
+    "date", NON_TEMPORAL_CAST_DATES.values(), ids=NON_TEMPORAL_CAST_DATES.keys()
+)
+def test_a_non_temporal_cast_on_the_rate_date_does_not_bound_the_rate(checker, date):
     assert check(checker, RATED.format(date=date)) == [RATE]
 
 
