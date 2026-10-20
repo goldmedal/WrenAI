@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync 
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PI_IDENTITY_TOTAL_DEADLINE_MS, assertPiCertified, createPiCertificationGate, requirePiCertification, createPiImagePinsReader, piAssetsConform, type PiGateVerdict } from "../server/runtime-host/openshell-pi-identity.js";
+import { PI_IDENTITY_SWEEP_AGE_MS, PI_IDENTITY_TOTAL_DEADLINE_MS, assertPiCertified, createPiCertificationGate, requirePiCertification, createPiImagePinsReader, piAssetsConform, type PiGateVerdict } from "../server/runtime-host/openshell-pi-identity.js";
 import { PI_CERTIFIED_ROWS, piCertificationSchema, shippedPiTemplateDigests, type InstalledComponents, type PiCertification } from "../server/runtime-host/openshell-vendor-certification.js";
 import { renderPiEndpointAssets } from "../server/runtime-host/openshell-pi-assets.js";
 import { OpenShellError } from "../server/runtime-host/openshell-types.js";
@@ -25,6 +25,12 @@ function tar(name: string, content: string, type = "0"): Buffer {
   const body = Buffer.alloc(Math.ceil(content.length / 512) * 512); body.write(content, 0, "latin1");
   return Buffer.concat([header, body, Buffer.alloc(1024)]);
 }
+/** `docker ps --format '{{.CreatedAt}}'`: Go's `Time.String()` of a whole-second instant, in the daemon's zone. */
+function dockerTime(ms: number, offsetMinutes = 480, zone = "CST"): string {
+  const local = new Date(ms + offsetMinutes * 60_000).toISOString();
+  const sign = offsetMinutes < 0 ? "-" : "+"; const abs = Math.abs(offsetMinutes);
+  return `${local.slice(0, 10)} ${local.slice(11, 19)} ${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}${String(abs % 60).padStart(2, "0")} ${zone}`;
+}
 const fixture = () => {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "pi-identity-"))); roots.push(root); chmodSync(root, 0o700);
   const docker = path.join(root, "docker"); writeFileSync(docker, "#!/bin/sh\n", { mode: 0o700 });
@@ -36,16 +42,21 @@ const fixture = () => {
   const configuration = { dockerExecutable: docker, dockerRealpath: docker, dockerDigest: `sha256:${sha(Buffer.from("#!/bin/sh\n"))}`, dockerSocket: path.join(root, "docker.sock"), dockerNamespace: "synthetic",
     executableDigest: `sha256:${row.gateway.executableSha256}`, version: row.gateway.version, home: root, configHome: root, stateHome: root,
     pi: { image: `sha256:${"c".repeat(64)}`, policy, policyDigest: `sha256:${sha(rendered.policy)}`, provider: "vendor-provider", profile, profileDigest: `sha256:${sha(rendered.profile)}` } };
-  const calls: string[][] = []; const containers = new Set<string>();
+  const calls: string[][] = [];
+  /** Labelled containers by name, as the daemon would list them: a full id and a creation instant. */
+  const containers = new Map<string, { readonly id: string; readonly createdMs: number }>();
+  const createContainer = (name: string, createdMs = Date.now()) => { const id = sha(name); containers.set(name, { id, createdMs }); return id; };
+  const removeContainers = (refs: readonly string[]) => { for (const [name, { id }] of containers) if (refs.includes(name) || refs.includes(id)) containers.delete(name); };
+  const listContainers = () => [...containers.values()].map(({ id, createdMs }) => `${id} ${dockerTime(createdMs)}`).join("\n");
   const run = vi.fn<(exe: string, argv: readonly string[], env: NodeJS.ProcessEnv, signal?: AbortSignal) => Promise<string>>(async (_exe, argv) => {
     calls.push([...argv]);
-    if (argv[0] === "ps") return [...containers].join("\n");
-    if (argv[0] === "create") { containers.add(argv[argv.indexOf("--name") + 1]!); return "container-id\n"; }
+    if (argv[0] === "ps") return listContainers();
+    if (argv[0] === "create") { createContainer(argv[argv.indexOf("--name") + 1]!); return "container-id\n"; }
     if (argv[0] === "cp") return tar("pins.json", JSON.stringify(row.image.pins)).toString("latin1");
-    if (argv[0] === "rm") { for (const name of argv.slice(2)) containers.delete(name); return ""; }
+    if (argv[0] === "rm") { removeContainers(argv.slice(2)); return ""; }
     throw new Error(`unexpected docker ${argv[0]}`);
   });
-  return { root, row, descriptor, configuration, run, calls, containers, policy, profile, rendered };
+  return { root, row, descriptor, configuration, run, calls, containers, createContainer, removeContainers, listContainers, policy, profile, rendered };
 };
 
 describe("resolve-only reading of a pi image's pins", () => {
@@ -65,9 +76,63 @@ describe("resolve-only reading of a pi image's pins", () => {
       expect(call[2]).toEqual({ PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: f.root, XDG_CONFIG_HOME: f.root, XDG_STATE_HOME: f.root, LANG: "en_US.UTF-8", DOCKER_HOST: `unix://${f.configuration.dockerSocket}` });
     }
   });
-  it("sweeps a leftover labelled container of a crashed earlier read before creating a new one", async () => {
-    const f = fixture(); f.containers.add("genbi-pi-identity-leftover00"); await createPiImagePinsReader({ configuration: f.configuration, run: f.run as never })();
-    expect(f.calls[0]).toEqual(["ps", "-a", "-q", "--filter", "label=genbi-pi-identity=synthetic"]); expect(f.calls[1]![0]).toBe("rm"); expect(f.containers.size).toBe(0);
+  describe("sweeping crash orphans by age, never another reader's in-flight container", () => {
+    const NOW = Date.UTC(2026, 9, 20, 4, 0, 0);
+    const listing = ["ps", "-a", "--no-trunc", "--filter", "label=genbi-pi-identity=synthetic", "--format", "{{.ID}} {{.CreatedAt}}"];
+    it("sweeps a crash orphan older than the sweep age before creating a new one, by its full id", async () => {
+      vi.useFakeTimers({ toFake: ["Date"], now: NOW }); const f = fixture(); const orphan = f.createContainer("genbi-pi-identity-leftover00", NOW - PI_IDENTITY_SWEEP_AGE_MS - 1000);
+      await createPiImagePinsReader({ configuration: f.configuration, run: f.run as never })();
+      expect(f.calls[0]).toEqual(listing); expect(f.calls[1]).toEqual(["rm", "-f", orphan]); expect(f.calls[2]![0]).toBe("create"); expect(f.containers.size).toBe(0);
+    });
+    it.each([
+      ["created just now", 0, 480, "CST"],
+      ["created at exactly the sweep age", PI_IDENTITY_SWEEP_AGE_MS, 480, "CST"],
+      ["one second under the sweep age, listed by a daemon west of UTC", PI_IDENTITY_SWEEP_AGE_MS - 1000, -300, "EST"],
+      ["dated in the future by a skewed daemon clock", -60_000, 0, "UTC"],
+    ])("keeps a labelled container %s: it may be another reader's in-flight read", async (_name, age, offset, zone) => {
+      vi.useFakeTimers({ toFake: ["Date"], now: NOW }); const f = fixture(); const peer = f.createContainer("genbi-pi-identity-peer0000", NOW - age);
+      f.run.mockImplementation(async (_e, argv) => { f.calls.push([...argv]); if (argv[0] === "ps") return `${peer} ${dockerTime(NOW - age, offset, zone)}\n`; if (argv[0] === "cp") return tar("pins.json", "{}").toString("latin1"); if (argv[0] === "rm") f.removeContainers(argv.slice(2)); return "id"; });
+      await createPiImagePinsReader({ configuration: f.configuration, run: f.run as never })();
+      expect(f.calls.map(argv => argv[0])).toEqual(["ps", "create", "cp", "rm"]); expect(f.calls.flat()).not.toContain(peer); expect(f.containers.has("genbi-pi-identity-peer0000")).toBe(true);
+    });
+    it("removes only the old container when an old orphan and a young peer are both listed", async () => {
+      vi.useFakeTimers({ toFake: ["Date"], now: NOW }); const f = fixture();
+      const orphan = f.createContainer("genbi-pi-identity-orphan000", NOW - 10 * PI_IDENTITY_SWEEP_AGE_MS); f.createContainer("genbi-pi-identity-peer0000", NOW - 5000);
+      await createPiImagePinsReader({ configuration: f.configuration, run: f.run as never })();
+      expect(f.calls[1]).toEqual(["rm", "-f", orphan]); expect([...f.containers.keys()]).toEqual(["genbi-pi-identity-peer0000"]);
+    });
+    it.each([
+      ["a truncated id", (id: string) => `${id.slice(0, 12)} 2026-10-20 12:00:00 +0800 CST`],
+      ["a humanized age", (id: string) => `${id} About a minute ago`],
+      ["no zone offset", (id: string) => `${id} 2026-10-20 12:00:00 CST`],
+      ["an impossible date", (id: string) => `${id} 2026-13-40 12:00:00 +0800 CST`],
+      ["an impossible time", (id: string) => `${id} 2026-10-20 25:00:00 +0800 CST`],
+      ["an extra field", (id: string) => `${id} 2026-10-20 12:00:00 +0800 CST extra`],
+      ["one bad line after an old orphan", (id: string) => `${id} 2000-01-01 00:00:00 +0000 UTC\nnot a container`],
+    ])("fails closed as runtime_probe_failed on a listing with %s, and removes nothing", async (_name, render) => {
+      vi.useFakeTimers({ toFake: ["Date"], now: NOW }); const f = fixture(); const id = sha("listed");
+      f.run.mockImplementation(async (_e, argv) => { f.calls.push([...argv]); if (argv[0] === "ps") return `${render(id)}\n`; throw new Error(`unexpected docker ${argv[0]}`); });
+      await expect(createPiImagePinsReader({ configuration: f.configuration, run: f.run as never })()).rejects.toMatchObject({ code: "openshell_protocol_invalid" });
+      expect(f.calls.map(argv => argv[0])).toEqual(["ps"]);
+      const gate = createPiCertificationGate({ configuration: f.configuration, descriptor: f.descriptor, host: { platform: "darwin", arch: "arm64" }, installed: () => installedFor(f.row), run: f.run as never });
+      expect(await gate()).toEqual({ ready: false, code: "runtime_probe_failed" }); expect(f.calls.map(argv => argv[0])).toEqual(["ps", "ps"]);
+    });
+    it("still removes its own container after the caller cancels, and leaves a young peer alone", async () => {
+      vi.useFakeTimers({ toFake: ["Date"], now: NOW }); const f = fixture(); const controller = new AbortController(); const calls: { argv: readonly string[]; signal: AbortSignal | undefined }[] = [];
+      f.createContainer("genbi-pi-identity-peer0000", NOW - 5000);
+      f.run.mockImplementation(async (_e, argv, _env, signal) => {
+        calls.push({ argv: [...argv], signal });
+        if (argv[0] === "ps") return f.listContainers();
+        if (argv[0] === "create") { f.createContainer(argv[argv.indexOf("--name") + 1]!); return "id"; }
+        if (argv[0] === "cp") { controller.abort(); throw new OpenShellError("openshell_remote_unknown"); }
+        if (argv[0] === "rm") { if (signal?.aborted) throw new OpenShellError("openshell_remote_unknown"); f.removeContainers(argv.slice(2)); return ""; }
+        throw new Error("unexpected");
+      });
+      await expect(createPiImagePinsReader({ configuration: f.configuration, run: f.run as never })(controller.signal)).rejects.toThrow();
+      const created = calls.find(call => call.argv[0] === "create")!; const name = created.argv[created.argv.indexOf("--name") + 1]!;
+      expect(calls.filter(call => call.argv[0] === "rm").map(call => call.argv)).toEqual([["rm", "-f", name]]); expect(calls.at(-1)!.signal).toBeUndefined();
+      expect([...f.containers.keys()]).toEqual(["genbi-pi-identity-peer0000"]);
+    });
   });
   it("caches a successful read by image id and never a failed one", async () => {
     const f = fixture(); const read = createPiImagePinsReader({ configuration: f.configuration, run: f.run as never });
@@ -126,9 +191,9 @@ describe("resolve-only reading of a pi image's pins", () => {
     f.run.mockImplementation(async (_e, argv, _env, signal) => {
       calls.push({ argv: [...argv], signal });
       if (argv[0] === "ps") return "";
-      if (argv[0] === "create") { f.containers.add(argv[argv.indexOf("--name") + 1]!); return "id"; }
+      if (argv[0] === "create") { f.createContainer(argv[argv.indexOf("--name") + 1]!); return "id"; }
       if (argv[0] === "cp") { controller.abort(); throw new OpenShellError("openshell_remote_unknown"); }
-      if (argv[0] === "rm") { if (signal?.aborted) throw new OpenShellError("openshell_remote_unknown"); for (const name of argv.slice(2)) f.containers.delete(name); return ""; }
+      if (argv[0] === "rm") { if (signal?.aborted) throw new OpenShellError("openshell_remote_unknown"); f.removeContainers(argv.slice(2)); return ""; }
       throw new Error("unexpected");
     });
     await expect(createPiImagePinsReader({ configuration: f.configuration, run: f.run as never })(controller.signal)).rejects.toThrow();
@@ -139,8 +204,8 @@ describe("resolve-only reading of a pi image's pins", () => {
     f.run.mockImplementation((_e, argv, _env, signal) => {
       calls.push({ argv: [...argv], signal });
       if (argv[0] === "ps") return Promise.resolve("");
-      if (argv[0] === "create") { f.containers.add(argv[argv.indexOf("--name") + 1]!); return Promise.resolve("id"); }
-      if (argv[0] === "rm") { if (signal?.aborted) return Promise.reject(new OpenShellError("openshell_remote_unknown")); for (const name of argv.slice(2)) f.containers.delete(name); return Promise.resolve(""); }
+      if (argv[0] === "create") { f.createContainer(argv[argv.indexOf("--name") + 1]!); return Promise.resolve("id"); }
+      if (argv[0] === "rm") { if (signal?.aborted) return Promise.reject(new OpenShellError("openshell_remote_unknown")); f.removeContainers(argv.slice(2)); return Promise.resolve(""); }
       return new Promise((_resolve, reject) => { signal?.addEventListener("abort", () => reject(new OpenShellError("openshell_remote_unknown")), { once: true }); });
     });
     const outcome = createPiImagePinsReader({ configuration: f.configuration, run: f.run as never })().then(() => "resolved", error => (error as OpenShellError).code);

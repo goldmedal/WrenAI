@@ -12,6 +12,11 @@ export const PI_IMAGE_PINS_PATH = "/opt/genbi/pins.json";
 const COMMAND_DEADLINE_MS = 10_000;
 /** The whole identity read, every command together, is bounded; exported so the deadline test names it. */
 export const PI_IDENTITY_TOTAL_DEADLINE_MS = 25_000;
+/**
+ * A labelled container is swept only once it is older than any read can still be using it: the total deadline, plus a margin that covers the
+ * removal's own deadline, the second-granularity creation time and clock skew between the host and the docker daemon.
+ */
+export const PI_IDENTITY_SWEEP_AGE_MS = PI_IDENTITY_TOTAL_DEADLINE_MS + 60_000;
 const MAX_PINS_BYTES = 8192;
 
 type Runner = typeof runOpenShellCommand;
@@ -20,6 +25,23 @@ type Configuration = Pick<OpenShellConfiguration, "dockerExecutable" | "dockerRe
 /** `unavailable` is an infrastructure failure to observe, never a verdict about the image. */
 export type PiGateVerdict = PiCertificationVerdict | { readonly ready: false; readonly code: "runtime_probe_failed" };
 export type PiCertificationGate = (signal?: AbortSignal) => Promise<PiGateVerdict>;
+
+const CONTAINER_LINE = /^([a-f0-9]{64}) (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})? ([+-])(\d{2})(\d{2}) [A-Za-z0-9+-]+$/;
+
+/** `docker ps --no-trunc --format '{{.ID}} {{.CreatedAt}}'` as id and creation instant; any other shape is a closed error, never a guess. */
+function labelledContainers(output: string): { readonly id: string; readonly createdMs: number }[] {
+  return output.split("\n").filter(line => line.trim()).map(line => {
+    const match = CONTAINER_LINE.exec(line.trim());
+    if (!match) throw new OpenShellError("openshell_protocol_invalid");
+    const [year, month, day, hour, minute, second, offsetHours, offsetMinutes] = [2, 3, 4, 5, 6, 7, 9, 10].map(group => Number(match[group]));
+    const wallClock = Date.UTC(year!, month! - 1, day!, hour!, minute!, second!);
+    const parsed = new Date(wallClock);
+    if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month! - 1 || parsed.getUTCDate() !== day
+      || hour! > 23 || minute! > 59 || second! > 59 || offsetHours! > 14 || offsetMinutes! > 59) throw new OpenShellError("openshell_protocol_invalid");
+    const offsetMs = (match[8] === "-" ? -1 : 1) * (offsetHours! * 60 + offsetMinutes!) * 60_000;
+    return { id: match[1]!, createdMs: wallClock - offsetMs };
+  });
+}
 
 /** One entry of a ustar archive as `docker cp <container>:<file> -` writes it; the first block is the header, the content follows it. */
 function singleFileFromTar(archive: Buffer, name: string): string {
@@ -58,8 +80,11 @@ export function createPiImagePinsReader(options: { readonly configuration: Confi
     catch (error) { throw error instanceof OpenShellError && error.code === "openshell_cancelled" ? error : new OpenShellError("openshell_gateway_unavailable"); }
   };
   const read = async (signal: AbortSignal): Promise<unknown> => {
-    // A crash between create and remove leaves one labelled, never-started container; the owner of this namespace sweeps it first.
-    const stale = (await docker(["ps", "-a", "-q", "--filter", `label=${label}`], signal)).split("\n").map(line => line.trim()).filter(Boolean);
+    // A crash between create and remove leaves one labelled, never-started container. Every reader of this namespace (the BFF and the operator's
+    // `verify`) shares the label, so only a container older than any read could still be using is swept: a younger one may be another's in-flight read.
+    const listed = labelledContainers(await docker(["ps", "-a", "--no-trunc", "--filter", `label=${label}`, "--format", "{{.ID}} {{.CreatedAt}}"], signal));
+    const now = Date.now();
+    const stale = listed.filter(container => now - container.createdMs > PI_IDENTITY_SWEEP_AGE_MS).map(container => container.id);
     if (stale.length) await docker(["rm", "-f", ...stale], signal);
     const name = `genbi-pi-identity-${randomBytes(8).toString("hex")}`;
     let created = false;
