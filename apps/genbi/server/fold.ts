@@ -18,6 +18,7 @@ import { BUILD_DASHBOARD_TOOL_NAME, extractEnvelopeFromText, WREN_QUERY_TOOL_NAM
 import { extractJsonCandidateFromText } from "../harness/render/envelope.js";
 import { groundOnHostEvidence } from "./host-evidence-grounding.js";
 import { readOpenShellStructuredResult } from "./openshell-structured-ask.js";
+import { readLocalPiStructuredResult } from "./local-pi-structured-ask.js";
 import type { AnswerEvent, ArtifactEvent, ArtifactKind, RefusalEvent, RenderEnvelope, ToolStep } from "./wire-types.js";
 
 /**
@@ -81,6 +82,7 @@ export function toAnswerOrRefusalEvent(
   worklog: readonly ToolStep[] = [],
 ): AnswerEvent | RefusalEvent {
   if (result.backend === "openshell") return { id, kind: "answer", answer: { form: "rich", envelope: readOpenShellStructuredResult(result).envelope } };
+  if (result.backend === "pi-local") return { id, kind: "answer", answer: { form: "rich", envelope: readLocalPiStructuredResult(result).envelope } };
   if (result.backend === "codex-app-server") {
     return { id, kind: "answer", answer: result.envelope
       ? { form: "rich", envelope: result.envelope }
@@ -211,6 +213,10 @@ export function gateDecisionStep(result: RouteResult): ToolStep | undefined {
   if (result.backend === "openshell") {
     readOpenShellStructuredResult(result);
     return { id: DECISION_GATE_ID, kind: "decision", label: "Verify gate", state: "done", detail: "Query rows and SQL verified by the host; the model runs in OpenShell. Interpretation is not verified." };
+  }
+  if (result.backend === "pi-local") {
+    readLocalPiStructuredResult(result);
+    return { id: DECISION_GATE_ID, kind: "decision", label: "Verify gate", state: "done", detail: "Query rows and SQL verified by the host; the model runs through pi on this machine. Interpretation is not verified." };
   }
   if (result.backend === "codex-app-server") return result.envelope?.verified === true
     ? { id: DECISION_GATE_ID, kind: "decision", label: "Verify gate", state: "done", detail: "Query rows and SQL captured from successful host execution; interpretation is not verified." }
@@ -406,6 +412,7 @@ function truncate(text: string, max: number): string {
 /** Short text used for `turns.answer_summary` — feeds `server/compose.ts`'s D3 context composition. Never the full envelope. */
 export function summarizeResult(result: RouteResult): string {
   if (result.backend === "openshell") return truncate(JSON.stringify(readOpenShellStructuredResult(result).envelope.blocks), SUMMARY_MAX_LENGTH);
+  if (result.backend === "pi-local") return truncate(JSON.stringify(readLocalPiStructuredResult(result).envelope.blocks), SUMMARY_MAX_LENGTH);
   if (result.backend === "agent-sdk" || (result.backend === "codex-local" || result.backend === "codex-app-server")) {
     return truncate(result.finalText, SUMMARY_MAX_LENGTH);
   }

@@ -27,10 +27,10 @@ export function piBootFixture() {
 
 describe("pi on the OpenShell row of the runtime selection", () => {
   const openshell = (backend: string) => resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: backend });
-  it("is offered under openshell when listed, never under local, and never silently not offered", () => {
+  it("is offered under openshell when listed, offered under local only when listed, and never silently not offered", () => {
     expect(openshell("pi").offers.pi).toEqual({ offered: true });
-    expect(isBackendOffered(resolveRuntimeSelection({ GENBI_BACKEND: "pi" }), "pi")).toBe(false);
-    expect(resolveRuntimeSelection({ GENBI_BACKEND: "pi" }).offers.pi.reason).toBeTruthy();
+    expect(isBackendOffered(resolveRuntimeSelection({ GENBI_BACKEND: "pi" }), "pi")).toBe(true);
+    expect(resolveRuntimeSelection({ GENBI_BACKEND: "claude" }).offers.pi.reason).toBeTruthy();
     expect(openshell("claude").offers.pi.offered).toBe(false);
   });
   it("offers api-key and gateway auth through the in-process auth seam only with pi listed, and never local-mode auth", () => {

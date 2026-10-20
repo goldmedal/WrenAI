@@ -1,4 +1,6 @@
 import {
+  REASON_FAMILIES,
+  type RuntimeReasonFamily,
   RUNTIME_BACKEND_REASON_CODES,
   RUNTIME_CAPABILITIES,
   type RuntimeBackendDiagnostic,
@@ -11,7 +13,10 @@ import {
   type RuntimeReadinessState,
 } from "./types.js";
 
-const MESSAGES: Record<RuntimeBackendReasonCode, string> = {
+const MESSAGES: Record<RuntimeBackendReasonCode<RuntimeReasonFamily>, string> = {
+  pi_not_installed: "pi is not installed for this GenBI release; run genbi-local-pi install.",
+  pi_node_unsupported: "The Node.js running this server is older than the minimum pi supports; run GenBI on Node.js 22.19 or newer.",
+  pi_provider_unsupported: "The saved Runtime names a provider that the local pi key proxy cannot serve.",
   openshell_unavailable: "The OpenShell lifecycle backend is unavailable.",
   openshell_configuration_invalid: "The OpenShell host configuration is unavailable or invalid.",
   openshell_exclusivity_required: "OpenShell requires an exclusive GenBI gateway, workspace and state owner.",
@@ -69,19 +74,29 @@ const MESSAGES: Record<RuntimeBackendReasonCode, string> = {
   runtime_policy_unavailable: "The runtime policy required by this backend is unavailable.",
 };
 
+/** The same code can need different words per family: the OpenShell wording names an image the local runtime does not have. */
+const FAMILY_MESSAGES: Partial<Record<RuntimeReasonFamily, Partial<Record<string, string>>>> = {
+  "pi-local": {
+    pi_uncertified: "The installed pi has no certified identity row for this machine and Node major version, so it is not enabled.",
+    pi_identity_mismatch: "The installed pi, its pins or the packaged relay do not match the certified identity.",
+    pi_dependencies_drifted: "pi is certified for other Warble, IR or context-loader versions than this install uses; re-certify pi on the installed versions to enable it.",
+    runtime_probe_failed: "The local pi readiness probe could not complete.",
+  },
+};
+
 const SAFE_VERSION = /^(?:[0-9]+(?:\.[0-9]+){1,3}(?:[-+._][A-Za-z0-9][A-Za-z0-9.+_-]{0,95})?|development-local)$/;
 const SAFE_IDENTITY = /^sha256:[a-f0-9]{64}$/;
 
-export function isRuntimeReasonCode<B extends RuntimeBackendId>(backend: B, code: string): code is RuntimeBackendReasonCode<B> {
-  return (RUNTIME_BACKEND_REASON_CODES[backend] as readonly string[]).includes(code);
+export function isRuntimeReasonCode<B extends RuntimeReasonFamily>(backend: B, code: string): code is RuntimeBackendReasonCode<B> {
+  return (REASON_FAMILIES[backend] as readonly string[]).includes(code);
 }
 
-export function runtimeNotReady<B extends RuntimeBackendId>(
+export function runtimeNotReady<B extends RuntimeReasonFamily>(
   backend: B,
   state: Exclude<RuntimeReadinessState, "ready">,
   code: RuntimeBackendReasonCode<B>,
 ): RuntimeBackendNotReady<B> {
-  return { state, code, message: MESSAGES[code] };
+  return { state, code, message: FAMILY_MESSAGES[backend]?.[code] ?? MESSAGES[code] };
 }
 
 export function runtimeReady(version: string, capabilities: readonly RuntimeCapability[]): RuntimeBackendReady {
@@ -93,7 +108,7 @@ export function runtimeReady(version: string, capabilities: readonly RuntimeCapa
 }
 
 /** Rebuild a probe result so server-only probe seams cannot leak custom text. */
-export function sanitizeRuntimeReadiness<B extends RuntimeBackendId>(backend: B, readiness: RuntimeBackendReadiness<B>): RuntimeBackendReadiness<B> {
+export function sanitizeRuntimeReadiness<B extends RuntimeReasonFamily>(backend: B, readiness: RuntimeBackendReadiness<B>): RuntimeBackendReadiness<B> {
   if (readiness.state === "ready") return runtimeReady(readiness.version, readiness.capabilities);
   return isRuntimeReasonCode(backend, readiness.code)
     ? runtimeNotReady(backend, readiness.state, readiness.code)

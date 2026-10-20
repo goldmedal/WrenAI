@@ -526,6 +526,8 @@ export const strings = {
     piRuntimeAuth: 'Authentication',
     piRuntimeSave: 'Save pinned runtime',
     piRuntimeReasonPrefix: 'Reason code: ',
+    piLocalRuntimeTitle: 'pi on this machine',
+    piLocalRuntimeNote: 'Structured Ask runs through pi for API key and gateway Runtimes. Every other purpose runs in-process. Model and provider are chosen below.',
     runtimeSaveErrorTitle: 'Saving runtime settings failed',
     runtimeConfiguredMessage: 'Runtime configured. Next, connect a data source.',
     connectTitle: 'Connect a data source',

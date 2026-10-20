@@ -1,0 +1,32 @@
+{
+  "kind": "local_exact_identity_approval",
+  "date": "2026-10-20",
+  "authority": "The project owner approved packaging this certification row on 2026-10-20 on the basis of the evidence listed here. This record documents the identity accepted by the deterministic probe, the live no-model run and the packed-install acceptance referenced here.",
+  "vendor": "pi-local",
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "nodeMajor": 24,
+  "nodeMinimum": "22.19.0",
+  "nodeBinaryEvidence": "The evidence was produced under the official Node.js v24.22.0 darwin-arm64 release archive, verified against that release's SHASUMS256.txt (archive sha256 6a9724d9b50a5f22b4816cded441b5a8d9ddae546191a5e5b7efa5a5e2ee26d5).",
+  "install": {
+    "pins": {
+      "piVersion": "1.0.4",
+      "piBundle": "99a5efa3dca87774c0332423d0f65a60b14c023fc9bba6fe4bf2aa3069dfb937",
+      "shim": "8dff4346866cc0b12483146960a396928e34edc5d37cd03f01fd364a1b458897",
+      "lockfile": "a714e93d80449d851cf5c51d0cd6122f0696c4a2e20f7bf848e9b6588490e98b",
+      "packageJson": "8dbf9d9af435d8f53423ec0d9ca32c25c72bd72850d31343af49369d18e01c0f"
+    }
+  },
+  "dependencies": {
+    "warble": "0.19.0",
+    "ir": "0.9.0",
+    "context-loader": "0.1.4"
+  },
+  "deterministicProbeSha256": "eecea6f8e717a0b9bde25fdfb09a73767318a62f0896fe74b6c17f15da5579e8",
+  "liveRunSha256": "2a314fdfeb7c13fc6605a4c5327d634808d3d256c552bbedb862c371127b18f0",
+  "packedAcceptanceSha256": "a7d388df10c04f756d57dde1ef3715200830a7d9226b88d843c1f25956e9f9b2",
+  "realModelAcceptance": "None. No real model and no real vendor key were used; none is claimed.",
+  "scope": "Local exact-identity row and unmodified packed-install acceptance only. No publication, merge, release or default activation is authorized."
+}

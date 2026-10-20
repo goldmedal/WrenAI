@@ -148,6 +148,26 @@ configuration (the OpenShell build, gateway, workspace, docker identity and the 
 pi is ready only when the identity matches a certified row. If `verify` reports `pi_uncertified` the host or OpenShell build has no row; `pi_identity_mismatch` means the image, policy or profile differs from the certified one (rebuild with the helper,
 do not edit the files); `pi_dependencies_drifted` means this install runs other Warble, IR or context-loader versions than the evidence used. `genbi-openshell-pi row` prints the packaged row.
 
+## pi on the local runtime (opt-in)
+
+For a developer or operator who runs `GENBI_RUNTIME=local` and wants api-key and gateway Structured Ask to run through pi. pi is **not** in the default list; list it yourself, for example `GENBI_BACKEND=claude,codex,pi`.
+There is no OS sandbox on this runtime: pi runs as your OS user with no filesystem or network confinement beyond its disabled tools, a private step directory and a loopback key proxy (it never holds your key).
+
+1. Install pi (explicit, once per release; it downloads pi from the public npm registry and never runs at boot): `npx --no-install genbi-local-pi install`. It runs `npm ci --ignore-scripts` from the shipped lockfile into
+   `<state dir>/runtimes/pi/<version>-<lockdigest>/` and writes that install's pins. The state directory is `GENBI_STATE_DIR` (absolute) or the per-user application state location; `GENBI_STATE_DIR` sets only the managed pi install's state root, and other GenBI state (for example managed Wren) ignores it. Re-running is a no-op; a different
+   install is refused unless you pass `--replace`.
+2. Certification: pi is ready only when a **packaged** certification row matches this host, this Node major version and the install's pins. This release packages one row, for macOS arm64 and Node 24 (evidence in
+   `certification/pi-local-1.0.4-darwin-arm64-node24/` in the repository). Any other host or Node major version is `pi_uncertified`, and Node older than 22.19.0 is `pi_node_unsupported`. There is no way to supply a row
+   yourself: no environment variable or file is read. `npx --no-install genbi-local-pi row` shows the packaged rows and whether they match your install.
+3. Check it: `npx --no-install genbi-local-pi verify` runs the same check boot readiness runs. `pi_not_installed` means step 1; `pi_uncertified` that no packaged row covers this host or Node major; `pi_identity_mismatch` means the
+   install differs from its pins or from the row (re-run `install --replace`); `pi_dependencies_drifted` means this install runs other Warble, IR or context-loader versions than the row's; `pi_node_unsupported` means Node is too old.
+4. Queries from the pi Ask run through the governed Wren worker of the `wren` that boot resolved from `PATH` and attested (the one native sessions use), not Codex's managed Wren runtime. That is separate from pi, which is never taken from `PATH`; without a resolvable `wren` pi reports not ready.
+5. Save the Runtime step with the api-key or gateway settings you use today; the key stays in the variable the in-process path already uses and only the proxy reads it. A provider the proxy cannot serve (for example SigV4-signed Bedrock)
+   shows `pi_provider_unsupported`.
+
+**Upgrading.** A release with a new pi version or lockfile points at a new install directory: run `install` again; the release ships the matching row. A different Node major version, a Warble/IR/context-loader bump or
+a change to `runtime-assets/pi-worker/pi-mcp-shim.mjs` also denies the packaged row until a new row is released. Node patch and minor updates within the certified major need nothing.
+
 ## Troubleshooting
 
 **"@wrenai/context-loader unsupported-platform"** (during `npm install`) —

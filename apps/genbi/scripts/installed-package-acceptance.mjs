@@ -91,6 +91,7 @@ try {
     { cwd: installRoot, env: controlledEnvironment({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint }) });
 
   markPhase("pi-operator-helper");
+  await verifyInstalledLocalPiHelper({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint, tempRoot, packedManifest });
   await verifyInstalledPiOperatorHelper({ installRoot, workspaceRoot, port, sourceAuditHook, fixtureEndpoint: fixtureProvider.endpoint, tempRoot, packedManifest });
 
   markPhase("start");
@@ -136,6 +137,7 @@ try {
       { name: "fresh installed package keeps readiness offline, rejects altered approval bytes, then provisions exact local fixture bytes without checkout, ambient Python, or index resolution", ok: true },
       { name: "fresh install launches through npx with package-manager PATH", ok: true },
       { name: "installed pi operator helper prints the packaged certified row, whose pins equal the shipped assets, dry-runs without side effects, and refuses a spec that carries a key, with the checkout blocked", ok: true },
+      { name: "installed local pi helper prints the one packaged local row (darwin arm64, Node 24) whose pins equal the shipped assets, reports pi_not_installed for an empty state directory and reads no row from outside the package, with the checkout blocked", ok: true },
       { name: "installed direct Codex Sessions and structured Ask preserve scoped tools without checkout/model access or Setup fallback", ok: true },
       { name: "installed Codex driver handles deterministic command events while the production backend remains unavailable", ok: true },
       { name: "first-run Setup connect terminal flow works without checkout access or development escapes", ok: true },
@@ -635,12 +637,33 @@ async function verifyInstalledPiOperatorHelper({ installRoot, workspaceRoot, por
   if (verifyRefusal === undefined) throw new Error("installed pi helper verify did not fail for a directory with no descriptor");
 }
 
+/**
+ * The local pi helper is a package bin too. Through the fresh install with the checkout blocked, `row` must describe the one packaged local row (darwin arm64, Node 24, whose pins equal the shipped assets) and an empty
+ * state directory without any path, and `verify` must refuse an empty state directory with the fixed `pi_not_installed` code. Nothing is installed: `install` downloads from the registry and is not run here.
+ */
+async function verifyInstalledLocalPiHelper({ installRoot, workspaceRoot, port: selectedPort, sourceAuditHook, fixtureEndpoint, tempRoot, packedManifest }) {
+  if (packedManifest.bin?.["genbi-local-pi"] !== "bin/genbi-local-pi.mjs") throw new Error("packed manifest does not expose genbi-local-pi");
+  const env = controlledEnvironment({ installRoot, workspaceRoot, port: selectedPort, sourceAuditHook, fixtureEndpoint });
+  const stateDir = path.join(tempRoot, "local-pi-state"); await mkdir(stateDir, { mode: 0o700 });
+  const helper = (args) => run("npx", ["--no-install", "genbi-local-pi", ...args], { cwd: installRoot, env });
+  const row = JSON.parse((await helper(["row", "--state-dir", stateDir])).stdout);
+  const packaged = row.packagedRows?.[0];
+  if (row.packagedRows?.length !== 1 || packaged.host?.platform !== "darwin" || packaged.host?.arch !== "arm64" || packaged.nodeMajor !== 24 || packaged.packagedAssetsMatch !== true || packaged.matchesInstalled !== false || "operatorRows" in row || row.installed?.present !== false || row.candidate !== undefined) throw new Error(`installed local pi row description is wrong: ${JSON.stringify(row)}`);
+  if (/\/Users\/|\/private\/|\/home\/|\/var\//.test(JSON.stringify(row))) throw new Error("installed local pi row description leaks a local path");
+  let refusal;
+  try { await helper(["verify", "--state-dir", stateDir]); } catch (error) { refusal = String(error.message); }
+  if (refusal === undefined || !refusal.includes("pi_not_installed")) throw new Error(`installed local pi verify did not report pi_not_installed: ${refusal}`);
+  let unknown;
+  try { await helper(["install", "--bogus"]); } catch (error) { unknown = String(error.message); }
+  if (unknown === undefined || !unknown.includes("unknown option")) throw new Error("installed local pi helper accepted an unknown option");
+}
+
 function assertPublishedFiles(files) {
   if (files.length === 0) throw new Error("package tarball is empty");
   const forbidden = /(^|\/)(scripts|test|tests|fixtures|examples|\.git)(\/|$)|(^|\/)node_modules(\/|$)/;
   const unexpected = files.filter((file) => forbidden.test(file));
   if (unexpected.length > 0) throw new Error(`package tarball contains repository-only files: ${JSON.stringify(unexpected)}`);
-  for (const required of ["package/dist-server/runtime-assets/openshell-sdk/provenance.json", "package/dist-server/runtime-assets/claude-worker/claude-worker.mjs", "package/dist-server/runtime-assets/claude-worker/Dockerfile", "package/bin/genbi-openshell-pi.mjs", "package/dist-server/runtime-assets/pi-worker/Dockerfile", "package/dist-server/runtime-assets/pi-worker/pi-worker.mjs", "package/dist-server/runtime-assets/pi-worker/pi-worker-core.mjs", "package/dist-server/runtime-assets/pi-worker/pi-mcp-shim.mjs", "package/dist-server/runtime-assets/pi-worker/policy.template.yaml", "package/dist-server/runtime-assets/pi-worker/profile.template.yaml", "package/dist-server/server/runtime-host/openshell-pi-provider.js", "package/bin/genbi.mjs", "package/dist/index.html", "package/dist-server/server/bin.js", "package/managed-wren/manifest.json", "package/managed-wren/runtime-tree.cjs", "package/dist-server/server/runtime-host/codex-app-server.js", "package/dist-server/server/runtime-host/codex-session.js", "package/dist-server/server/runtime-host/codex-conversation.js"]) {
+  for (const required of ["package/dist-server/runtime-assets/openshell-sdk/provenance.json", "package/dist-server/runtime-assets/claude-worker/claude-worker.mjs", "package/dist-server/runtime-assets/claude-worker/Dockerfile", "package/bin/genbi-openshell-pi.mjs", "package/bin/genbi-local-pi.mjs", "package/dist-server/server/local-pi-operator.js", "package/dist-server/server/runtime-host/local-pi-step.js", "package/dist-server/server/runtime-host/local-pi-key-proxy.js", "package/dist-server/server/runtime-host/local-pi-install.js", "package/dist-server/runtime-assets/pi-worker/package-lock.json", "package/dist-server/runtime-assets/pi-worker/Dockerfile", "package/dist-server/runtime-assets/pi-worker/pi-worker.mjs", "package/dist-server/runtime-assets/pi-worker/pi-worker-core.mjs", "package/dist-server/runtime-assets/pi-worker/pi-mcp-shim.mjs", "package/dist-server/runtime-assets/pi-worker/policy.template.yaml", "package/dist-server/runtime-assets/pi-worker/profile.template.yaml", "package/dist-server/server/runtime-host/openshell-pi-provider.js", "package/bin/genbi.mjs", "package/dist/index.html", "package/dist-server/server/bin.js", "package/managed-wren/manifest.json", "package/managed-wren/runtime-tree.cjs", "package/dist-server/server/runtime-host/codex-app-server.js", "package/dist-server/server/runtime-host/codex-session.js", "package/dist-server/server/runtime-host/codex-conversation.js"]) {
     if (!files.includes(required)) throw new Error(`package tarball is missing ${required}`);
   }
 }

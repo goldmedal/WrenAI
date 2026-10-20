@@ -93,6 +93,22 @@ OpenShell build, a new host platform, and a bump of the pinned `@warble/*`, `@wa
    The static tests bind the row to the repository: file digests, lockfile, Dockerfile base, templates and the evidence bytes.
 6. A real-model smoke is an acceptance record cited by the approval, not a certification input.
 
+### Upgrading or re-certifying pi on the local runtime
+
+The local runtime has its own, smaller row (`server/runtime-host/local-pi-certification.ts`, vendor `pi-local`): the host tuple, `nodeMajor` (the BFF's Node major version; pi's minimum, 22.19.0, is enforced separately), the exact host pins (`piVersion`, the `dist/bundle` tree digest, the packaged `pi-mcp-shim.mjs`,
+the install's lockfile and `package.json`), the Warble, IR and context-loader versions and the sha256 of the approval record. It is separate from the OpenShell row: changing the OpenShell row never certifies the local one and vice versa,
+and **any file under `runtime-assets/pi-worker/` that the OpenShell row pins must stay byte-identical** unless that row is re-certified in the same change.
+
+A new pi version, a new `package-lock.json`, a different `pi-mcp-shim.mjs`, a different Node major version, a new host tuple or a bump of the pinned `@warble/*`, `@warble/ir-spec` or `@wrenai/context-loader` versions each
+needs a new row. To re-certify:
+1. Obtain the official Node binary of the target major version for the host (verify it against that release's `SHASUMS256.txt`; nothing is installed system-wide) and run everything below under it.
+2. Run `genbi-local-pi install` on a clean state directory and `genbi-local-pi row` for the candidate row.
+3. Add the candidate with a placeholder approval digest, build, and produce the evidence under that Node: the deterministic probe (`node scripts/pi-local-probe.mjs`), a live no-model run of the real BFF and real pi (stub
+   upstream, dummy key), and `pnpm run check:installed-package`. Keep them in `certification/pi-local-<pi version>-<host>-node<major>/` as `deterministic.json`, `live-run.json` and `candidate-acceptance.json`.
+4. Have the project owner approve the exact identity, write `local-approval.json` (citing the evidence digests), put its sha256 in the row, rebuild and keep the final package's acceptance as `installed-acceptance.json`
+   (it differs from the candidate only in the row's approval digest).
+Rows are read only from `LOCAL_PI_CERTIFIED_ROWS`; there is no operator override. `test/local-pi-certification-record.test.ts` binds the row to the shipped assets and the committed evidence bytes.
+
 ## Regenerating a profile's prepared-context document and IR golden
 
 Each profile under `profiles/` ships two generated artifacts alongside its hand-written

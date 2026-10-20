@@ -1,13 +1,13 @@
 import { observeStructuredAsync, type StructuredDiagnosticObserver } from "./structured-diagnostics.js";
 import { enforceCompliance, type AuthChoice, type RouteOptions, type RouteResult, type SetupStepRunner, type SetupStepRunOptions, type SetupStepRunResult } from "../harness/index.js";
-import type { RuntimeBackendReadiness } from "./runtime-host/types.js";
+import type { RuntimeBackendReadiness, RuntimeReasonFamily } from "./runtime-host/types.js";
 import type { OpenShellModelSession } from "./runtime-host/openshell-model-session.js";
-import { authOffer, BACKENDS, inProcessAuthOffer, inProcessAuthViaBackend, localModeAuthOffer, type BackendName, type RuntimeSelection } from "./runtime-selection.js";
+import { authOffer, BACKENDS, inProcessAuthOffer, inProcessAuthViaBackend, localModeAuthOffer, localPiServes, type BackendName, type RuntimeSelection } from "./runtime-selection.js";
 import type { EnrichmentBinding, EnrichmentMode, EnrichmentProposal } from "./enrichment.js";
 import type { ValidatedReview, ValidationFailure } from "./enrichment-validation.js";
 
 export type StructuredVendor = "codex" | "claude" | "pi";
-export type StructuredBackend = "local" | "codex-app-server" | "claude-sandbox-runtime" | "openshell";
+export type StructuredBackend = "local" | "codex-app-server" | "claude-sandbox-runtime" | "openshell" | "pi-local";
 export interface StructuredScope {
   readonly sessionId: string;
   readonly turnId: string;
@@ -45,7 +45,7 @@ export interface StructuredAdapter {
   readonly vendor: StructuredVendor;
   readonly backend: Exclude<StructuredBackend, "local">;
   readonly nativeSessions?: boolean;
-  probe(): Promise<RuntimeBackendReadiness>;
+  probe(): Promise<RuntimeBackendReadiness<RuntimeReasonFamily>>;
   ask?(options: RouteOptions, scope: StructuredScope): Promise<RouteResult>;
   setup?(options: SetupStepRunOptions, scope: StructuredScope): Promise<SetupStepRunResult>;
   enrich?(options: EnrichOptions, scope: StructuredScope): Promise<EnrichResult>;
@@ -90,13 +90,16 @@ export class StructuredRuntime {
     const { selection } = this.options;
     if (!selection.offers[vendor].offered) return undefined;
     if (selection.runtime === "openshell") return "openshell";
+    if (vendor === "pi") return "pi-local";
     return vendor === "codex" && selection.codexMode === "app-server" ? "codex-app-server" : "local";
   }
   /** True when api-key and gateway Ask runs through the pi backend on OpenShell: the BFF then reads and holds no vendor key for it. */
   keyIsolated(): boolean { return inProcessAuthViaBackend(this.options.selection) === "pi"; }
   /** The backend that executes an auth choice on an agent adapter: the subscription's vendor, or pi for api-key/gateway via the seam. */
-  private vendorFor(auth: AuthChoice): StructuredVendor | undefined {
+  private vendorFor(auth: AuthChoice, localPi = false): StructuredVendor | undefined {
     if (auth.mode === "subscription") return auth.provider;
+    // Local pi serves one purpose per call site (Ask); a caller that does not pass the hint keeps the in-process route.
+    if (localPi && localPiServes(this.options.selection, auth, "ask")) return "pi";
     return auth.mode !== "local" && inProcessAuthViaBackend(this.options.selection) === "pi" ? "pi" : undefined;
   }
   private adapter(vendor: StructuredVendor): StructuredAdapter | undefined {
@@ -120,7 +123,7 @@ export class StructuredRuntime {
     const adapter = this.adapter(auth.provider);
     if (!adapter?.enrich) return { available: false, reason: "openshell_enrichment_unsupported" };
     if (!adapter.validateEnrichment || adapter.enrichmentValidationAvailable?.() !== true) return { available: false, reason: "openshell_validator_unavailable" };
-    let probe: RuntimeBackendReadiness | undefined;
+    let probe: RuntimeBackendReadiness<RuntimeReasonFamily> | undefined;
     try { probe = await adapter.probe(); } catch { /* reported as not ready below */ }
     return !this.lifetime.signal.aborted && probe?.state === "ready" ? { available: true } : { available: false, reason: "openshell_not_ready" };
   }
@@ -140,11 +143,12 @@ export class StructuredRuntime {
       }
       const adapter = this.adapter(vendor);
       const pins = name === "pi" && backend === "openshell" ? this.options.piPins?.() : undefined;
-      let probe: RuntimeBackendReadiness | undefined;
+      let probe: RuntimeBackendReadiness<RuntimeReasonFamily> | undefined;
       try { probe = await adapter?.probe(); } catch { /* fixed public failure below */ }
       const ready = !this.lifetime.signal.aborted && probe?.state === "ready";
       return [name, { offered: true, backend, state: ready ? "ready" : "unavailable", ask: ready && !!adapter?.ask, setup: ready && !!adapter?.setup,
-        reason: !adapter ? "Selected vendor backend is not configured." : !ready ? "Selected vendor backend is not ready." : "Only explicitly supported operations are available.",
+        reason: !adapter ? "Selected vendor backend is not configured." : !ready ? "Selected vendor backend is not ready."
+          : backend === "pi-local" ? "Structured Ask runs through pi for API key and gateway; every other purpose runs in-process." : "Only explicitly supported operations are available.",
         ...(backend === "openshell" ? { modelExecution: "openshell", queryExecution: "openshell", enrich: ready && !!adapter?.enrich,
           supportedAgents: ["answer_query", ...(adapter?.enrich ? ["inspect_context", "draft_enrichment"] : [])] } : {}),
         ...(probe && probe.state !== "ready" ? { code: probe.code } : {}),
@@ -156,7 +160,7 @@ export class StructuredRuntime {
       : this.notOffered(offer.reason, { backend: "in-process" });
     return { runtime: selection.runtime, backends, codex: backends.codex, claude: backends.claude,
       ...(auth ? { active: auth.mode === "subscription" ? backends[auth.provider]
-        : auth.mode === "local" ? inProcess(localModeAuthOffer(selection)) : this.keyIsolated() ? backends.pi : inProcess(inProcessAuthOffer(selection)) } : {}) };
+        : auth.mode === "local" ? inProcess(localModeAuthOffer(selection)) : this.keyIsolated() || localPiServes(selection, auth, "ask") ? backends.pi : inProcess(inProcessAuthOffer(selection)) } : {}) };
   }
   async route(options: RouteOptions, scope: StructuredScope): Promise<RouteResult> {
     return this.run(options.authChoice, scope, async (adapter, guarded) => {
@@ -164,7 +168,7 @@ export class StructuredRuntime {
       if (!adapter) return this.options.localRoute(request);
       if (!adapter.ask) throw new StructuredRuntimeError("unsupported");
       return adapter.ask(request, guarded);
-    }, options.deployment);
+    }, options.deployment, (options.agentId ?? "answer_query") === "answer_query");
   }
   async setup(options: SetupStepRunOptions, scope: StructuredScope): Promise<SetupStepRunResult> {
     return this.run(options.authChoice, scope, async (adapter, guarded) => {
@@ -192,24 +196,25 @@ export class StructuredRuntime {
       return adapter.validateEnrichment(request, guarded);
     }, request.deployment);
   }
-  private run<T>(auth: AuthChoice, scope: StructuredScope, operation: (adapter: StructuredAdapter | undefined, scope: StructuredScope) => Promise<T>, deployment: RouteOptions["deployment"] = "personal"): Promise<T> {
+  private run<T>(auth: AuthChoice, scope: StructuredScope, operation: (adapter: StructuredAdapter | undefined, scope: StructuredScope) => Promise<T>, deployment: RouteOptions["deployment"] = "personal", localPi = false): Promise<T> {
     const controller = new AbortController(); this.controllers.add(controller);
     const signal = AbortSignal.any([controller.signal, this.lifetime.signal, ...(scope.signal ? [scope.signal] : [])]);
     const assertCurrent = () => {
       if (signal.aborted) throw new StructuredRuntimeError("cancelled");
       try { scope.assertCurrent(); } catch { throw new StructuredRuntimeError("stale"); }
     };
-    const vendor = this.vendorFor(auth);
+    const vendor = this.vendorFor(auth, localPi);
     const diagnostics = vendor !== undefined && this.backendFor(vendor) === "openshell" ? this.options.diagnostics : undefined;
     const pending = observeStructuredAsync(diagnostics, "runtime_admission", async () => {
       assertCurrent(); enforceCompliance(auth, { deployment: this.options.deployment ?? deployment });
       // Admission is the no-fallback gate: a backend or auth path the runtime does not offer never reaches an adapter or the local route.
       if (!authOffer(this.options.selection, auth).offered) throw new StructuredRuntimeError("unavailable");
       let adapter: StructuredAdapter | undefined;
+      // A purpose routed to pi never reaches the local route: a missing or not-ready adapter refuses here.
       if (vendor !== undefined && this.backendFor(vendor) !== "local") {
         adapter = this.adapter(vendor);
         if (!adapter) throw new StructuredRuntimeError("unavailable");
-        let ready: RuntimeBackendReadiness;
+        let ready: RuntimeBackendReadiness<RuntimeReasonFamily>;
         try { ready = await observeStructuredAsync(diagnostics, "runtime_readiness", () => adapter!.probe()); } catch { throw new StructuredRuntimeError("unavailable"); }
         assertCurrent();
         if (ready.state !== "ready") throw new StructuredRuntimeError("unavailable");

@@ -171,7 +171,8 @@ session closes its processes; restart creates a fresh session rather than resumi
 thread. Remote terminal admission requires its own `remote-tui-v1` certification evidence in
 addition to the driver certification.
 
-pi runs only inside an OpenShell image, so its identity is that image and never an executable on the host: the host does not run pi and does not discover it from `PATH`.
+On OpenShell, pi runs only inside an OpenShell image, so its identity is that image and never an executable on the host: the host does not run pi and does not discover it from `PATH`
+(on the local runtime pi is a GenBI-managed install with its own identity rule, below).
 Under `GENBI_RUNTIME=openshell` with `GENBI_BACKEND=pi`, readiness requires an exact certified row (`server/runtime-host/openshell-vendor-certification.ts`) for the host,
 the OpenShell build, the image's `pins.json` (pi version and bundle digest, lockfile, Node, worker, supervisor, shim, step-control and CA-trust file digests), the shipped policy and profile
 templates, and the Warble, IR and context-loader versions. A `tested_baseline` record, a missing or partial row, an image whose declared `pins.json` differs from the row, or a changed template is never ready (the gate guards against drift and mistakes, not against a deliberately built image; its limits are in [`PI.md`](./server/runtime-host/PI.md#what-the-gate-does-not-prove)): the browser sees
@@ -253,7 +254,7 @@ Boot reads them once and refuses to start, naming the cause, when they are inval
 | Variable | Values | Default |
 | --- | --- | --- |
 | `GENBI_RUNTIME` | `local` or `openshell` | `local` |
-| `GENBI_BACKEND` | comma-separated list of `claude`, `codex`, `pi` (whitespace trimmed; unknown, duplicate or empty entries refuse boot) | `claude,codex` under `local`; **required** under `openshell` |
+| `GENBI_BACKEND` | comma-separated list of `claude`, `codex`, `pi` (whitespace trimmed; unknown, duplicate or empty entries refuse boot). `pi` is opt-in under `local` | `claude,codex` under `local`; **required** under `openshell` |
 | `GENBI_CODEX_MODE` | `exec` or `app-server` | `exec` |
 
 `GENBI_CODEX_MODE` applies only with `GENBI_RUNTIME=local` and `codex` in the list; setting it
@@ -335,6 +336,14 @@ Ordinary runtime/binding revocation aborts work and retains the login; explicit 
 still removes its retained credentials. Readiness/UI expose availability and execution location,
 without account identity, paths or credentials. Synthetic validation does not imply a real-model
 acceptance run.
+
+With `GENBI_RUNTIME=local` and `pi` listed in `GENBI_BACKEND` (opt-in; the default list stays `claude,codex`), api-key and gateway **Structured Ask** (`answer_query`) runs through pi on this machine
+instead of the in-process AI SDK. Every other purpose (dashboards, setup, enrichment, native sessions), the `local` authentication mode and the subscription modes are unchanged. pi is a
+GenBI-managed install (`npx --no-install genbi-local-pi install`, an explicit step that never runs at boot) verified against host pins and a packaged local certification row (macOS arm64, Node 24; rows are read only from the package); it reaches the vendor only through
+a BFF-owned loopback key proxy that holds the key (read from the same `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GENBI_GATEWAY_API_KEY` variables, only at forward time) and gives pi a per-step token instead. Model and provider
+stay in the Runtime step's own pickers, which also show pi's readiness and reason code (`pi_not_installed`, `pi_uncertified`, `pi_identity_mismatch`, `pi_dependencies_drifted`, `pi_node_unsupported`, `pi_provider_unsupported`). Queries run through the governed Wren worker of the boot-attested `wren` resolved from `PATH` at boot (the one native sessions use; it is not Codex's managed Wren runtime, and it is separate from pi, which is never found on `PATH`). Nothing falls back to
+in-process execution for an Ask that is routed to pi. **There is no OS sandbox on this runtime**: pi runs as the BFF's OS user with no filesystem or network confinement beyond its disabled tools, its private step
+directory and the proxy; use OpenShell when that is not acceptable. See [`server/runtime-host/PI.md`](./server/runtime-host/PI.md#pi-on-the-local-runtime) and [INSTALL.md](./INSTALL.md#pi-on-the-local-runtime-opt-in).
 
 With `GENBI_RUNTIME=openshell` and `GENBI_BACKEND=pi`, the boot serves the pi step worker for
 api-key and gateway Ask instead of Claude (one model backend per boot), with
