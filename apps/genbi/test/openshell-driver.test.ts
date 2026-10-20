@@ -75,13 +75,30 @@ describe("OpenShell bounded CLI contract", () => {
     }
     f.scenario({ volume: "openshell-channel-unrelated" }); await f.driver.assertAbsent(intent);
   });
+  it("runnable inspection requires every owned container to be running; an exited container is a definite death", async () => {
+    const f = fixture();
+    const intent = { owner: "owner", name: "fixture", remoteId: "remote", identity: { workspace: "default" } } as OpenShellIntent;
+    const resource = { id: "remote", name: "fixture", workspace: "default", labels: { "genbi-lifecycle-owner": "owner" } };
+    const record = (supervisor: boolean, running: boolean | undefined) => ({ Id: (supervisor ? "b" : "a").repeat(64),
+      Name: "/openshell-default--fixture-remote" + (supervisor ? "-supervisor" : ""), Image: supervisor ? supervisorDigest : digest,
+      Config: { Labels: { "openshell.ai/sandbox-id": "remote", "openshell.ai/sandbox-namespace": "fixture" } }, Mounts: [], ...(running === undefined ? {} : { State: { Running: running, Status: running ? "running" : "exited" } }) });
+    const cases: [string, boolean | undefined, boolean | undefined, boolean][] = [["both running", true, true, true], ["workload exited, supervisor running", false, true, false],
+      ["both exited", false, false, false], ["supervisor exited, workload running", true, false, false], ["no State field", true, undefined, false]];
+    for (const [label, workload, supervisor, live] of cases) {
+      const records = [record(false, workload), record(true, supervisor)];
+      f.scenario({ resource, container: records.map(row => `${row.Id} ${row.Name.slice(1)}`).join("\n"), records });
+      if (live) await expect(f.driver.inspect(intent), label).resolves.toMatchObject({ containers: [records[0]!.Id, records[1]!.Id] });
+      else await expect(f.driver.inspect(intent), label).rejects.toMatchObject({ code: "openshell_identity_mismatch" });
+      expect((await f.driver.inspect(intent, "cleanup")).containers, label).toHaveLength(2);
+    }
+  });
   it("allows exact partial cleanup while runnable inspection requires both containers", async () => {
     const f = fixture();
     const intent = { owner: "owner", name: "fixture", remoteId: "remote", identity: { workspace: "default" } } as OpenShellIntent;
     const resource = { id: "remote", name: "fixture", workspace: "default", labels: { "genbi-lifecycle-owner": "owner" } };
     const records = [false, true].map((supervisor) => ({ Id: (supervisor ? "b" : "a").repeat(64),
       Name: "/openshell-default--fixture-remote" + (supervisor ? "-supervisor" : ""), Image: supervisor ? supervisorDigest : digest,
-      Config: { Labels: { "openshell.ai/sandbox-id": "remote", "openshell.ai/sandbox-namespace": "fixture" } }, Mounts: [] }));
+      Config: { Labels: { "openshell.ai/sandbox-id": "remote", "openshell.ai/sandbox-namespace": "fixture" } }, Mounts: [], State: { Running: true } }));
     const unrelated = { ...records[0]!, Id: "c".repeat(64), Name: "/unrelated", Config: { Labels: null } };
     for (const present of [records, [records[0]!], [records[1]!], []]) {
       f.scenario({ resource, container: [...present, unrelated].map(row => `${row.Id} ${row.Name.slice(1)}`).join("\n"), records: [...present, unrelated] });

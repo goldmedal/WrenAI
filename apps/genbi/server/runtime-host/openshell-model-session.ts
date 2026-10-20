@@ -10,7 +10,9 @@ const baselineSchema = z.object({ type: z.literal("genbi.session.baseline"), ver
 type Baseline = z.infer<typeof baselineSchema>;
 type Receipt = z.infer<typeof receiptSchema>;
 /** Opaque host-owned capability. Structural copies do not inherit sandbox authority. */
-export interface OpenShellModelSession { readonly id: string; readonly signal: AbortSignal; assertActive(): void; close(): Promise<void> }
+export interface OpenShellModelSession { readonly id: string; readonly signal: AbortSignal; assertActive(): void; close(): Promise<void>;
+  /** `dead`: the sandbox or its containers are definitively gone. `unknown`: the probe failed or timed out, which proves nothing. */
+  probe(): Promise<"live" | "dead" | "unknown"> }
 const NODE = "/usr/local/bin/node";
 /** Host constants only: which fixed in-sandbox entrypoints serve a session of each vendor. Never derived from a request, a descriptor or a sandbox reply. */
 export const OPENSHELL_SESSION_ARGV = Object.freeze({
@@ -19,6 +21,7 @@ export const OPENSHELL_SESSION_ARGV = Object.freeze({
 });
 export type OpenShellSessionVendor = keyof typeof OPENSHELL_SESSION_ARGV;
 const sessions = new WeakMap<OpenShellModelSession, { identity: Identity; lease: OpenShellLease; baseline: Baseline; failed: boolean; active: Set<string>; vendor: OpenShellSessionVendor }>();
+const definitelyGone: ReadonlySet<string> = new Set(["openshell_identity_mismatch", "openshell_ownership_mismatch"]);
 const sessionFields = ["backend", "account", "generation", "session", "binding", "bindingGeneration", "bindingRevision", "context", "plan", "image", "policy", "gateway", "workspace", "configuration"] as const;
 
 /** A one-shot launch permit becomes an actual owned lease, never a renewable admission grant. */
@@ -36,6 +39,7 @@ export async function launchOpenShellModelSession(lifecycle: OpenShellLifecycle,
   const capability: OpenShellModelSession = Object.freeze({ id: lease.id, signal: lease.signal,
     assertActive() { if (state.failed || closing) throw new OpenShellError("openshell_scope_invalid"); lease.assertActive(); },
     close() { return closing ??= lease.close(); },
+    async probe() { try { await lease.probe(); return "live"; } catch (error) { return error instanceof OpenShellError && definitelyGone.has(error.code) ? "dead" : "unknown"; } },
   });
   sessions.set(capability, state); return capability;
 }

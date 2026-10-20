@@ -8,6 +8,7 @@ import { readSlots, wholeChildDisclosure, type EgressDecision, type EgressProven
 import { checkStepRender, declaredRenderBlocks, groundedQuery } from "./normalize.js";
 import { parseTerminalJson } from "./terminal-json.js";
 import { reportedUsage, type StepUsage } from "./usage.js";
+import { RUNTIME_BUDGETS_MS } from "../runtime-budgets.js";
 
 export type { StepUsage } from "./usage.js";
 
@@ -58,7 +59,7 @@ export interface ComponentLimits {
 /** The built-in budget. `timeoutMs` is what `WREN_HARNESS_COMPONENT_TIMEOUT_MS` overrides. */
 export const DEFAULT_COMPONENT_LIMITS: ComponentLimits = Object.freeze({
   depth: 8, calls: 32, steps: 40, childSteps: 12,
-  requestBytes: 65_536, resultBytes: 1_048_576, timeoutMs: 120_000,
+  requestBytes: 65_536, resultBytes: 1_048_576, timeoutMs: RUNTIME_BUDGETS_MS.defaultComponentTimeout,
 });
 export interface StepResponse {
   readonly value: unknown;

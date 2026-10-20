@@ -12,6 +12,7 @@ import type { OpenShellModelSession } from "./runtime-host/openshell-model-sessi
 import type { OpenShellIdentity } from "./runtime-host/openshell-types.js";
 import { runOpenShellEnrichment } from "./openshell-enrichment.js";
 import type { OpenShellEnrichmentValidator } from "./openshell-enrichment-validation.js";
+import { RUNTIME_BUDGETS_MS } from "../harness/runtime-budgets.js";
 
 type RootResult = Extract<ComponentInvocationResult, { status: "ok" }>;
 type OpenShellResult = Extract<RouteResult, { backend: "openshell" }>;
@@ -76,7 +77,7 @@ export function createOpenShellStructuredAdapter(provisioner: OpenShellStructure
         || options.bundle !== undefined || options.inProcess !== undefined || options.dispatched !== undefined || options.codexAsk !== undefined)
         throw new StructuredRuntimeError("unsupported");
       });
-      const componentTimeoutMs = options.componentLimits?.timeoutMs ?? 120_000;
+      const componentTimeoutMs = options.componentLimits?.timeoutMs ?? RUNTIME_BUDGETS_MS.defaultComponentTimeout;
       const timeoutMs = options.chatTimeoutMs ?? componentTimeoutMs;
       if (!Number.isSafeInteger(componentTimeoutMs) || componentTimeoutMs <= 0 || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new StructuredRuntimeError("unsupported");
       const timeout = new AbortController();

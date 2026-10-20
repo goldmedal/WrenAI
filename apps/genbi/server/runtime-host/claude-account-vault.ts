@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 
+import { RUNTIME_BUDGETS_MS } from "../../harness/runtime-budgets.js";
 import { createClaudeHostVerifier, createClaudeHostVerifierForTesting, credentialSchema, hostIdentitySchema, readHostVerificationReceipt, type ClaudeHostIdentity } from "./claude-host-verification.js";
 export class ClaudeAccountFault extends Error {
   constructor(readonly code: "storage" | "unverified" | "revoked" | "identity" | "refresh" | "interrupted" | "busy") { super(`Claude account ${code}`); }
@@ -41,7 +42,7 @@ export class ClaudeAccountVault {
   private epoch = 0;
   private readonly leases = new Set<AbortController>();
   private verifier = createClaudeHostVerifier();
-  private flight: { epoch: number; expected: ClaudeHostIdentity; promise: Promise<void>; controller: AbortController } | undefined;
+  private flight: { epoch: number; rotation: boolean; expected: ClaudeHostIdentity; promise: Promise<void>; controller: AbortController } | undefined;
   private lock: DatabaseSync | undefined;
   private stopped = false;
   private reason: "unverified" | "revoked" | "refresh" | "interrupted" = "unverified";
@@ -111,14 +112,21 @@ export class ClaudeAccountVault {
     const state: State = { version: 2, generation: randomUUID(), credentialGeneration: randomUUID(), bundle: parsed, verified: false, refreshing: false };
     this.persist(state); this.state = state;
   }
-  verify(expected: ClaudeHostIdentity): Promise<void> {
+  /** Fencing (re)verification: boot and identity checks. Every live lease is aborted before the refresh starts. */
+  verify(expected: ClaudeHostIdentity): Promise<void> { return this.refresh(expected, false); }
+  /** Lease-time rotation of a verified credential. A same-identity success leaves live leases running; any failure fences. */
+  private rotate(): Promise<void> {
+    if (this.flight?.epoch === this.epoch) return this.flight.promise;
+    return this.refresh(this.state!.identity!, true);
+  }
+  private refresh(expected: ClaudeHostIdentity, rotation: boolean): Promise<void> {
     let identity: ClaudeHostIdentity; try { identity = Object.freeze(hostIdentitySchema.parse(expected)); } catch { return Promise.reject(new ClaudeAccountFault("identity")); }
     const state = this.state;
     if (!state || this.stopped) return Promise.reject(new ClaudeAccountFault("unverified"));
     if (state.identity && !isDeepStrictEqual(state.identity, identity)) return Promise.reject(new ClaudeAccountFault("identity"));
     if (this.flight?.epoch === this.epoch) return isDeepStrictEqual(this.flight.expected, identity) ? this.flight.promise : Promise.reject(new ClaudeAccountFault("identity"));
-    // Synchronous fencing and flight publication happen before the first asynchronous operation.
-    this.fence(); this.reason = "unverified"; state.verified = false;
+    // Synchronous fencing (verification only) and flight publication happen before the first asynchronous operation.
+    if (!rotation) { this.fence(); this.reason = "unverified"; state.verified = false; }
     const epoch = this.epoch; const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 25000);
     let abort!: () => void;
@@ -130,11 +138,12 @@ export class ClaudeAccountVault {
         current(); this.persist({ ...state, refreshing: true, verified: false });
         const receipt = await Promise.race([this.verifier(state.bundle.refreshToken, controller.signal, current), cancelled]); current();
         const candidate = readHostVerificationReceipt(receipt);
-        if (!isDeepStrictEqual(candidate.identity, identity) || candidate.bundle.expiresAt < this.now() + 135000) throw new ClaudeAccountFault("identity");
+        if (!isDeepStrictEqual(candidate.identity, identity) || candidate.bundle.expiresAt < this.now() + RUNTIME_BUDGETS_MS.claudeTokenRefreshMargin) throw new ClaudeAccountFault("identity");
         const next: State = { version: 2, generation: state.generation, credentialGeneration: randomUUID(), bundle: { ...candidate.bundle }, identity: { ...candidate.identity }, ...(candidate.organizationName ? { organizationName: candidate.organizationName } : {}), scopes: ["user:inference", "user:profile"], refreshing: false, verified: true };
         current(); this.persist(next); this.state = next;
       } catch (error) {
         if (epoch === this.epoch && this.state === state) {
+          if (rotation) this.fence();
           this.reason = error instanceof ClaudeAccountFault && error.code === "identity" ? "unverified" : "refresh";
           this.state = { ...state, verified: false, refreshing: true };
           try { this.persist(this.state); } catch { this.reason = "interrupted"; }
@@ -142,23 +151,25 @@ export class ClaudeAccountVault {
         throw new ClaudeAccountFault(error instanceof ClaudeAccountFault && error.code === "identity" ? "identity" : "refresh");
       } finally { clearTimeout(timer); controller.signal.removeEventListener("abort", abort); controller.abort(); if (this.flight?.epoch === epoch) this.flight = undefined; }
     });
-    this.flight = { epoch, expected: identity, controller, promise }; return promise;
+    this.flight = { epoch, rotation, expected: identity, controller, promise }; return promise;
   }
   async lease(expectedFingerprint: string, expectedGeneration: string): Promise<ClaudeAccountLease> {
     if (this.stopped || !this.state?.verified) throw new ClaudeAccountFault(this.flight ? "busy" : this.reason);
     this.diskCurrent();
     if (this.state.generation !== expectedGeneration || this.fingerprint(this.state.identity!) !== expectedFingerprint) throw new ClaudeAccountFault("identity");
-    if (this.state.bundle.expiresAt < this.now() + 135000) await this.verify(this.state.identity!);
+    if (this.state.bundle.expiresAt < this.now() + RUNTIME_BUDGETS_MS.claudeTokenRefreshMargin) await this.rotate();
     const state = this.state; const epoch = this.epoch;
     if (!state?.verified || state.generation !== expectedGeneration || this.fingerprint(state.identity!) !== expectedFingerprint) throw new ClaudeAccountFault("identity");
     const controller = new AbortController(); this.leases.add(controller);
+    // A same-identity rotation replaces the state object but not the vault generation, identity or epoch; anything else fences.
+    const live = (released: boolean) => (released || !controller.signal.aborted) && !this.stopped && epoch === this.epoch && !!this.state?.verified && this.state.generation === state.generation && this.fingerprint(this.state.identity!) === expectedFingerprint && this.now() < state.bundle.expiresAt;
     const assertCurrent = () => {
-      if (controller.signal.aborted || this.stopped || epoch !== this.epoch || this.state !== state || !this.state.verified || this.now() >= state.bundle.expiresAt) throw new ClaudeAccountFault("revoked");
+      if (!live(false)) throw new ClaudeAccountFault("revoked");
       this.diskCurrent();
     };
     const lease: ClaudeAccountLease = Object.freeze({ identity: Object.freeze({ ...state.identity! }), ...(state.organizationName ? { organizationName: state.organizationName } : {}), fingerprint: expectedFingerprint, generation: state.generation, credentialGeneration: state.credentialGeneration, expiresAt: state.bundle.expiresAt,
       signal: controller.signal, assertCurrent, accessCredential: () => { assertCurrent(); return state.bundle.accessToken; }, release: () => { controller.abort(); this.leases.delete(controller); } });
-    registeredLeases.set(lease, { vault: this, afterClose: () => { if (this.stopped || epoch !== this.epoch || this.state !== state || !state.verified || this.now() >= state.bundle.expiresAt) throw new ClaudeAccountFault("revoked"); this.diskCurrent(); } }); return lease;
+    registeredLeases.set(lease, { vault: this, afterClose: () => { if (!live(true)) throw new ClaudeAccountFault("revoked"); this.diskCurrent(); } }); return lease;
   }
   disconnect(): void {
     this.fence(); this.state = undefined; this.reason = "revoked";

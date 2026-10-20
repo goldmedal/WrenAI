@@ -7,6 +7,7 @@ import { planDigest } from "./plan.js";
 import { verifyComponentContext } from "./context.js";
 import { describeRenderContract } from "./render-contract-text.js";
 import { knowledgeRulesSection, type KnowledgeRuleFile } from "./knowledge-rules.js";
+import { RUNTIME_BUDGETS_MS } from "../runtime-budgets.js";
 
 /** Captured by the host from its project, session and approved runtime records. */
 export interface ComponentIdentity {
@@ -139,7 +140,7 @@ export function createComponentBroker(options: ComponentBrokerOptions): RunnerHo
       const guards = z.array(z.object({ name: z.string(), locked: z.boolean(), threshold: z.number().positive().optional() }).passthrough()).parse(component.declaration.guardrails);
       if (!guards.some((guard) => guard.name === "read_only_execution" && guard.locked)) throw new Error("Component read-only guard is required");
       const rowLimit = Math.min(10_000, guards.find((guard) => guard.name === "row_limit")?.threshold ?? 1000);
-      const timeoutMs = Math.min(120_000, (guards.find((guard) => guard.name === "statement_timeout")?.threshold ?? 30) * 1000);
+      const timeoutMs = Math.min(RUNTIME_BUDGETS_MS.sqlStatementCap, (guards.find((guard) => guard.name === "statement_timeout")?.threshold ?? RUNTIME_BUDGETS_MS.sqlStatementDefault / 1000) * 1000);
       const grants = [...new Map(component.steps.flatMap((step) => step.tools).map((grant) => [`${grant.source}:${grant.name}`, grant])).values()];
       const operations = grants.map((grant) => {
         if ((grant.source === "native" && grant.name === "query") || grant.source === "host:sql_execution:read_only") return "query" as const;

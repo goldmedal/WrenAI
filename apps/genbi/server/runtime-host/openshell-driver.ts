@@ -161,13 +161,13 @@ export class OpenShellCliDriver implements OpenShellDriver {
       if (purpose === "runnable") throw new OpenShellError("openshell_identity_mismatch");
       return { ...resource, containers: [], volumes: this.volumeNames(resource.id) };
     }
-    const records = z.array(z.object({ Id: z.string(), Name: z.string(), Image: z.string(), Config: z.object({ Labels: z.record(z.string(), z.string()).nullable() }), Mounts: z.array(z.object({ Type: z.string(), Name: z.string().optional(), Destination: z.string().optional(), RW: z.boolean().optional() }).passthrough()) }).passthrough())
+    const records = z.array(z.object({ Id: z.string(), Name: z.string(), Image: z.string(), Config: z.object({ Labels: z.record(z.string(), z.string()).nullable() }), Mounts: z.array(z.object({ Type: z.string(), Name: z.string().optional(), Destination: z.string().optional(), RW: z.boolean().optional() }).passthrough()), State: z.object({ Running: z.boolean() }).passthrough().optional() }).passthrough())
       .safeParse(this.json(await this.docker(["inspect", ...ids])));
     if (!records.success) throw new OpenShellError("openshell_protocol_invalid");
     const owned = records.data.filter((row) => row.Name === `/${prefix}` || row.Name === `/${prefix}-supervisor`);
     const snapshot = isSnapshotIdentity(intent.identity) ? this.snapshotMount?.(intent) : undefined;
     if (isSnapshotIdentity(intent.identity) && !snapshot) throw new OpenShellError("openshell_scope_invalid");
-    if ((purpose === "runnable" && owned.length !== 2) || owned.length > 2 || owned.some((row) => row.Config.Labels?.["openshell.ai/sandbox-id"] !== resource.id
+    if ((purpose === "runnable" && (owned.length !== 2 || owned.some((row) => row.State?.Running !== true))) || owned.length > 2 || owned.some((row) => row.Config.Labels?.["openshell.ai/sandbox-id"] !== resource.id
       || row.Config.Labels?.["openshell.ai/sandbox-namespace"] !== this.configuration.dockerNamespace || row.Image !== (row.Name.endsWith("-supervisor") ? this.configuration.supervisorImage : this.piBlock(intent) ? this.piBlock(intent)!.image : ["model", "model_session"].includes(intent.identity.purpose) ? this.configuration.model!.image : isSnapshotIdentity(intent.identity) ? this.configuration.dataWorker?.image ?? this.configuration.image : this.configuration.image)
       || row.Mounts.some((mount) => mount.Type !== "volume" || !mount.Name || (!this.volumeNames(resource.id).includes(mount.Name)
         && !(snapshot && !row.Name.endsWith("-supervisor") && mount.Name === snapshot.volume && mount.Destination === "/opt/genbi-project" && mount.RW === false)))

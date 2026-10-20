@@ -8,6 +8,7 @@ import { structuredDataRefusal, structuredFailureFeedback } from "./structured-e
 import { StructuredRuntimeError, type StructuredRuntime, type StructuredScope } from "./structured-runtime.js";
 import type { OpenShellStructuredProvisioner } from "./openshell-structured-ask.js";
 import type { OpenShellModelSession } from "./runtime-host/openshell-model-session.js";
+import { RUNTIME_BUDGETS_MS } from "../harness/runtime-budgets.js";
 
 export type ScopedSessionState = "ready" | "running" | "cancelling" | "stopping" | "stopped" | "interrupted";
 export type ScopedFrame = { type: "event" } & ReturnType<Store["appendNativeScopedEvent"]>;
@@ -18,9 +19,12 @@ interface Record {
   id: string; capability: string; lease: OpenShellModelSession; state: ScopedSessionState; controller: AbortController;
   assertCurrent(): void; listeners: Set<Listener>; active?: { id: string; controller: AbortController; promise: Promise<void>; settled: Promise<void> } | undefined;
   closing?: Promise<void>; interruption?: Promise<void>; idle?: ReturnType<typeof setTimeout> | undefined;
+  probing?: Promise<boolean> | undefined; probeTimer?: ReturnType<typeof setTimeout> | undefined; probeFailures: number;
 }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const hash = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+/** Consecutive indeterminate probe failures (timeouts, CLI errors) tolerated before a session is interrupted; a definitive `dead` needs one. */
+export const SANDBOX_PROBE_FAILURE_LIMIT = 3;
 const terminal = (state: ScopedSessionState) => state === "stopped" || state === "interrupted";
 
 /** Same governed analytical route, with a process-local owned sandbox and durable replay. One class serves the boot's single scoped vendor (Claude or pi); the vendor only changes which model worker the sandbox runs. */
@@ -74,10 +78,10 @@ export class OpenShellNativeSessions {
       // The opaque launch permission and actual lease precede the first durable native row.
       lease = await this.options.provisioner.reserveSession({ options: { ...this.options.routeOptions(), question: "Analyze the bound project.", agentId: "answer_query" }, scope }); check(); lease.assertActive();
       const row = this.options.store.createNativeSession({ id, transport: "scoped-events", purpose: "analysis", vendor, agent: "answer_query", scopeKind: "bound_project", scopeId: newId("native-scope"), projectIdentity: binding.identity, bindingGeneration: binding.generation, projectRevision: binding.revision, dispatchProfile: "genbi-default", dispatchTarget: runtime.target!, runtimeGeneration: runtime.generation });
-      const record: Record = { id, capability, lease, state: "ready", controller, listeners: new Set(), assertCurrent: () => { check(); lease!.assertActive(); const current = this.options.store.getNativeSession(id); if (!current || !["creating", "running", "detached"].includes(current.status)) throw new StructuredRuntimeError("stale"); } };
+      const record: Record = { id, capability, lease, state: "ready", controller, listeners: new Set(), probeFailures: 0, assertCurrent: () => { check(); lease!.assertActive(); const current = this.options.store.getNativeSession(id); if (!current || !["creating", "running", "detached"].includes(current.status)) throw new StructuredRuntimeError("stale"); } };
       this.records.set(id, record); this.options.store.transitionNativeSession(id, "running", { started: true });
       lease.signal.addEventListener("abort", () => { if (!terminal(record.state) && record.state !== "stopping") { record.active?.controller.abort(); void this.interrupt(record).catch(() => { this.cleanupFailed = true; }); } }, { once: true });
-      lease.assertActive(); this.publish(record, null, "state", { state: "ready" }); this.armIdle(record); return { row: this.options.store.getNativeSession(row.id)!, capability };
+      lease.assertActive(); this.publish(record, null, "state", { state: "ready" }); this.armIdle(record); this.armProbe(record); return { row: this.options.store.getNativeSession(row.id)!, capability };
     } catch (error) { controller.abort(); await lease?.close(); if (this.options.store.getNativeSession(id)) this.options.store.transitionNativeSession(id, "interrupted", { ended: true, failure: "Scoped session launch could not complete." }); throw error; }
   }
   private deliver(record: Record, event: ReturnType<Store["appendNativeScopedEvent"]>) { const frame: ScopedFrame = { type: "event", ...event }; for (const listener of record.listeners) try { listener(frame); } catch { /* Browser detach never owns execution cancellation. */ } }
@@ -100,13 +104,34 @@ export class OpenShellNativeSessions {
     const check = () => { if (!attached || record.capability !== capability) throw new StructuredRuntimeError("unavailable"); };
     return { submit: (requestId, text) => { check(); return this.submit(record, requestId, text); }, cancel: () => { check(); return this.cancel(record); }, detach: () => { if (!attached) return; attached = false; record.listeners.delete(listener); if (!record.listeners.size && !terminal(record.state)) { this.options.store.transitionNativeSession(id, "detached"); this.armIdle(record); } } };
   }
-  private armIdle(record: Record) { clearTimeout(record.idle); if (record.listeners.size || terminal(record.state)) return; record.idle = setTimeout(() => { void this.stop(record.id, record.capability).catch(() => {}); }, 30 * 60_000); record.idle.unref(); }
+  private armIdle(record: Record) { clearTimeout(record.idle); if (record.listeners.size || terminal(record.state)) return; record.idle = setTimeout(() => { void this.stop(record.id, record.capability).catch(() => {}); }, RUNTIME_BUDGETS_MS.sessionIdleTtl); record.idle.unref(); }
+
+  // The sandbox can die with no event reaching the BFF (host sleep), so liveness is probed, not awaited.
+  /** True when the sandbox is usable. Definitive death interrupts at once; indeterminate failures interrupt only at the limit. */
+  private probe(record: Record): Promise<boolean> {
+    return record.probing ??= (async () => {
+      try {
+        const verdict = await record.lease.probe().catch(() => "unknown" as const);
+        if (terminal(record.state) || record.closing) return false;
+        if (verdict === "live") { record.probeFailures = 0; return true; }
+        record.probeFailures = verdict === "dead" ? SANDBOX_PROBE_FAILURE_LIMIT : record.probeFailures + 1;
+        if (record.probeFailures >= SANDBOX_PROBE_FAILURE_LIMIT) await this.interrupt(record).catch(() => { this.cleanupFailed = true; });
+        return false;
+      } finally { record.probing = undefined; }
+    })();
+  }
+  private armProbe(record: Record) {
+    clearTimeout(record.probeTimer); if (terminal(record.state)) return;
+    record.probeTimer = setTimeout(() => { void (async () => { if (!record.active && !record.closing) await this.probe(record); this.armProbe(record); })(); }, RUNTIME_BUDGETS_MS.sandboxProbeInterval); record.probeTimer.unref();
+  }
 
   private async submit(record: Record, requestId: string, text: string) {
     record.assertCurrent(); if (terminal(record.state) || record.closing || !uuid.test(requestId) || !text.trim() || text.includes("\0") || Buffer.byteLength(text) > 262_144) throw new StructuredRuntimeError("unsupported");
     const questionHash = hash(text), previous = this.options.store.getNativeScopedRequest(record.id, requestId);
     if (previous) { if (previous.questionHash !== questionHash) throw new StructuredRuntimeError("stale"); if (record.active?.id === requestId) await record.active.promise; return; }
     if (record.active) throw new StructuredRuntimeError("unavailable");
+    if (!await this.probe(record)) throw new StructuredRuntimeError("unavailable");
+    if (terminal(record.state) || record.closing || record.active) throw new StructuredRuntimeError("unavailable");
     const turnId = newId("native-turn"), controller = new AbortController();
     this.options.store.reserveNativeScopedRequest(record.id, requestId, questionHash, turnId);
     this.publish(record, requestId, "user", { text }); record.state = "running"; this.publish(record, requestId, "state", { state: "running" });
@@ -151,7 +176,7 @@ export class OpenShellNativeSessions {
   private interrupt(record: Record): Promise<void> {
     if (record.interruption) return record.interruption;
     const root = record.active?.settled;
-    record.state = "interrupted"; record.active?.controller.abort(); record.controller.abort(); clearTimeout(record.idle);
+    record.state = "interrupted"; record.active?.controller.abort(); record.controller.abort(); clearTimeout(record.idle); clearTimeout(record.probeTimer);
     this.options.store.transitionNativeSession(record.id, "interrupted", { ended: true, failure: "Scoped execution was interrupted; its sandbox cannot be resumed." });
     return record.interruption = (async () => {
       try {
@@ -166,7 +191,7 @@ export class OpenShellNativeSessions {
   async stop(id: string, capability: string): Promise<boolean> {
     const record = this.records.get(id); if (!record || record.capability !== capability) return false;
     if (terminal(record.state)) { await record.interruption; return true; }
-    await (record.closing ??= (async () => { clearTimeout(record.idle); record.state = "stopping"; this.publish(record, null, "state", { state: "stopping" }); record.active?.controller.abort(); await record.active?.promise;
+    await (record.closing ??= (async () => { clearTimeout(record.idle); clearTimeout(record.probeTimer); record.state = "stopping"; this.publish(record, null, "state", { state: "stopping" }); record.active?.controller.abort(); await record.active?.promise;
       try { await record.lease.close(); this.options.provisioner.assertSessionCleaned!(record.id); record.controller.abort(); record.state = "stopped"; this.options.store.transitionNativeSession(id, "stopped", { ended: true }); this.publish(record, null, "state", { state: "stopped", cleanup: "confirmed" }); }
       catch { await this.interrupt(record); throw new StructuredRuntimeError("cleanup"); }
     })()); return true;
