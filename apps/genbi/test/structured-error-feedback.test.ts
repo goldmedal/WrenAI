@@ -57,3 +57,16 @@ describe("host-owned structured error feedback", () => {
     expect(storedStructuredFailure("column-price-missing")).toEqual(generic);
   });
 });
+
+describe("unaccepted answer feedback", () => {
+  const unaccepted = { code: "runtime.unaccepted", kind: "runtime", message: "I could not produce a verified answer for that question. Your session is still open; try rephrasing or ask another question." };
+  it("has a closed code and a fixed message, from the error or from a stored code", async () => {
+    const { StructuredRuntimeError } = await import("../server/structured-runtime.js");
+    expect(structuredFailureFeedback(new StructuredRuntimeError("unaccepted" as never))).toEqual(unaccepted);
+    expect(storedStructuredFailure("runtime.unaccepted")).toEqual(unaccepted);
+  });
+  it("is never a data refusal", async () => {
+    const { structuredDataRefusal } = await import("../server/structured-error-feedback.js");
+    expect(structuredDataRefusal("runtime.unaccepted")).toBeUndefined();
+  });
+});

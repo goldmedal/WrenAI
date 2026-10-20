@@ -18,8 +18,8 @@ export interface StructuredScope {
   assertCurrent(): void;
 }
 export class StructuredRuntimeError extends Error {
-  /** `detail` is host-authored (a contract refusal's own message), never sandbox or model text; only the `contract` code carries one. */
-  constructor(readonly code: "unavailable" | "unsupported" | "stale" | "cancelled" | "failed" | "cleanup" | "timeout" | "contract", readonly detail?: string) {
+  /** `unaccepted` is raised only for a clean non-ok runner result of a class that proves no sandbox fault (ungrounded or unparseable output); it carries no text. `detail` is host-authored (a contract refusal's own message), never sandbox or model text; only the `contract` code carries one. */
+  constructor(readonly code: "unavailable" | "unsupported" | "stale" | "cancelled" | "failed" | "cleanup" | "timeout" | "contract" | "unaccepted", readonly detail?: string) {
     super(`Structured runtime ${code}.`);
   }
 }

@@ -4,7 +4,7 @@ import type { RouteOptions } from "../harness/index.js";
 import { newId, type NativeSessionRow, type Store } from "./db.js";
 import type { EnrichmentBinding } from "./enrichment.js";
 import { LiveWorkLog, toAnswerOrRefusalEvent } from "./fold.js";
-import { structuredDataRefusal, structuredFailureFeedback } from "./structured-error-feedback.js";
+import { SESSION_KEEPING_FAILURE_CODES, structuredDataRefusal, structuredFailureFeedback } from "./structured-error-feedback.js";
 import { StructuredRuntimeError, type StructuredRuntime, type StructuredScope } from "./structured-runtime.js";
 import type { OpenShellStructuredProvisioner } from "./openshell-structured-ask.js";
 import type { OpenShellModelSession } from "./runtime-host/openshell-model-session.js";
@@ -19,12 +19,14 @@ interface Record {
   id: string; capability: string; lease: OpenShellModelSession; state: ScopedSessionState; controller: AbortController;
   assertCurrent(): void; listeners: Set<Listener>; active?: { id: string; controller: AbortController; promise: Promise<void>; settled: Promise<void> } | undefined;
   closing?: Promise<void>; interruption?: Promise<void>; idle?: ReturnType<typeof setTimeout> | undefined;
-  probing?: Promise<boolean> | undefined; probeTimer?: ReturnType<typeof setTimeout> | undefined; probeFailures: number;
+  probing?: Promise<boolean> | undefined; probeTimer?: ReturnType<typeof setTimeout> | undefined; probeFailures: number; unaccepted: number;
 }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const hash = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 /** Consecutive indeterminate probe failures (timeouts, CLI errors) tolerated before a session is interrupted; a definitive `dead` needs one. */
 export const SANDBOX_PROBE_FAILURE_LIMIT = 3;
+/** Consecutive unaccepted turns that end a session, a guard against a persistently bad context. */
+export const UNACCEPTED_TURN_LIMIT = 3;
 const terminal = (state: ScopedSessionState) => state === "stopped" || state === "interrupted";
 
 /** Same governed analytical route, with a process-local owned sandbox and durable replay. One class serves the boot's single scoped vendor (Claude or pi); the vendor only changes which model worker the sandbox runs. */
@@ -78,7 +80,7 @@ export class OpenShellNativeSessions {
       // The opaque launch permission and actual lease precede the first durable native row.
       lease = await this.options.provisioner.reserveSession({ options: { ...this.options.routeOptions(), question: "Analyze the bound project.", agentId: "answer_query" }, scope }); check(); lease.assertActive();
       const row = this.options.store.createNativeSession({ id, transport: "scoped-events", purpose: "analysis", vendor, agent: "answer_query", scopeKind: "bound_project", scopeId: newId("native-scope"), projectIdentity: binding.identity, bindingGeneration: binding.generation, projectRevision: binding.revision, dispatchProfile: "genbi-default", dispatchTarget: runtime.target!, runtimeGeneration: runtime.generation });
-      const record: Record = { id, capability, lease, state: "ready", controller, listeners: new Set(), probeFailures: 0, assertCurrent: () => { check(); lease!.assertActive(); const current = this.options.store.getNativeSession(id); if (!current || !["creating", "running", "detached"].includes(current.status)) throw new StructuredRuntimeError("stale"); } };
+      const record: Record = { id, capability, lease, state: "ready", controller, listeners: new Set(), probeFailures: 0, unaccepted: 0, assertCurrent: () => { check(); lease!.assertActive(); const current = this.options.store.getNativeSession(id); if (!current || !["creating", "running", "detached"].includes(current.status)) throw new StructuredRuntimeError("stale"); } };
       this.records.set(id, record); this.options.store.transitionNativeSession(id, "running", { started: true });
       lease.signal.addEventListener("abort", () => { if (!terminal(record.state) && record.state !== "stopping") { record.active?.controller.abort(); void this.interrupt(record).catch(() => { this.cleanupFailed = true; }); } }, { once: true });
       lease.assertActive(); this.publish(record, null, "state", { state: "ready" }); this.armIdle(record); this.armProbe(record); return { row: this.options.store.getNativeSession(row.id)!, capability };
@@ -151,12 +153,18 @@ export class OpenShellNativeSessions {
         const envelopeJson = event.kind === "answer" && event.answer.form === "rich" ? JSON.stringify(event.answer.envelope) : undefined;
         const saved = this.options.store.finishNativeScopedRequest(record.id, requestId, "complete", event.kind, event, envelopeJson ? { envelopeJson, digest: hash(envelopeJson) } : undefined);
         if (saved) this.deliver(record, saved);
-        record.state = "ready"; this.publish(record, requestId, "state", { state: "ready" });
+        record.unaccepted = 0; record.state = "ready"; this.publish(record, requestId, "state", { state: "ready" });
       } catch (error) {
         let feedback = structuredFailureFeedback(error); let current = true;
         try { record.assertCurrent(); } catch { current = false; }
         const refusal = current && !signal.aborted ? structuredDataRefusal(feedback.code) : undefined;
-        if (refusal) { const saved = this.options.store.finishNativeScopedRequest(record.id, requestId, "refusal", "refusal", { id: newId("native-event"), kind: "refusal", ...refusal }); if (saved) this.deliver(record, saved); record.state = "ready"; this.publish(record, requestId, "state", { state: "ready" }); }
+        const keeping = current && !signal.aborted && !refusal && SESSION_KEEPING_FAILURE_CODES.has(feedback.code) && record.unaccepted + 1 < UNACCEPTED_TURN_LIMIT;
+        if (keeping) {
+          record.unaccepted++;
+          const saved = this.options.store.finishNativeScopedRequest(record.id, requestId, "error", "error", { code: feedback.code, message: feedback.message }); if (saved) this.deliver(record, saved);
+          record.state = "ready"; this.publish(record, requestId, "state", { state: "ready" });
+        }
+        else if (refusal) { const saved = this.options.store.finishNativeScopedRequest(record.id, requestId, "refusal", "refusal", { id: newId("native-event"), kind: "refusal", ...refusal }); if (saved) this.deliver(record, saved); record.state = "ready"; this.publish(record, requestId, "state", { state: "ready" }); }
         else {
           const saved = this.options.store.finishNativeScopedRequest(record.id, requestId, signal.aborted ? "cancelled" : "interrupted", "error", { code: signal.aborted ? "runtime.cancelled" : feedback.code, message: signal.aborted ? "The response was cancelled. Cleanup is being confirmed." : feedback.message }); if (saved) this.deliver(record, saved);
           if (record.state !== "stopping") interruptAfter = true;
