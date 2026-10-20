@@ -7,6 +7,7 @@ import { resolveWarbleBinary } from "../harness/compile/resolve-binary.js";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
 import { openWrenComponentAccess } from "../harness/components/wren-access.js";
 import type { ComponentLimits } from "../harness/components/runner.js";
+import { declaredDefaultsOption } from "../harness/components/declared-defaults.js";
 import { openOpenShellWrenAccess } from "../server/runtime-host/openshell-wren-access.js";
 import { Store } from "../server/db.js";
 import { OpenShellError, type OpenShellDriver, type OpenShellDuplex, type OpenShellResource } from "../server/runtime-host/openshell-types.js";
@@ -28,21 +29,23 @@ const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 const digest = `sha256:${"a".repeat(64)}`;
 const sql = "SELECT COUNT(*) AS n FROM orders";
+/** What a project that declares the default rule excluding test orders must be asked: the same count, with the exclusion applied. */
+const declaredSql = "SELECT COUNT(*) AS n FROM orders WHERE is_test = false";
 const KEY_ENV = ["OPENAI_API_KEY", "GENBI_GATEWAY_API_KEY", "ANTHROPIC_API_KEY", "WREN_HARNESS_API_KEY"] as const;
 type Mode = "answer" | "hold-query" | "no-query" | "model-length" | "delete" | "big-limit" | "query-error";
-interface Controls { mode?: Mode; componentLimits?: ComponentLimits; change?: (ctx: { store: Store; project: string; boot: { current: boolean } }) => void; gatewayPollMs?: number; verifyGateway?: () => Promise<void>; }
+interface Controls { declared?: "match" | "mismatch"; mode?: Mode; componentLimits?: ComponentLimits; change?: (ctx: { store: Store; project: string; boot: { current: boolean } }) => void; gatewayPollMs?: number; verifyGateway?: () => Promise<void>; }
 
 /** The pi worker is scripted; every frame it emits is judged by the real host protocol, broker and governed data path. */
-function piBehavior(ctx: { mode: Mode; receipt: { streams: number; calls: number }; change: () => void }): ConstructorParameters<typeof PiSim>[0] {
+function piBehavior(ctx: { sql: string; mode: Mode; receipt: { streams: number; calls: number }; change: () => void }): ConstructorParameters<typeof PiSim>[0] {
   let inner: ReturnType<typeof happyBehavior> | undefined;
-  const text = JSON.stringify({ columns: ["n"], rows: [{ n: 999999 }], verified: true, definition: { sql }, artifact: { kind: "dashboard", forged: true } });
+  const text = JSON.stringify({ columns: ["n"], rows: [{ n: 999999 }], verified: true, definition: { sql: ctx.sql }, artifact: { kind: "dashboard", forged: true } });
   return {
     onBootstrap(sim: PiSim, boot: Bootstrap) {
       ctx.receipt.streams++;
       const at = boot.argv.indexOf("--tools"); const tools = at < 0 ? [] : boot.argv[at + 1]!.split(",");
       const query = tools.find(name => name.endsWith("query_read_only"));
-      const statement = ctx.mode === "delete" ? "DELETE FROM orders" : sql;
-      const args = ctx.mode === "big-limit" ? { sql, limit: 99_999_999 } : { sql: statement };
+      const statement = ctx.mode === "delete" ? "DELETE FROM orders" : ctx.sql;
+      const args = ctx.mode === "big-limit" ? { sql: ctx.sql, limit: 99_999_999 } : { sql: statement };
       inner = happyBehavior({ ...(query && ctx.mode !== "no-query" ? { call: { name: query.replace(/^mcp__component__/, ""), args } } : {}), text, ...(ctx.mode === "model-length" ? { stop: "length" } : {}) });
       inner.onBootstrap(sim, boot);
     },
@@ -60,11 +63,19 @@ async function fixture(controls: Controls = {}) {
   const project = path.join(root, "project"), home = path.join(root, "wren-home"), database = path.join(root, "data");
   for (const dir of [project, home, database, path.join(project, "models/orders")]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(path.join(project, "wren_project.yml"), "schema_version: 5\nname: synthetic\ncatalog: wren\nschema: public\ndata_source: duckdb\nprofile: synthetic\n");
-  writeFileSync(path.join(project, "models/orders/metadata.yml"), "name: orders\nref_sql: SELECT * FROM synthetic.raw_orders\ncolumns:\n  - name: id\n    type: INTEGER\n");
+  writeFileSync(path.join(project, "models/orders/metadata.yml"), "name: orders\nref_sql: SELECT * FROM synthetic.raw_orders\ncolumns:\n  - name: id\n    type: INTEGER\n" + (controls.declared ? "  - name: is_test\n    type: BOOLEAN\n" : ""));
+  // A project that declares a default rule: its catalog lists the id, and the real governed worker announces it (protocol 3) and enforces it.
+  if (controls.declared) {
+    mkdirSync(path.join(project, "knowledge/rules"), { recursive: true });
+    writeFileSync(path.join(project, "knowledge/rules/orders.md"), "---\ndefaults:\n  - id: exclude-test-orders\n    kind: exclude_rows\n    column: orders.is_test\n    exclude: true\n    covers: {reaching: orders, via: many_to_one}\n    when: aggregated\n---\n# Rules\nExclude test orders.\n");
+  }
   writeFileSync(path.join(home, "profiles.yml"), `profiles:\n  synthetic:\n    datasource: duckdb\n    url: ${JSON.stringify(database)}\n    format: duckdb\n`, { mode: 0o600 });
   const resolvedWren = resolveNativeExecutable("wren", "wren", process.env.PATH)!.executable;
   const python = process.env.GENBI_GOVERNED_WREN_PYTHON ?? readFileSync(resolvedWren, "utf8").split("\n")[0]!.slice(2);
-  execFileSync(python, ["-c", "import duckdb,sys; c=duckdb.connect(sys.argv[1]); c.execute('CREATE TABLE raw_orders(id INTEGER)'); c.execute('INSERT INTO raw_orders VALUES (1),(2),(3),(4),(5),(6),(7)'); c.close()", path.join(database, "synthetic.duckdb")], { env: { PATH: "/usr/bin:/bin", HOME: root }, stdio: "pipe" });
+  const [createOrders, fillOrders] = controls.declared
+    ? ["CREATE TABLE raw_orders(id INTEGER, is_test BOOLEAN)", "INSERT INTO raw_orders VALUES (1,false),(2,false),(3,false),(4,false),(5,false),(6,false),(7,false),(8,true),(9,true)"]
+    : ["CREATE TABLE raw_orders(id INTEGER)", "INSERT INTO raw_orders VALUES (1),(2),(3),(4),(5),(6),(7)"];
+  execFileSync(python, ["-c", "import duckdb,sys; c=duckdb.connect(sys.argv[1]); c.execute(sys.argv[2]); c.execute(sys.argv[3]); c.close()", path.join(database, "synthetic.duckdb"), createOrders, fillOrders], { env: { PATH: "/usr/bin:/bin", HOME: root }, stdio: "pipe" });
   const application = path.resolve(process.cwd());
   const source = path.resolve(application, "../../core/wren/src");
   const wren = path.join(root, "wren");
@@ -73,11 +84,26 @@ async function fixture(controls: Controls = {}) {
   /** The real governed worker is the oracle and the policy: it answers, rejects and limits exactly as production does. */
   const governed = (request: Record<string, unknown>) => execFileSync(wren, ["governed-stdio", "--project", project], { env: governedEnvironment, input: JSON.stringify(request) + "\n", timeout: 20_000, stdio: ["pipe", "pipe", "pipe"] })
     .toString("utf8").trim().split("\n").map(line => JSON.parse(line)) as { id: number; result?: unknown; error?: { class: string } }[];
-  const oracle = governed({ id: 1, operation: "query", sql, limit: 1000 });
-  expect(oracle).toEqual([{ id: 0, protocol: "wren-governed/2" }, { id: 1, result: { columns: ["n"], rows: [{ n: 7 }], definition: { sql, source_tables: ["orders"], filters: [] } } }]);
-  const oracleAccess = await openWrenComponentAccess({ executable: wren, project, fingerprint: await hashDirectory(project), signal: new AbortController().signal,
-    environment: { PATH: [root, path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter), HOME: root, WREN_HOME: home, WREN_PROJECT_HOME: project, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" } });
-  try { expect(await oracleAccess.query({ sql, limit: 1000 }, new AbortController().signal)).toMatchObject({ rows: [{ n: 7 }] }); } finally { await oracleAccess.close(); }
+  const oracleEnvironment = { PATH: [root, path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter), HOME: root, WREN_HOME: home, WREN_PROJECT_HOME: project, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" };
+  const oracleAccess = async (declaredDefaults?: readonly string[]) => openWrenComponentAccess({ executable: wren, project, fingerprint: await hashDirectory(project), signal: new AbortController().signal, environment: oracleEnvironment,
+    ...(declaredDefaults ? { declaredDefaults } : {}) });
+  if (!controls.declared) {
+    const oracle = governed({ id: 1, operation: "query", sql, limit: 1000 });
+    expect(oracle).toEqual([{ id: 0, protocol: "wren-governed/2" }, { id: 1, result: { columns: ["n"], rows: [{ n: 7 }], definition: { sql, source_tables: ["orders"], filters: [] } } }]);
+    const access = await oracleAccess();
+    try { expect(await access.query({ sql, limit: 1000 }, new AbortController().signal)).toMatchObject({ rows: [{ n: 7 }] }); } finally { await access.close(); }
+  } else {
+    // The real governed worker announces the declared rule (protocol 3), refuses the unconditioned count naming it, and answers the conditioned one.
+    const [hello, refusal] = governed({ id: 1, operation: "query", sql, limit: 1000 });
+    expect(hello).toEqual({ id: 0, protocol: "wren-governed/3", declared_defaults: ["exclude-test-orders"] });
+    expect(refusal).toMatchObject({ id: 1, error: { class: "declared_default_missing", rule_ids: ["exclude-test-orders"] } });
+    expect(governed({ id: 1, operation: "query", sql: declaredSql, limit: 1000 })[1]).toMatchObject({ result: { rows: [{ n: 7 }] } });
+    const access = await oracleAccess(["exclude-test-orders"]);
+    try {
+      expect(await access.query({ sql: declaredSql, limit: 1000 }, new AbortController().signal)).toMatchObject({ rows: [{ n: 7 }] });
+      await expect(access.query({ sql, limit: 1000 }, new AbortController().signal)).rejects.toThrow(/ Rule: exclude-test-orders$/);
+    } finally { await access.close(); }
+  }
   const config = path.join(root, "configuration.json");
   const piImage = `sha256:${"c".repeat(64)}`;
   writeFileSync(config, JSON.stringify({ executable: wren, executableDigest: digest, version: "0.0.1", gateway: "synthetic", workspace: "default", image: digest, supervisorImage: digest,
@@ -101,17 +127,19 @@ async function fixture(controls: Controls = {}) {
     list: async intent => [...resources.values()].filter(resource => resource.name === intent.name), inspect: async intent => resources.get(intent.name)!, remove: async intent => { resources.delete(intent.name); },
     assertAbsent: async intent => { expect(resources.has(intent.name)).toBe(false); },
     exec: async () => JSON.stringify({ type: "genbi.pi.procs", version: 1, remaining: 0 }),
-    duplex: async intent => { if (intent.identity.purpose !== "model") throw Error("not a model step"); const sim = new PiSim(piBehavior({ mode, receipt, change: () => controls.change?.({ store, project, boot: bootState }) })); sims.push(sim); return sim.stream; } };
+    duplex: async intent => { if (intent.identity.purpose !== "model") throw Error("not a model step"); const sim = new PiSim(piBehavior({ sql: controls.declared ? declaredSql : sql, mode, receipt, change: () => controls.change?.({ store, project, boot: bootState }) })); sims.push(sim); return sim.stream; } };
   const boot: OpenShellPiBoot = { descriptor, identity: digest, account: piAccountDigest(piProviderConfig(descriptor)),
     assertCurrent() { if (!bootState.current) throw new Error("Protected OpenShell configuration changed"); }, duplex: async (intent, argv, signal) => driver.duplex!(intent, argv, signal) };
   const verifyGateway = vi.fn(controls.verifyGateway ?? (async () => {}));
   const selection = resolveRuntimeSelection({ GENBI_RUNTIME: "openshell", GENBI_BACKEND: "pi" });
   const composition = await createOpenShellRuntimeComposition({ env: { GENBI_RUNTIME: "openshell", GENBI_BACKEND: "pi", GENBI_OPENSHELL_CONFIG: config }, selection, store, stateRoot: path.join(root, "lifecycle"), driver, pi: { boot, verifyGateway } });
   Object.defineProperty(composition, "dataWorkerAvailable", { value: true });
-  vi.spyOn(composition, "bindDataContext").mockImplementation((_context, check) => async (_scope, signal) => {
+  vi.spyOn(composition, "bindDataContext").mockImplementation((_context, check) => async (_scope, signal, declaredDefaults) => {
     const tuple = { worker: "genbi-wren-worker/1" as const, snapshot: digest, script: digest, wheel: digest, toolchain: digest, architecture: "linux-arm64" as const, protocol: "wren-governed/2" as const };
     let wake: (() => void) | undefined, closed = false;
-    const chunks = [Buffer.from(JSON.stringify(tuple) + "\n" + JSON.stringify({ id: 0, protocol: tuple.protocol }) + "\n")];
+    // The worker's own hello: the real governed process's for a declaring project (a different set when asked to mismatch), the protocol 2 hello otherwise.
+    const hello = controls.declared ? { ...governed({ id: 1, operation: "inspect" })[0]!, ...(controls.declared === "mismatch" ? { declared_defaults: ["some-other-rule"] } : {}) } : { id: 0, protocol: tuple.protocol };
+    const chunks = [Buffer.from(JSON.stringify(tuple) + "\n" + JSON.stringify(hello) + "\n")];
     const dataStream: OpenShellDuplex = { done: new Promise(() => {}),
       output: (async function* () { while (!closed) { if (chunks.length) yield { stream: "stdout" as const, data: chunks.shift()! }; else await new Promise<void>(resolve => { wake = resolve; }); } })(),
       write(bytes) {
@@ -123,7 +151,7 @@ async function fixture(controls: Controls = {}) {
         chunks.push(Buffer.from(JSON.stringify(reply) + "\n")); wake?.();
       },
       close() { closed = true; wake?.(); } };
-    return openOpenShellWrenAccess({ expected: tuple, signal, assertCurrent: check, lease: { id: "synthetic-data", reference: "synthetic-ref", assertActive: check,
+    return openOpenShellWrenAccess({ expected: tuple, signal, assertCurrent: check, ...declaredDefaultsOption(declaredDefaults ?? []), lease: { id: "synthetic-data", reference: "synthetic-ref", assertActive: check,
       async verify() { check(); return { digest } as never; }, async read() { return Buffer.from(JSON.stringify({ models: ["orders"] })); }, async openGoverned() { return dataStream; }, async close() { dataStream.close(); } } });
   });
   cleanup.push(async () => { await composition.shutdown(); store.close(); });
@@ -190,6 +218,18 @@ describe("pi OpenShell Structured Ask: the full scoped path with a scripted work
     expect(f.store.listEventsForTurn(f.turn.id).filter(event => event.kind === "answer")).toHaveLength(1);
   }, 180_000);
 
+  it("answers on a project that declares default rules: the data worker announces the catalog's set (protocol 3) and the conditioned query is answered", async () => {
+    const f = await fixture({ declared: "match" });
+    const { frames, stored } = await f.ask();
+    expect(stored, JSON.stringify(frames).slice(0, 800)).toMatchObject({ backend: "openshell", resultKind: "answer" });
+    expect(JSON.parse(stored.answerSummary!)).toEqual([{ type: "table", columns: ["n"], rows: [{ n: 7 }] }, { type: "definition", sql: declaredSql, source_tables: ["orders"], filters: ["is_test = FALSE"] }]);
+    expect(f.receipt.queries).toEqual([declaredSql]); expect(f.resources.size).toBe(0); expect(f.local).not.toHaveBeenCalled();
+  }, 180_000);
+  it("never answers on a declaring project when the data worker announces a set other than the catalog's", async () => {
+    const f = await fixture({ declared: "mismatch" });
+    const { stored } = await f.ask();
+    noAnswerHappened(f, stored); expect(f.receipt.queries).toEqual([]);
+  }, 180_000);
   it("never reads a vendor key: the Ask succeeds with the key variables unset, and ignores them when they are set", async () => {
     const f = await fixture();
     const env = recordingEnv();

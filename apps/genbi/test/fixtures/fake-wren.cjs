@@ -7,9 +7,10 @@ const write = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 
 if (mode === "governed-stdio") {
   // FAKE_WREN_DECLARED: comma-separated declared default rule ids; set, the hello is protocol 3 and a `/*declared*/` query is
-  // refused with FAKE_WREN_RULE_IDS (comma-separated; unset sends no `rule_ids`).
+  // refused with FAKE_WREN_RULE_IDS (comma-separated; unset sends no `rule_ids`). FAKE_WREN_HELLO, a JSON frame, replaces the hello outright.
   const declared = process.env.FAKE_WREN_DECLARED?.split(",").filter(Boolean) ?? [];
-  write(declared.length ? { id: 0, protocol: "wren-governed/3", declared_defaults: declared } : { id: 0, protocol: "wren-governed/2" });
+  if (process.env.FAKE_WREN_HELLO) write(JSON.parse(process.env.FAKE_WREN_HELLO));
+  else write(declared.length ? { id: 0, protocol: "wren-governed/3", declared_defaults: declared } : { id: 0, protocol: "wren-governed/2" });
   readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const request = JSON.parse(line);
     const sql = String(request.sql ?? "");

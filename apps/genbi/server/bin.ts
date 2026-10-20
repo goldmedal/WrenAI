@@ -178,8 +178,7 @@ import { toAuthChoiceFromRuntimeSettings } from "./auth-choice.js";
 import { Store } from "./db.js";
 import { resolveEnrichmentBinding, resolveProjectIdentity } from "./enrichment.js";
 import type { EnrichmentBinding } from "./enrichment.js";
-import { hashDirectory } from "../harness/compile/fingerprint.js";
-import { openWrenComponentAccess } from "../harness/components/wren-access.js";
+import { openNativeQueryAccess } from "./native-query-access.js";
 import { createDispatchedEnrichmentDraftRunner } from "./enrichment-runner.js";
 import { dispatchInteractiveArtifacts, getInteractiveTerminalReadiness, InteractiveLaunchError, InteractiveTerminalManager, prepareInteractiveHandoff, unavailableInteractiveReadiness } from "./interactive-terminal.js";
 import type { InteractiveTarget, PtyFactory } from "./interactive-terminal.js";
@@ -677,9 +676,7 @@ async function main(): Promise<void> {
     getBinding: currentInteractiveBinding,
     // The session `query` tool runs through the same `wren` native sessions are given.
     ...(nativeWrenExecutable ? {
-      openQueryAccess: async (binding: EnrichmentBinding, signal: AbortSignal) => openWrenComponentAccess({
-        executable: nativeWrenExecutable.executable, project: binding.path, fingerprint: await hashDirectory(binding.path), signal,
-      }),
+      openQueryAccess: (binding: EnrichmentBinding, signal: AbortSignal) => openNativeQueryAccess(nativeWrenExecutable.executable, binding, signal),
     } : {}),
   });
   const nativeTerminalHostAvailable = async (): Promise<boolean> => {

@@ -19,7 +19,8 @@ function fixture(handshake: unknown[] = [expected, { id: 0, protocol: expected.p
     async openGoverned() { return stream; }, async close() { closed++; valid = false; stream.close(); } };
   const controller = new AbortController();
   return { lease, controller, stream, push, get closed() { return closed; }, get writes() { return writes; }, stale() { valid = false; },
-    open: () => openOpenShellWrenAccess({ lease, expected, signal: controller.signal, assertCurrent() { if (!valid) throw new Error("stale"); } }) };
+    open: (declaredDefaults?: readonly string[]) => openOpenShellWrenAccess({ lease, expected, signal: controller.signal, assertCurrent() { if (!valid) throw new Error("stale"); },
+      ...(declaredDefaults ? { declaredDefaults } : {}) }) };
 }
 describe("admitted OpenShell governed data transport", () => {
   it("compares the independent tuple before inspect/query and closes owned worker", async () => {
@@ -61,22 +62,68 @@ describe("admitted OpenShell governed data transport", () => {
     const call = kind === "substituted manifest" ? access.inspect(f.controller.signal) : access.query({ sql: "select id from orders", limit: 1 }, f.controller.signal);
     await expect(call).rejects.toThrow("Governed Wren"); await access.close(); expect(f.closed).toBe(1);
   });
-  // The admitted data worker is pinned to protocol 2, which announces no declared rules and never sends `rule_ids`:
-  // the class is known, but a declaring project's protocol 3 hello or a frame naming rules is not trusted on this route.
-  it("renders a declared-default refusal from the pinned worker as the fixed sentence alone", async () => {
+  const sentence = "The query does not apply a default rule that the bound project declares for the models it reads, so it was not executed. Apply the rule named below (its wording is in the project's knowledge rules), then run the query again.";
+  const missing = (f: ReturnType<typeof fixture>, error: Record<string, unknown>) => { f.stream.write = bytes => f.push(Buffer.from(JSON.stringify({ id: JSON.parse(bytes.toString()).id, error }) + "\n")); };
+  const refusal = (access: Awaited<ReturnType<ReturnType<typeof fixture>["open"]>>, f: ReturnType<typeof fixture>) =>
+    access.query({ sql: "select id from orders", limit: 1 }, f.controller.signal).then(() => undefined as never, (reason: unknown) => reason as GovernedWrenError);
+  const v3 = (ids: unknown) => ({ id: 0, protocol: "wren-governed/3", declared_defaults: ids });
+  it("renders a declared-default refusal for a project that declares nothing as the fixed sentence alone, dropping any rule ids", async () => {
     const f = fixture(), access = await f.open();
-    f.stream.write = bytes => f.push(Buffer.from(JSON.stringify({ id: JSON.parse(bytes.toString()).id, error: { class: "declared_default_missing", message: "x" } }) + "\n"));
-    const error = await access.query({ sql: "select id from orders", limit: 1 }, f.controller.signal).then(() => undefined as never, (reason: unknown) => reason as GovernedWrenError);
+    missing(f, { class: "declared_default_missing", message: "x" });
+    const error = await refusal(access, f);
     expect(error).toBeInstanceOf(GovernedWrenError); expect(error.errorClass).toBe("declared_default_missing");
     expect(error.message).toContain("does not apply a default rule that the bound project declares"); expect(error.message).not.toContain("Rule:");
+    missing(f, { class: "declared_default_missing", message: "x", rule_ids: ["a"] });
+    const named = await refusal(access, f);
+    expect(named.errorClass).toBe("declared_default_missing"); expect(named.message).not.toContain("Rule:"); expect(named.ruleIds).toEqual([]);
     await access.close();
   });
-  it("fails closed on rule ids from a worker pinned to protocol 2, and on a protocol 3 hello", async () => {
-    const f = fixture(), access = await f.open();
-    f.stream.write = bytes => f.push(Buffer.from(JSON.stringify({ id: JSON.parse(bytes.toString()).id, error: { class: "declared_default_missing", message: "x", rule_ids: ["a"] } }) + "\n"));
-    await expect(access.query({ sql: "select id from orders", limit: 1 }, f.controller.signal)).rejects.toThrow("Governed Wren"); await access.close(); expect(f.closed).toBe(1);
-    const declaring = fixture([expected, { id: 0, protocol: "wren-governed/3", declared_defaults: ["a"] }]);
-    await expect(declaring.open()).rejects.toThrow(); expect(declaring.writes).toBe(0); expect(declaring.closed).toBe(1);
+  it("keeps today's protocol 2 hello for a project that declares nothing, with or without an empty set", async () => {
+    await (await fixture().open()).close(); await (await fixture().open([])).close();
+  });
+  it("accepts a protocol 3 hello announcing exactly the declared set, in any order, and renders the sentence with the declared rule ids only", async () => {
+    const f = fixture([expected, v3(["b", "a"])]), access = await f.open(["a", "b"]);
+    missing(f, { class: "declared_default_missing", message: "wire text with /private/path", rule_ids: ["b", "zz", "b", "a"] });
+    const error = await refusal(access, f);
+    expect(error.errorClass).toBe("declared_default_missing"); expect(error.ruleIds).toEqual(["b", "a"]);
+    expect(error.message).toBe(`Governed Wren query failed [declared_default_missing]: ${sentence} Rule: b, a`); expect(error.message).not.toMatch(/zz|private/);
+    missing(f, { class: "declared_default_missing", message: "x", rule_ids: ["zz"] });
+    expect((await refusal(access, f)).message).toBe(`Governed Wren query failed [declared_default_missing]: ${sentence}`);
+    await access.close(); expect(f.closed).toBe(1);
+  });
+  it("still answers queries on a declaring project", async () => {
+    const f = fixture([expected, v3(["a"])]), access = await f.open(["a"]);
+    expect(await access.query({ sql: "select * from orders", limit: 1 }, f.controller.signal)).toMatchObject({ rows: [{ id: 1 }] });
+    await access.close();
+  });
+  it.each([
+    ["a different set", v3(["a", "c"]), ["a", "b"]],
+    ["one id of two", v3(["a"]), ["a", "b"]],
+    ["an extra id", v3(["a", "b"]), ["a"]],
+    ["a repeated id", v3(["a", "a"]), ["a", "b"]],
+    ["an empty list", v3([]), ["a"]],
+    ["protocol 3 without the field", { id: 0, protocol: "wren-governed/3" }, ["a"]],
+    ["a protocol 2 hello on a declaring project", { id: 0, protocol: "wren-governed/2" }, ["a"]],
+    ["declarations the host does not know of", v3(["a"]), []],
+    ["an empty list for a project that declares nothing", v3([]), []],
+    ["the field on a protocol 2 hello", { id: 0, protocol: "wren-governed/2", declared_defaults: ["a"] }, []],
+  ])("is unavailable with the fixed declarations reason for %s, before any query", async (_name, hello, declared) => {
+    const f = fixture([expected, hello]);
+    const error = await f.open(declared).catch((reason: unknown) => reason) as GovernedWrenError;
+    expect(error).toBeInstanceOf(GovernedWrenError); expect(error.errorClass).toBe("transport"); expect(error.reason).toBe("governed_declarations_mismatch");
+    expect(error.message).toBe("Governed Wren query failed [transport]: Governed Wren operation is unavailable."); expect(f.writes).toBe(0); expect(f.closed).toBe(1);
+  });
+  it("gives a hello that is no declarations matter no declarations reason", async () => {
+    const f = fixture([expected, { id: 0, protocol: "wren-governed/2", result: 1 }]);
+    const error = await f.open().catch((reason: unknown) => reason) as GovernedWrenError;
+    expect(error).toBeInstanceOf(GovernedWrenError); expect(error.reason).toBeUndefined();
+  });
+  it("fails closed on rule ids carried by any other class, and on malformed or over-long ids", async () => {
+    for (const frame of [{ class: "invalid_sql", message: "x", rule_ids: ["a"] }, { class: "declared_default_missing", message: "x", rule_ids: ["Bad Id"] },
+      { class: "declared_default_missing", message: "x", rule_ids: ["a", "b", "c", "d", "e", "f", "g", "h", "i"] }]) {
+      const f = fixture([expected, v3(["a"])]), access = await f.open(["a"]); missing(f, frame);
+      await expect(access.query({ sql: "select id from orders", limit: 1 }, f.controller.signal)).rejects.toThrow("Governed Wren"); await access.close(); expect(f.closed).toBe(1);
+    }
   });
   it("a statement deadline during snapshot verification fences and cleans before any query write", async () => {
     const f = fixture(), access = await f.open(), parent = new AbortController();

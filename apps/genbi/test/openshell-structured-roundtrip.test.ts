@@ -13,6 +13,7 @@ import { openWrenComponentAccess } from "../harness/components/wren-access.js";
 import * as wrenAccess from "../harness/components/wren-access.js";
 import * as contextVerification from "../harness/components/context.js";
 import * as componentRuntime from "../server/native-component-runtime.js";
+import { declaredDefaultsOption } from "../harness/components/declared-defaults.js";
 import { openOpenShellWrenAccess } from "../server/runtime-host/openshell-wren-access.js";
 import { Store } from "../server/db.js";
 import { ClaudeAccountVault } from "../server/runtime-host/claude-account-vault.js";
@@ -116,13 +117,18 @@ function peer(model: string, receipt: { calls: number; replies: number; streams:
   };
 }
 
-async function fixture(change?: (store: Store) => void, failureMode?: "query" | "provider-failed" | "hold-query", controls: { componentLimits?: ComponentLimits; delayedClose?: boolean; helperFailure?: boolean; cleanupProofFailure?: boolean } = {}) {
+async function fixture(change?: (store: Store) => void, failureMode?: "query" | "provider-failed" | "hold-query", controls: { componentLimits?: ComponentLimits; delayedClose?: boolean; helperFailure?: boolean; cleanupProofFailure?: boolean; declared?: "match" | "mismatch" } = {}) {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "openshell-structured-roundtrip-")));
   cleanup.push(async () => { rmSync(root, { recursive: true, force: true }); });
   const project = path.join(root, "project"), home = path.join(root, "wren-home"), database = path.join(root, "data");
   for (const dir of [project, home, database, path.join(project, "models/orders")]) mkdirSync(dir, { recursive: true, mode: 0o700 });
   writeFileSync(path.join(project, "wren_project.yml"), "schema_version: 5\nname: synthetic\ncatalog: wren\nschema: public\ndata_source: duckdb\nprofile: synthetic\n");
-  writeFileSync(path.join(project, "models/orders/metadata.yml"), "name: orders\nref_sql: SELECT * FROM synthetic.raw_orders\ncolumns:\n  - name: id\n    type: INTEGER\n");
+  writeFileSync(path.join(project, "models/orders/metadata.yml"), "name: orders\nref_sql: SELECT * FROM synthetic.raw_orders\ncolumns:\n  - name: id\n    type: INTEGER\n" + (controls.declared ? "  - name: is_test\n    type: BOOLEAN\n" : ""));
+  // A project that declares a default rule: its catalog lists the id, so the data worker must announce exactly it (protocol 3).
+  if (controls.declared) {
+    mkdirSync(path.join(project, "knowledge/rules"), { recursive: true });
+    writeFileSync(path.join(project, "knowledge/rules/orders.md"), "---\ndefaults:\n  - id: exclude-test-orders\n    kind: exclude_rows\n    column: orders.is_test\n    exclude: true\n    covers: {reaching: orders, via: many_to_one}\n    when: aggregated\n---\n# Rules\nExclude test orders.\n");
+  }
   writeFileSync(path.join(home, "profiles.yml"), `profiles:\n  synthetic:\n    datasource: duckdb\n    url: ${JSON.stringify(database)}\n    format: duckdb\n`, { mode: 0o600 });
   const resolvedWren = resolveNativeExecutable("wren", "wren", process.env.PATH)!.executable;
   const python = process.env.GENBI_GOVERNED_WREN_PYTHON ?? readFileSync(resolvedWren, "utf8").split("\n")[0]!.slice(2);
@@ -132,12 +138,16 @@ async function fixture(change?: (store: Store) => void, failureMode?: "query" | 
   const source = path.resolve(application, "../../core/wren/src");
   const wren = path.join(root, "wren");
   writeFileSync(wren, `#!${python}\nimport sys\nsys.path.insert(0,${JSON.stringify(source)})\nfrom wren.cli import app\napp()\n`, { mode: 0o700 });
-  const oracle = execFileSync(wren, ["governed-stdio", "--project", project], { env: { PATH: "/usr/bin:/bin", HOME: root, WREN_HOME: home, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1" },
-    input: JSON.stringify({ id: 1, operation: "query", sql, limit: 1000 }) + "\n", timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] }).toString("utf8").trim().split("\n").map(line => JSON.parse(line));
-  expect(oracle).toEqual([{ id: 0, protocol: "wren-governed/2" }, { id: 1, result: { columns: ["n"], rows: [{ n: 7 }], definition: { sql, source_tables: ["orders"], filters: [] } } }]);
-  const oracleAccess = await openWrenComponentAccess({ executable: wren, project, fingerprint: await hashDirectory(project), signal: new AbortController().signal,
-    environment: { PATH: [root, path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter), HOME: root, WREN_HOME: home, WREN_PROJECT_HOME: project, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" } });
-  try { expect(await oracleAccess.query({ sql, limit: 1000 }, new AbortController().signal)).toMatchObject({ rows: [{ n: 7 }] }); } finally { await oracleAccess.close(); }
+  // A declaring project's rules would refuse this unconditioned count in the real governed process, so only the data peer's result shape is fixed here.
+  let oracle: { id: number; result?: unknown }[] = [{ id: 0 }, { id: 1, result: { columns: ["n"], rows: [{ n: 7 }], definition: { sql, source_tables: ["orders"], filters: [] } } }];
+  if (!controls.declared) {
+    oracle = execFileSync(wren, ["governed-stdio", "--project", project], { env: { PATH: "/usr/bin:/bin", HOME: root, WREN_HOME: home, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1" },
+      input: JSON.stringify({ id: 1, operation: "query", sql, limit: 1000 }) + "\n", timeout: 10_000, stdio: ["pipe", "pipe", "pipe"] }).toString("utf8").trim().split("\n").map(line => JSON.parse(line) as { id: number; result?: unknown });
+    expect(oracle).toEqual([{ id: 0, protocol: "wren-governed/2" }, { id: 1, result: { columns: ["n"], rows: [{ n: 7 }], definition: { sql, source_tables: ["orders"], filters: [] } } }]);
+    const oracleAccess = await openWrenComponentAccess({ executable: wren, project, fingerprint: await hashDirectory(project), signal: new AbortController().signal,
+      environment: { PATH: [root, path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter), HOME: root, WREN_HOME: home, WREN_PROJECT_HOME: project, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" } });
+    try { expect(await oracleAccess.query({ sql, limit: 1000 }, new AbortController().signal)).toMatchObject({ rows: [{ n: 7 }] }); } finally { await oracleAccess.close(); }
+  }
   const config = path.join(root, "configuration.json");
   writeFileSync(config, JSON.stringify({ executable: wren, executableDigest: digest, version: "0.0.1", gateway: "synthetic", workspace: "default", image: digest, supervisorImage: digest,
     policy: config, policyDigest: digest, home: root, configHome: root, stateHome: root, dockerExecutable: wren, dockerRealpath: wren, dockerDigest: digest, dockerSocket: path.join(root, "none.sock"), dockerNamespace: "synthetic", exclusive: true,
@@ -165,15 +175,16 @@ async function fixture(change?: (store: Store) => void, failureMode?: "query" | 
   vi.spyOn(composition, "applyInventory").mockReturnValue({ approvedFiles: ["knowledge/rules/orders.md", "models/orders/metadata.yml", "target/mdl.json", "wren_project.yml"], preserveProjectConfig: true });
   // Credential-free synthetic data peer exercises the production bounded adapter.
   // Actual Linux/OpenShell execution is a separate container acceptance gate.
-  vi.spyOn(composition, "bindDataContext").mockImplementation((_context, check) => async (_scope, signal) => {
+  vi.spyOn(composition, "bindDataContext").mockImplementation((_context, check) => async (_scope, signal, declaredDefaults) => {
     const tuple = { worker: "genbi-wren-worker/1" as const, snapshot: digest, script: digest, wheel: digest, toolchain: digest, architecture: "linux-arm64" as const, protocol: "wren-governed/2" as const };
     let wake: (() => void) | undefined, closed = false;
-    const chunks = [Buffer.from(JSON.stringify(tuple) + "\n" + JSON.stringify({ id: 0, protocol: tuple.protocol }) + "\n")];
+    const hello = controls.declared ? { id: 0, protocol: "wren-governed/3", declared_defaults: [controls.declared === "match" ? "exclude-test-orders" : "some-other-rule"] } : { id: 0, protocol: tuple.protocol };
+    const chunks = [Buffer.from(JSON.stringify(tuple) + "\n" + JSON.stringify(hello) + "\n")];
     const dataStream: OpenShellDuplex = { done: new Promise(() => {}),
       output: (async function* () { while (!closed) { if (chunks.length) yield { stream: "stdout" as const, data: chunks.shift()! }; else await new Promise<void>(resolve => { wake = resolve; }); } })(),
-      write(bytes) { check(); const request = JSON.parse(bytes.toString()); expect(request.operation).toBe("query"); expect(request.sql).toBe(sql); observedQuery = true; queryStartedResolve(); if (failureMode === "hold-query") return; chunks.push(Buffer.from(JSON.stringify(failureMode ? { id: request.id, error: { class: "execution_failed", message: "synthetic private SQL/token/path must not escape" } } : { id: request.id, result: oracle[1].result }) + "\n")); wake?.(); },
+      write(bytes) { check(); const request = JSON.parse(bytes.toString()); expect(request.operation).toBe("query"); expect(request.sql).toBe(sql); observedQuery = true; queryStartedResolve(); if (failureMode === "hold-query") return; chunks.push(Buffer.from(JSON.stringify(failureMode ? { id: request.id, error: { class: "execution_failed", message: "synthetic private SQL/token/path must not escape" } } : { id: request.id, result: oracle[1]!.result }) + "\n")); wake?.(); },
       close() { queryClosed++; closed = true; wake?.(); } };
-    return openOpenShellWrenAccess({ expected: tuple, signal, assertCurrent: check, lease: { id: "synthetic-data", reference: "synthetic-ref", assertActive: check,
+    return openOpenShellWrenAccess({ expected: tuple, signal, assertCurrent: check, ...declaredDefaultsOption(declaredDefaults ?? []), lease: { id: "synthetic-data", reference: "synthetic-ref", assertActive: check,
       async verify() { check(); return { digest } as never; }, async read() { return Buffer.from(JSON.stringify({ models: ["orders"] })); }, async openGoverned() { return dataStream; }, async close() { dataStream.close(); closeRequestedResolve(); if (controls.delayedClose) await closeReleased; querySettled++; } } });
   });
   cleanup.push(async () => { for (const stream of streams) stream.close(); await composition.shutdown(); store.close(); });
@@ -228,6 +239,22 @@ it("HTTP-selected Ask runs pinned plan → branded SDK peer → synthetic Wren d
   f.composition.revokeRuntime(); f.composition.revokeRuntime(); expect(f.retained()).toBe(f.before);
 // Actual three-step producer/host/SDK path checks exact executable pins at authority boundaries.
 // The measured no-model path takes ~58s; this test-only total watchdog preserves production caps.
+}, 120_000);
+
+it("HTTP-selected Ask on a project that declares default rules reaches a protocol 3 data worker announcing the catalog's set", async () => {
+  const f = await fixture(undefined, undefined, { declared: "match" });
+  await streamTurn(f.deps, f.session.id, f.turn.id, async () => {});
+  const stored = f.store.getTurn(f.turn.id);
+  expect(stored, JSON.stringify({ phases: f.phases, receipt: f.receipt })).toMatchObject({ backend: "openshell", resultKind: "answer" });
+  expect(JSON.parse(stored!.answerSummary!)).toEqual([{ type: "table", columns: ["n"], rows: [{ n: 7 }] }, { type: "definition", sql, source_tables: ["orders"], filters: [] }]);
+  expect(f.local).not.toHaveBeenCalled(); expect(f.resources.size).toBe(0);
+}, 120_000);
+
+it("HTTP-selected Ask on a declaring project is refused, never answered, when the data worker announces a different set", async () => {
+  const f = await fixture(undefined, undefined, { declared: "mismatch" });
+  await streamTurn(f.deps, f.session.id, f.turn.id, async () => {});
+  expect(f.store.getTurn(f.turn.id)).not.toMatchObject({ resultKind: "answer" });
+  expect(f.local).not.toHaveBeenCalled(); expect(f.resources.size).toBe(0);
 }, 120_000);
 
 it("runtime change before raw MCP admission blocks effects/save and cleans owned resources without deleting login", async () => {

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import path from "node:path";
 import { hashDirectory } from "../compile/fingerprint.js";
+import { declaredDefaultsOptionOfProject } from "../components/declared-defaults.js";
 import { openWrenComponentAccess } from "../components/wren-access.js";
 import { enforceCompliance } from "../compliance/index.js";
 import { compileProfile } from "../compile/pipeline.js";
@@ -131,6 +132,7 @@ export async function runCodexAskDefault(options: CodexAskOptions): Promise<Code
         project: userProject,
         fingerprint: await hashDirectory(userProject),
         signal,
+        ...await declaredDefaultsOptionOfProject(userProject, { signal }),
       }),
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });

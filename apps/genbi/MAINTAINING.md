@@ -183,9 +183,25 @@ the field means "declares nothing"). The host side lives in `harness/components/
   `^[a-z0-9][a-z0-9_-]{0,63}$`); any other hello is unavailable, with the fixed reason
   `governed_declarations_mismatch` in the `governed_hello` server log line (ids are never logged or shown).
   So a Wren CLI that predates declarations (a two-key hello) cannot silently run a declaring project, and a
-  project without declarations still gets exactly the two-key protocol 2 hello. Only the in-process route reads the catalog and passes
-  `declaredDefaults` to `openWrenComponentAccess`; every other caller passes none, so a declaring project is
-  unavailable there. The OpenShell data worker is pinned to protocol 2 and fails closed the same way.
+  project without declarations still gets exactly the two-key protocol 2 hello.
+- **Every governed route passes the catalog's set.** The in-process route reads the catalog it already generates;
+  the Ask host-proxy turns (dispatched and codex-ask) and the native session `query` tool read it through
+  `declaredDefaultsOptionOfProject` (`harness/components/declared-defaults.ts`, one generator run per access
+  open); the native component runtime takes it from the catalog its context capture generates, and hands it to
+  its `openDataAccess` override. A catalog that cannot be produced reads as "declares nothing", so a governed
+  process that announces rules is refused, never trusted. The option is passed only when the set is non-empty
+  (`declaredDefaultsOption`), so a project that declares nothing makes the same governed call as before.
+- **OpenShell data worker.** The worker image's identity line and the descriptor's `dataWorker.protocol` keep
+  naming `wren-governed/2`: that is the pinned `wren` module's own `PROTOCOL` constant, not the hello. The hello
+  that follows is what changes with the project, and `openOpenShellWrenAccess` takes the same `declaredDefaults`
+  set: the two-key protocol 2 hello for a project that declares nothing, protocol 3 announcing exactly the set
+  for one that declares rules, anything else unavailable with the same fixed reason. No descriptor field,
+  literal or digest changes. Two things make a declaring project work on the sandbox: the pinned worker
+  wheel must be one built from `core/wren` at or after the declared-rules support (re-pin its digest as for any
+  wheel change, per `runtime-assets/wren-worker/README.md`), and `snapshotCapture.approvedFiles` must list the
+  project's `knowledge/rules/*.md` files, because the worker reads the declarations from the snapshot. A worker that
+  does not announce them (an older wheel, or rule files missing from the snapshot) announces protocol 2 for a
+  declaring catalog and is refused.
 - **Error class.** `declared_default_missing` is one more member of `GOVERNED_ERROR_CLASSES`, with one fixed
   sentence that every model-facing surface owns (the governed error, the host proxy, native session
   artifacts) and a structured-data refusal. Its frame may carry `rule_ids`, and no other class may: `rule_ids`

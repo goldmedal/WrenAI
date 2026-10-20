@@ -4,8 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { generatePreparedContext } from "../harness/compile/context-loader.js";
+import { generatePreparedContextAndCatalog } from "../harness/compile/context-loader.js";
 import { hashDirectory } from "../harness/compile/fingerprint.js";
+import { declaredDefaultsOption } from "../harness/components/declared-defaults.js";
+import { declaredDefaultsOfCatalog } from "../harness/components/knowledge-rules.js";
 import { captureWrenAccessIdentity } from "../harness/components/wren-access.js";
 import { prepareCodexDirectTools, type CodexSessionTools } from "./runtime-host/codex-direct-tools.js";
 import { prepareNativeComponentHost, prepareStructuredAskComponentHost, prepareStructuredEnrichComponentHost, type NativeComponentBindings } from "./native-component-preparation.js";
@@ -92,7 +94,10 @@ async function captureBindings(irDocument: string, options: NativeComponentConte
   const scratch = await mkdtemp(path.join(os.tmpdir(), "genbi-native-context-"));
   try {
     const snapshotPath = path.join(scratch, "context.json");
-    await observeStructuredAsync(options.diagnostics, "context_producer", () => { options.assertExecutableCurrent?.(); return generatePreparedContext(options.contextLoaderBinary, project, snapshotPath, signal); });
+    const catalogPath = path.join(scratch, "catalog.json");
+    // One generator process reads the project once: the snapshot and the catalog whose declared default rules the governed access must announce.
+    await observeStructuredAsync(options.diagnostics, "context_producer", () => { options.assertExecutableCurrent?.(); return generatePreparedContextAndCatalog(options.contextLoaderBinary, project, snapshotPath, catalogPath, signal); });
+    const declaredDefaults = declaredDefaultsOfCatalog(await observeStructuredAsync(options.diagnostics, "context_snapshot", async () => JSON.parse(await readFile(catalogPath, "utf8")) as unknown));
     const snapshot = await observeStructuredAsync(options.diagnostics, "context_snapshot", async () => z.object({ context_version: z.literal(2), parseable: z.literal(true) }).passthrough()
       .parse(JSON.parse(await readFile(snapshotPath, "utf8"))));
     await accessIdentity.assertCurrent();
@@ -106,7 +111,7 @@ async function captureBindings(irDocument: string, options: NativeComponentConte
       return [[component.id, { binding, snapshot }]];
     }));
     const bindings = observeStructured(options.diagnostics, "runtime_bindings", () => createNativeComponentRuntimeBindings({ ...options, identity, contexts, currentIdentity, assertCurrent: check,
-      wren: { executable: options.wrenBinary, project, fingerprint, identity: accessIdentity } }));
+      wren: { executable: options.wrenBinary, project, fingerprint, identity: accessIdentity, ...declaredDefaultsOption(declaredDefaults) } }));
     return bindings;
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }

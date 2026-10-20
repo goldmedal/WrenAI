@@ -1,7 +1,7 @@
 # Governed data worker build contract
 
 This fixed entrypoint accepts no arguments. The host admits one immutable snapshot and opens
-only bounded `wren-governed/2` query/inspect frames. No account, profile, environment or connector
+only bounded `wren-governed/2` query/inspect frames (the identity line names that module protocol; the hello that follows is protocol 3 and announces the declared default rules for a project that declares some, which the host requires to equal its catalog). No account, profile, environment or connector
 credential is supplied through tool input. The host owns statement deadlines and deletes the
 whole owned sandbox on cancellation, transport failure or malformed output.
 

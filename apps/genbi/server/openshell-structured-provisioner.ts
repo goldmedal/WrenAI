@@ -206,7 +206,7 @@ export function createOpenShellStructuredProvisioner(options: Options): OpenShel
         verifierBinary: producer.executable, contextLoaderBinary: loader.executable, wrenBinary: wren.executable, project: binding.path, signal, assertExecutableCurrent,
         wrenEnvironment: { PATH: [path.dirname(wren.executable), path.dirname(node.executable), "/usr/bin", "/bin"].join(path.delimiter), HOME: options.hostHome,
           WREN_HOME: sourceHome, WREN_PROJECT_HOME: binding.path, PYTHONNOUSERSITE: "1", PYTHONUTF8: "1", PYTHONDONTWRITEBYTECODE: "1" },
-        openDataAccess: async parent => { if (!dataAccess || !modelScope) throw unavailable(); return observeStructuredQueryAccess(await dataAccess(modelScope, parent), queryFailure.record); },
+        openDataAccess: async (parent, declaredDefaults) => { if (!dataAccess || !modelScope) throw unavailable(); return observeStructuredQueryAccess(await dataAccess(modelScope, parent, declaredDefaults), queryFailure.record); },
         ...(componentLimits ? { componentLimits } : {}),
         vendor, ...(ask ? { persistRoot: ask.persistRoot } : enrich?.propose ? { propose: enrich.propose } : {}), onEvent: event => {
           if (event.kind === "step.start") queryFailure.start();
