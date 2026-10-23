@@ -166,6 +166,7 @@ class Service:
     def record(self, entry: dict):
         """Keep an audit entry in memory and, when the operator set audit_path,
         append it as one JSON line at once so a killed process still leaves a trail."""
+        entry = {"t": round(time.time(), 3), **entry}
         self.audit.append(entry)
         if len(self.audit) > 4096:
             del self.audit[:1024]
