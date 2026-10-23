@@ -666,6 +666,42 @@ class Service:
         )
 
 
+# Coarse, caller-safe reasons for an `unavailable` task. They name which side
+# failed, never the provider's text, status code, SQL or private output.
+UNAVAILABLE_REASONS = {
+    "provider": {"provider_http", "provider_stream", "model_error"},
+    "timeout": {"deadline", "cancelled"},
+    "worker": {
+        "invalid_json",
+        "empty_output",
+        "turn_limit",
+        "incomplete_child",
+        "model_length",
+        "output_limit",
+        "request_limit",
+        "response_limit",
+        "missing_response",
+        "tool_failure",
+        "destination_denied",
+        "child_exit",
+        "protocol",
+    },
+}
+
+
+def unavailable_reason(exc: BaseException) -> str:
+    """Classify a failed task: provider (model platform), worker (private agent
+    output or limits), timeout, or service (host/runtime, or no diagnostic)."""
+    if isinstance(exc, ValueError) and str(exc) == "invalid_evidence":
+        return "worker"
+    detail = str(getattr(exc, "detail", "") or "")
+    code = detail.rsplit(":", 1)[-1] if ":" in detail else ""
+    for reason, codes in UNAVAILABLE_REASONS.items():
+        if code in codes:
+            return reason
+    return "service"
+
+
 async def safe(fn, *args, **kwargs):
     try:
         return await asyncio.to_thread(fn, *args, **kwargs)
@@ -678,13 +714,11 @@ async def safe(fn, *args, **kwargs):
         return {"status": "denied"}
     except ValueError as exc:
         code = str(exc)
-        return {
-            "status": code
-            if code in {"conflict", "session_expired", "context_changed"}
-            else "unavailable"
-        }
-    except Exception:
-        return {"status": "unavailable"}
+        if code in {"conflict", "session_expired", "context_changed"}:
+            return {"status": code}
+        return {"status": "unavailable", "reason": unavailable_reason(exc)}
+    except Exception as exc:
+        return {"status": "unavailable", "reason": unavailable_reason(exc)}
 
 
 def build_mcp(service: Service):

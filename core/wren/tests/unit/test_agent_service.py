@@ -705,3 +705,45 @@ def test_audit_records_task_outcomes(service, monkeypatch, tmp_path):
     failed = [e for e in events if e.get("event") == "task_failed"]
     assert failed[-1]["reason"] == "runtime_unavailable"
     assert failed[-1]["detail"] == "provider_http 429"
+
+
+@pytest.mark.parametrize(
+    ("detail", "reason"),
+    [
+        ("service_unavailable:provider_http", "provider"),
+        ("service_unavailable:provider_stream", "provider"),
+        ("service_unavailable:cancelled", "timeout"),
+        ("service_unavailable:deadline", "timeout"),
+        ("service_unavailable:invalid_json", "worker"),
+        ("service_unavailable:turn_limit", "worker"),
+        ("service_unavailable", "service"),
+        (None, "service"),
+    ],
+)
+def test_unavailable_carries_a_coarse_reason(service, monkeypatch, detail, reason):
+    from wren.agent_service import safe  # noqa: PLC0415
+
+    s = service()
+
+    def boom(callback):
+        err = RuntimeError("runtime_unavailable")
+        if detail is not None:
+            err.detail = detail
+        raise err
+
+    install_invoker(monkeypatch, s, boom)
+    out = asyncio.run(safe(s.execute, ask_request(s)))
+    assert out == {"status": "unavailable", "reason": reason}
+
+
+def test_invalid_evidence_is_a_worker_reason_and_denied_stays_bare(service, monkeypatch):
+    from wren.agent_service import safe  # noqa: PLC0415
+
+    s = service()
+    install_invoker(monkeypatch, s, lambda callback: {"value": 1})
+    assert asyncio.run(safe(s.execute, ask_request(s))) == {
+        "status": "unavailable",
+        "reason": "worker",
+    }
+    denied = asyncio.run(safe(s.metadata, None, ["rules"], "planner"))
+    assert denied == {"status": "denied"}
