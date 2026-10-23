@@ -84,7 +84,10 @@ class RuntimeIPC:
                     if m.get("error"):
                         failure = RuntimeError("runtime_unavailable")
                         # Operator diagnostics only: never forwarded to a caller.
-                        failure.detail = str(m["error"])[:200]
+                        # The runtime sends a generic error plus its failure code.
+                        failure.detail = ":".join(
+                            str(x)[:80] for x in (m["error"], m.get("diagnostic")) if x
+                        )
                         future.set_exception(failure)
                     else:
                         future.set_result(m["value"])
