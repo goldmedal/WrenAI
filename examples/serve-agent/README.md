@@ -73,6 +73,27 @@ Test total orders → weekly report → second-week fresh query → project targ
 
 `service.yml` is trusted operator configuration. `metadata_selection` narrows public document access; it cannot expand `policy.cedar`. The example selections are `[]`, `[structure]`, `[structure, rules]` and `[rules]`. Private metadata access, task capability, query scope and result disclosure are separate decisions. There is no per-rule-use action.
 
+### Named policy presets
+
+An operator may declare named presets in `service.yml` and pick one at startup. A preset overrides only `metadata_selection`, `policy` (another Cedar file inside the configuration directory) and `query_scope`; any other key is rejected (`invalid_policy_preset`). Top-level values remain the fallback for keys a preset does not set, and a preset cannot widen the deployment Cedar policy: both policies must still allow each request.
+
+```yaml
+metadata_selection: []
+default_preset: hidden
+policy_presets:
+  hidden:    { metadata_selection: [] }
+  structure: { metadata_selection: [structure] }
+  rules:     { metadata_selection: [rules] }
+  full:      { metadata_selection: [structure, rules] }
+  q1:        { metadata_selection: [structure], query_scope: { start: "2026-01-01", end: "2026-04-01" } }
+```
+
+`wren serve agent --policy-preset <name>` selects a preset; without the flag `default_preset` applies, and without either the top-level values apply. An unknown name fails startup (`unknown_policy_preset`) rather than falling back. `wren serve agent-presets --service-config service.yml` prints the declared names as JSON without starting the engine. The selected preset is reported by `capabilities` as `policy_preset: {name, available}`; the visible documents remain `metadata_documents`, which is already policy-filtered. Changing presets is a restart: sessions do not survive it, and a narrower preset cannot recall what a client already received.
+
+### Loopback HTTP transport
+
+`wren serve agent --transport http --host 127.0.0.1 --port 0` serves the same tools over streamable HTTP for a client that manages the service process itself. The bind host must be loopback and the process must receive `WREN_AGENT_LOCAL_TOKEN`; every request must carry `Authorization: Bearer <token>` or it is answered `401 {"status":"denied"}`. After binding, the service prints one line to stderr, `ready transport=http host=<host> port=<port>`, so `--port 0` can be used. The token only guards against other local processes connecting by mistake; it is not authentication between operating-system users.
+
 The default analysis/counts adapter supports counts, UTC weekly grouping, Monday-aligned date ranges, and a structured minimum-count rule or explicit user threshold. Mandatory `query_scope.start` and `query_scope.end` are intersected with requested filters. Arbitrary joins, arbitrary SQL expressions, raw rows, SQL-only output and writes are not supported. `run_sql` accepts only the normalized canonical total/weekly count plan for the configured model and scope; all other SQL is rejected before execution.
 
 Rules in prose help the agent select the domain definition; the trusted structured `rules` configuration supplies the calculation. Tool execution mints an internal evidence token, and only an exact valid token can produce a public result. The result excludes internal SQL, rule text and threshold. Evidence does not certify the model selected the user's intended question; the planner must still check grain and dates.

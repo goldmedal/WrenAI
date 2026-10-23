@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import atexit
 import functools
+import hmac
 import json
 import os
+import re
+import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -26,6 +30,48 @@ from wren.agent_sql import AdHocSQL, PrivateSQL, QueryShapeError
 
 def uid():
     return str(uuid.uuid4())
+
+
+PRESET_KEYS = frozenset({"metadata_selection", "policy", "query_scope"})
+LOCAL_TOKEN_ENV = "WREN_AGENT_LOCAL_TOKEN"
+
+
+def read_policy_presets(config: dict) -> tuple[str | None, dict[str, dict]]:
+    """Validate operator-named presets; each may override only PRESET_KEYS."""
+    presets = config.get("policy_presets") or {}
+    default = config.get("default_preset")
+    if not isinstance(presets, dict) or (
+        default is not None and default not in presets
+    ):
+        raise ValueError("invalid_policy_preset")
+    for name, overrides in presets.items():
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name)
+            or not isinstance(overrides, dict)
+            or not set(overrides) <= PRESET_KEYS
+        ):
+            raise ValueError("invalid_policy_preset")
+    return default, presets
+
+
+def apply_policy_preset(config: dict, requested: str | None) -> dict:
+    """Overlay one preset at startup. Top-level values stay the fallback; a
+    preset never adds keys outside PRESET_KEYS and cannot widen policy.cedar."""
+    default, presets = read_policy_presets(config)
+    name = requested if requested is not None else default
+    if name is None:
+        overrides = {}
+    elif name not in presets:
+        raise ValueError("unknown_policy_preset")
+    else:
+        overrides = presets[name]
+    merged = {
+        k: v for k, v in config.items() if k not in ("policy_presets", "default_preset")
+    }
+    merged.update(overrides)
+    merged["policy_preset"] = {"name": name, "available": sorted(presets)}
+    return merged
 
 
 class Strict(BaseModel):
@@ -170,6 +216,9 @@ class Service:
                 if self.allowed(None, "invoke_component", "capability", c["id"])
             ],
             "contract": "session revision; reply_to result_ref; continue_task after needs_clarification",
+            "policy_preset": self.config.get(
+                "policy_preset", {"name": None, "available": []}
+            ),
             "metadata_documents": [
                 {"id": name, "kind": d["kind"]}
                 for name, d in self.project.documents.items()
@@ -718,6 +767,7 @@ def create_service(
     warble: str,
     mode: str = "agent",
     connection_profile: str | None = None,
+    policy_preset: str | None = None,
 ):
     """Prepare all bindings before exposing MCP. Configuration is trusted local input."""
     from wren.cli import _build_engine  # noqa: PLC0415
@@ -727,7 +777,7 @@ def create_service(
     root = discover(project_path)
     bundle = agent_profile.expanduser().resolve(strict=True)
     config_path = service_config.expanduser().resolve(strict=True)
-    config = yaml.safe_load(config_path.read_text())
+    config = apply_policy_preset(yaml.safe_load(config_path.read_text()), policy_preset)
     capabilities_path = bundle / "capabilities.yml"
     profile = Profile.model_validate(
         yaml.safe_load(capabilities_path.read_text())
@@ -875,11 +925,75 @@ def create_service(
     return service
 
 
-def launch(*args, **kwargs):
+def local_token_guard(app, token: str):
+    """ASGI guard: every HTTP request must carry the operator's bearer token."""
+    expected = f"Bearer {token}".encode()
+
+    async def guard(scope, receive, send):
+        if scope["type"] == "http":
+            given = dict(scope.get("headers") or []).get(b"authorization", b"")
+            if not hmac.compare_digest(given, expected):
+                body = b'{"status":"denied"}'
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+        await app(scope, receive, send)
+
+    return guard
+
+
+def http_server(mcp: FastMCP, host: str, port: int, token: str):
+    """Bind a loopback streamable-http listener; returns (uvicorn server, socket).
+
+    The socket is bound before returning so ``port=0`` has a real port and a
+    client may connect as soon as ``server.run(sockets=[sock])`` starts.
+    """
+    import uvicorn  # noqa: PLC0415
+
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise ValueError("loopback_only")
+    if not token:
+        raise ValueError("local_token_required")
+    mcp.settings.host, mcp.settings.port = host, port
+    mcp.settings.json_response = True
+    app = local_token_guard(mcp.streamable_http_app(), token)
+    sock = socket.socket(socket.AF_INET6 if host == "::1" else socket.AF_INET)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(128)
+    config = uvicorn.Config(
+        app, host=host, port=sock.getsockname()[1], log_level="warning"
+    )
+    return uvicorn.Server(config), sock
+
+
+def serve_http(mcp: FastMCP, host: str, port: int):
+    server, sock = http_server(mcp, host, port, os.environ.get(LOCAL_TOKEN_ENV, ""))
+    print(
+        f"ready transport=http host={host} port={sock.getsockname()[1]}",
+        file=sys.stderr,
+        flush=True,
+    )
+    server.run(sockets=[sock])
+
+
+def launch(*args, transport: str = "stdio", host="127.0.0.1", port=0, **kwargs):
     service = create_service(*args, **kwargs)
     atexit.register(service.shutdown)
     try:
-        build_mcp(service).run(transport="stdio")
+        if transport == "http":
+            serve_http(build_mcp(service), host, port)
+        else:
+            build_mcp(service).run(transport="stdio")
     finally:
         atexit.unregister(service.shutdown)
         service.shutdown()

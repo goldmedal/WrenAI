@@ -324,21 +324,77 @@ def serve_agent(
         Optional[str], typer.Option("--profile", help="Data connection profile.")
     ] = None,
     warble: Annotated[str, typer.Option("--warble")] = "warble",
-    transport: Annotated[str, typer.Option("--transport")] = "stdio",
+    transport: Annotated[
+        str, typer.Option("--transport", help="stdio (default) or http (loopback).")
+    ] = "stdio",
+    host: Annotated[
+        str, typer.Option("--host", help="Loopback bind host for --transport http.")
+    ] = "127.0.0.1",
+    port: Annotated[
+        int, typer.Option("--port", help="Bind port for --transport http; 0 = any.")
+    ] = 0,
+    policy_preset: Annotated[
+        Optional[str],
+        typer.Option(
+            "--policy-preset",
+            help="Named preset from service.yml policy_presets; default_preset when omitted.",
+        ),
+    ] = None,
 ) -> None:
     """Serve one project-bound Warble profile through a private pi runtime."""
-    if transport != "stdio":
-        typer.echo("Agent service currently supports local stdio only.", err=True)
+    if transport not in ("stdio", "http"):
+        typer.echo("Agent service supports --transport stdio or http.", err=True)
         raise typer.Exit(1)
-    from wren.agent_service import launch  # noqa: PLC0415
+    from wren.agent_service import LOCAL_TOKEN_ENV, launch  # noqa: PLC0415
 
+    if transport == "http" and not os.environ.get(LOCAL_TOKEN_ENV):
+        typer.echo(f"--transport http requires {LOCAL_TOKEN_ENV}.", err=True)
+        raise typer.Exit(1)
     try:
         launch(
-            project, agent_profile, service_config, runtime, warble, "agent", profile
+            project,
+            agent_profile,
+            service_config,
+            runtime,
+            warble,
+            "agent",
+            profile,
+            policy_preset,
+            transport=transport,
+            host=host,
+            port=port,
         )
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(f"Agent startup failed: {exc}.", err=True)
+        raise typer.Exit(1) from None
     except Exception:
         typer.echo(
             "Agent startup failed. Check profile, project, runtime, model credentials and deployment configuration.",
             err=True,
         )
         raise typer.Exit(1) from None
+
+
+@serve_app.command("agent-presets")
+def serve_agent_presets(
+    service_config: Annotated[
+        Path,
+        typer.Option(
+            "--service-config", help="Trusted service deployment configuration."
+        ),
+    ],
+) -> None:
+    """Print the named policy presets of a service configuration as JSON."""
+    import yaml  # noqa: PLC0415
+
+    from wren.agent_service import read_policy_presets  # noqa: PLC0415
+
+    try:
+        config = yaml.safe_load(
+            service_config.expanduser().resolve(strict=True).read_text()
+        )
+        default, presets = read_policy_presets(config)
+    except ValueError as exc:
+        typer.echo(f"Invalid presets: {exc}.", err=True)
+        raise typer.Exit(1) from None
+    typer.echo(json.dumps({"default": default, "presets": sorted(presets)}))

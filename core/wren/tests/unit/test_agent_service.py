@@ -1,5 +1,6 @@
 """Service boundary tests use real Cedar IPC and the synthetic Wren database."""
 
+import asyncio
 import concurrent.futures
 import importlib.util
 import json
@@ -39,7 +40,7 @@ def service(tmp_path):
     root = tmp_path / "fixture/project"
     instances = []
 
-    def make(policy="", selection=(), mode="mcp", updates=None):
+    def make(policy="", selection=(), mode="mcp", updates=None, preset=None):
         config = yaml.safe_load((root / "service.yml").read_text())
         config["metadata_selection"] = list(selection)
         config.update(updates or {})
@@ -55,6 +56,7 @@ def service(tmp_path):
             Path(runtime),
             compiler,
             mode,
+            policy_preset=preset,
         )
         instances.append(s)
         return s
@@ -482,3 +484,177 @@ def test_result_and_evidence_disclose_effective_scope_not_unbounded_request(serv
     )
     assert evidence["conditions"] == expected
     assert result["result"]["rows"] == [{"order_count": 4}]
+
+
+PRESETS = {
+    "hidden": {"metadata_selection": []},
+    "structure": {"metadata_selection": ["structure"]},
+    "rules": {"metadata_selection": ["rules"]},
+    "full": {"metadata_selection": ["structure", "rules"]},
+}
+NO_PLANNER_METADATA = (
+    'forbid(principal, action == Service::Action::"receive_metadata", resource)'
+    ' when { principal.role == "planner" };'
+)
+
+
+@pytest.mark.parametrize("preset", sorted(PRESETS))
+def test_policy_preset_applies_selection_and_is_reported(service, preset):
+    s = service(
+        selection=["structure", "rules"],
+        updates={"policy_presets": PRESETS, "default_preset": "hidden"},
+        preset=preset,
+    )
+    public = s.capabilities_public()
+    assert public["policy_preset"] == {
+        "name": preset,
+        "available": ["full", "hidden", "rules", "structure"],
+    }
+    visible = {d["id"] for d in public["metadata_documents"]}
+    assert visible == set(PRESETS[preset]["metadata_selection"])
+    for name in ("structure", "rules"):
+        if name in visible:
+            assert s.metadata(None, [name], "planner")
+        else:
+            with pytest.raises(PermissionError):
+                s.metadata(None, [name], "planner")
+    assert s.metadata(None, ["structure", "rules"], "worker")
+    assert "policy_presets" not in s.config and "default_preset" not in s.config
+
+
+def test_policy_preset_default_unknown_and_invalid(service):
+    s = service(selection=["rules"], updates={"policy_presets": PRESETS})
+    assert s.capabilities_public()["policy_preset"]["name"] is None
+    assert {d["id"] for d in s.capabilities_public()["metadata_documents"]} == {
+        "rules"
+    }
+    s = service(
+        selection=["rules"],
+        updates={"policy_presets": PRESETS, "default_preset": "structure"},
+    )
+    assert s.capabilities_public()["policy_preset"]["name"] == "structure"
+    assert {d["id"] for d in s.capabilities_public()["metadata_documents"]} == {
+        "structure"
+    }
+    bare = service()
+    assert bare.capabilities_public()["policy_preset"] == {
+        "name": None,
+        "available": [],
+    }
+    with pytest.raises(ValueError, match="unknown_policy_preset"):
+        service(updates={"policy_presets": PRESETS}, preset="nope")
+    with pytest.raises(ValueError, match="unknown_policy_preset"):
+        service(preset="hidden")
+    for bad in (
+        {"policy_presets": PRESETS, "default_preset": "nope"},
+        {"policy_presets": {"full": {"caller": "other"}}},
+        {"policy_presets": {"full": {"private_model": {}}}},
+        {"policy_presets": {"Bad Name": {}}},
+        {"policy_presets": ["hidden"]},
+    ):
+        with pytest.raises(ValueError, match="invalid_policy_preset"):
+            service(updates=bad)
+
+
+def test_policy_preset_cannot_expand_deployment_policy(service):
+    s = service(
+        policy=NO_PLANNER_METADATA,
+        updates={"policy_presets": PRESETS},
+        preset="full",
+    )
+    assert s.capabilities_public()["policy_preset"]["name"] == "full"
+    assert s.capabilities_public()["metadata_documents"] == []
+    for name in ("structure", "rules"):
+        with pytest.raises(PermissionError):
+            s.metadata(None, [name], "planner")
+    assert s.metadata(None, ["structure", "rules"], "worker")
+
+
+def test_policy_preset_overrides_scope_and_policy_file(service):
+    s = service(updates={"policy_presets": PRESETS})
+    root = s.project.root
+    narrow = root / "preset-policy.cedar"
+    narrow.write_text(
+        (root / s.config["policy"]).read_text() + NO_PLANNER_METADATA
+    )
+    presets = {
+        **PRESETS,
+        "q1": {
+            "metadata_selection": ["structure", "rules"],
+            "policy": narrow.name,
+            "query_scope": {"start": "2026-01-05", "end": "2026-01-12"},
+        },
+    }
+    s = service(updates={"policy_presets": presets}, preset="q1")
+    assert s.project.effective_range(Query(grain="total")) == {
+        "start": "2026-01-05",
+        "end": "2026-01-12",
+    }
+    assert s.capabilities_public()["metadata_documents"] == []
+    assert narrow in s.project.paths
+    narrow.write_text(narrow.read_text() + "\n")
+    with pytest.raises(ValueError, match="context_changed"):
+        s.capabilities_public()
+    with pytest.raises(Exception):
+        service(
+            updates={"policy_presets": {"out": {"policy": "../outside.cedar"}}},
+            preset="out",
+        )
+
+
+def test_http_transport_requires_loopback_and_local_token(service):
+    from wren.agent_service import http_server  # noqa: PLC0415
+
+    s = service(updates={"policy_presets": PRESETS}, preset="structure")
+    with pytest.raises(ValueError, match="local_token_required"):
+        http_server(build_mcp(s), "127.0.0.1", 0, "")
+    with pytest.raises(ValueError, match="loopback_only"):
+        http_server(build_mcp(s), "0.0.0.0", 0, "secret")
+
+
+def test_http_transport_serves_capabilities_behind_token(service):
+    import threading  # noqa: PLC0415
+
+    import httpx  # noqa: PLC0415
+    from mcp import ClientSession  # noqa: PLC0415
+    from mcp.client.streamable_http import streamablehttp_client  # noqa: PLC0415
+
+    from wren.agent_service import http_server  # noqa: PLC0415
+
+    s = service(
+        selection=["structure", "rules"],
+        updates={"policy_presets": PRESETS, "default_preset": "hidden"},
+        preset="structure",
+    )
+    server, sock = http_server(build_mcp(s), "127.0.0.1", 0, "local-secret")
+    port = sock.getsockname()[1]
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]})
+    thread.start()
+    url = f"http://127.0.0.1:{port}/mcp"
+    try:
+        probe = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        headers = {"Accept": "application/json, text/event-stream"}
+        assert httpx.post(url, json=probe, headers=headers).status_code == 401
+        wrong = {**headers, "Authorization": "Bearer other"}
+        assert httpx.post(url, json=probe, headers=wrong).status_code == 401
+
+        async def call():
+            auth = {"Authorization": "Bearer local-secret"}
+            async with streamablehttp_client(url, headers=auth) as (r, w, _):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    names = {t.name for t in (await session.list_tools()).tools}
+                    out = await session.call_tool("capabilities", {})
+                    return names, json.loads(out.content[0].text)
+
+        names, public = asyncio.run(call())
+        assert "capabilities" in names and "ask_data" not in names
+        assert public["policy_preset"] == {
+            "name": "structure",
+            "available": ["full", "hidden", "rules", "structure"],
+        }
+        assert [d["id"] for d in public["metadata_documents"]] == ["structure"]
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+    assert not thread.is_alive()
