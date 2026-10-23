@@ -658,3 +658,17 @@ def test_http_transport_serves_capabilities_behind_token(service):
         server.should_exit = True
         thread.join(timeout=10)
     assert not thread.is_alive()
+
+
+def test_audit_path_streams_json_lines_before_shutdown(service, tmp_path):
+    sink = tmp_path / "audit.jsonl"
+    s = service(selection=["structure"], updates={"audit_path": str(sink)})
+    assert s.metadata(None, ["structure"], "planner")
+    lines = [json.loads(x) for x in sink.read_text().splitlines()]
+    assert any(e.get("event") == "metadata_read" for e in lines)
+    assert any(e.get("action") == "receive_metadata" and e.get("allowed") is True for e in lines)
+    with pytest.raises(FileExistsError):
+        service(updates={"audit_path": str(sink)})
+    s.shutdown()
+    assert s.audit_sink is None
+    assert [json.loads(x) for x in sink.read_text().splitlines()] == lines

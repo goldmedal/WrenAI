@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -155,11 +156,25 @@ class Service:
         )
         self.sessions = {}
         self.audit = []
+        self.audit_sink = None
         self.capabilities = {c["id"]: c for c in profile["capabilities"]}
         self.caller = config["caller"]
         self.pid = config["project_id"]
         self.lock = threading.RLock()
         self.sql = AdHocSQL(project) if config.get("adhoc") else None
+
+    def record(self, entry: dict):
+        """Keep an audit entry in memory and, when the operator set audit_path,
+        append it as one JSON line at once so a killed process still leaves a trail."""
+        self.audit.append(entry)
+        if len(self.audit) > 4096:
+            del self.audit[:1024]
+        if self.audit_sink is not None:
+            try:
+                self.audit_sink.write(json.dumps(entry, default=str) + "\n")
+                self.audit_sink.flush()
+            except Exception:
+                pass
 
     def allowed(self, session, action, kind, name, role="planner", columns=None):
         self.project.current()
@@ -180,7 +195,7 @@ class Service:
                 "recipient": self.caller if action == "receive_answer" else "",
             },
         )
-        self.audit.append(
+        self.record(
             {
                 "action": action,
                 "kind": kind,
@@ -189,8 +204,6 @@ class Service:
                 "allowed": value,
             }
         )
-        if len(self.audit) > 4096:
-            del self.audit[:1024]
         return value is True
 
     def require(self, *args, **kwargs):
@@ -300,7 +313,7 @@ class Service:
                 raise PermissionError("denied")
             self.require(s, "receive_metadata", d["kind"], name, role)
             output.append({"id": name, "kind": d["kind"], "content": d["content"]})
-        self.audit.append(
+        self.record(
             {"event": "metadata_read", "role": role, "documents": list(documents)}
         )
         return output
@@ -388,7 +401,7 @@ class Service:
         s["active"] = owner
 
         def callback(name, args):
-            self.audit.append(
+            self.record(
                 {
                     "event": "private_tool",
                     "name": name,
@@ -420,7 +433,7 @@ class Service:
                 if direct is not None or not self.sql or not capability.get("sql"):
                     raise PermissionError("denied")
                 value = PrivateSQL.model_validate(args)
-                self.audit.append(
+                self.record(
                     {
                         "event": "private_sql_attempt",
                         "sql": value.sql,
@@ -456,7 +469,7 @@ class Service:
                     "internal": internal,
                     "sources": prepared[1],
                 }
-                self.audit.append(
+                self.record(
                     {
                         "event": "private_sql",
                         "sql": prepared[0],
@@ -508,7 +521,7 @@ class Service:
                 "conditions": result["scope"],
                 "internal": internal,
             }
-            self.audit.append(
+            self.record(
                 {
                     "query": q.model_dump(),
                     "result": result,
@@ -895,6 +908,11 @@ def create_service(
         },
     )
     service = Service(project, config, profile, ipc, mode)
+    if config.get("audit_path"):
+        # Explicit local operator sink (JSON lines); never exposed as a resource or tool.
+        audit_path = Path(config["audit_path"]).expanduser()
+        fd = os.open(audit_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        service.audit_sink = os.fdopen(fd, "w")
 
     stopped = False
 
@@ -909,17 +927,14 @@ def create_service(
         finally:
             try:
                 ipc.close()
-                if config.get("audit_path"):
-                    audit_path = Path(config["audit_path"]).expanduser()
-                    # Explicit local operator sink; never exposed as a resource or tool.
-                    fd = os.open(
-                        audit_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-                    )
-                    with os.fdopen(fd, "w") as audit:
-                        json.dump(service.audit, audit)
             finally:
-                if hasattr(engine, "close"):
-                    engine.close()
+                try:
+                    if service.audit_sink is not None:
+                        service.audit_sink.close()
+                        service.audit_sink = None
+                finally:
+                    if hasattr(engine, "close"):
+                        engine.close()
 
     service.shutdown = close
     return service
@@ -989,6 +1004,9 @@ def serve_http(mcp: FastMCP, host: str, port: int):
 def launch(*args, transport: str = "stdio", host="127.0.0.1", port=0, **kwargs):
     service = create_service(*args, **kwargs)
     atexit.register(service.shutdown)
+    # A client that stops the server with SIGTERM still gets the normal shutdown
+    # (sessions closed, runtime stopped, audit sink flushed).
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
         if transport == "http":
             serve_http(build_mcp(service), host, port)
