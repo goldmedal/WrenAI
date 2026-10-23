@@ -82,7 +82,10 @@ class RuntimeIPC:
                 else:
                     future = self.pending.pop(m["id"])
                     if m.get("error"):
-                        future.set_exception(RuntimeError("runtime_unavailable"))
+                        failure = RuntimeError("runtime_unavailable")
+                        # Operator diagnostics only: never forwarded to a caller.
+                        failure.detail = str(m["error"])[:200]
+                        future.set_exception(failure)
                     else:
                         future.set_result(m["value"])
         except Exception:

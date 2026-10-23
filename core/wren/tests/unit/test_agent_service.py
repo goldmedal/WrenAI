@@ -672,3 +672,36 @@ def test_audit_path_streams_json_lines_before_shutdown(service, tmp_path):
     s.shutdown()
     assert s.audit_sink is None
     assert [json.loads(x) for x in sink.read_text().splitlines()] == lines
+
+
+def test_audit_records_task_outcomes(service, monkeypatch, tmp_path):
+    sink = tmp_path / "outcomes.jsonl"
+    s = service(updates={"audit_path": str(sink)})
+    r = request(s)
+    execute(s, r)
+    events = [json.loads(x) for x in sink.read_text().splitlines()]
+    done = [e for e in events if e.get("event") == "task_completed"]
+    assert done and done[-1]["status"] == "completed"
+
+    install_invoker(monkeypatch, s, lambda callback: {"value": 9999, "text": "x"})
+    bad = ask_request(s)
+    with pytest.raises(ValueError, match="invalid_evidence"):
+        s.execute(bad)
+    events = [json.loads(x) for x in sink.read_text().splitlines()]
+    failed = [e for e in events if e.get("event") == "task_failed"]
+    assert failed[-1]["reason"] == "invalid_evidence"
+    assert failed[-1]["raw_keys"] == ["text", "value"]
+    assert "9999" not in sink.read_text()
+
+    def boom(callback):
+        err = RuntimeError("runtime_unavailable")
+        err.detail = "provider_http 429"
+        raise err
+
+    install_invoker(monkeypatch, s, boom)
+    with pytest.raises(RuntimeError, match="runtime_unavailable"):
+        s.execute(ask_request(s))
+    events = [json.loads(x) for x in sink.read_text().splitlines()]
+    failed = [e for e in events if e.get("event") == "task_failed"]
+    assert failed[-1]["reason"] == "runtime_unavailable"
+    assert failed[-1]["detail"] == "provider_http 429"

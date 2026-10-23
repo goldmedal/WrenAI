@@ -566,6 +566,18 @@ class Service:
                     or set(raw) != {"evidence"}
                     or raw["evidence"] not in ledger
                 ):
+                    self.record(
+                        {
+                            "event": "task_failed",
+                            "request_id": request.request_id,
+                            "reason": "invalid_evidence",
+                            # Shape only: the worker's text never enters the audit.
+                            "raw_type": type(raw).__name__,
+                            "raw_keys": sorted(raw)[:8]
+                            if isinstance(raw, dict)
+                            else None,
+                        }
+                    )
                     raise ValueError("invalid_evidence")
                 saved = ledger[raw["evidence"]]
                 for model, columns in saved.get("sources", {}).items():
@@ -613,8 +625,24 @@ class Service:
                     s["pending"][continuation["ref"]]["consumed"] = True
                 s["revision"] = revision
                 s["cache"][request.request_id] = (payload, response)
+                self.record(
+                    {
+                        "event": "task_completed",
+                        "request_id": request.request_id,
+                        "status": response["status"],
+                    }
+                )
                 return response
-        except Exception:
+        except Exception as exc:
+            if not (isinstance(exc, ValueError) and str(exc) == "invalid_evidence"):
+                self.record(
+                    {
+                        "event": "task_failed",
+                        "request_id": request.request_id,
+                        "reason": "denied" if policy_denied else str(exc)[:80],
+                        "detail": getattr(exc, "detail", None),
+                    }
+                )
             if policy_denied:
                 raise PermissionError("denied") from None
             raise
