@@ -1,0 +1,10 @@
+{
+  "name": "wren-pi-hybrid-example",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19" },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 tests/adapter.test.mjs tests/weekly.test.mjs tests/acceptance.test.mjs tests/untrusted.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 tests/integration.test.mjs"
+  }
+}

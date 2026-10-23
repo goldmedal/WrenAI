@@ -1,0 +1,31 @@
+version: wren-agent-capabilities/1
+entry: analyze_data
+capabilities:
+- id: orders
+  description: Count all orders, weekly reports and date-range follow-ups. Monday
+    weeks, UTC.
+  rules: false
+  inputs:
+  - question
+  - optional reply_to result reference
+  outputs:
+  - total or weekly count report
+  - session result and evidence references
+  limits:
+  - read-only aggregation
+  - UTC Monday-start weeks
+  - no raw rows or SQL disclosure
+- id: targets
+  description: Evaluate weekly order targets using project business rules or an explicit
+    user target.
+  rules: true
+  inputs:
+  - question
+  - optional reply_to result reference
+  outputs:
+  - weekly counts and target status
+  - clarification when no applicable rule or user threshold
+  limits:
+  - read-only aggregation
+  - UTC Monday-start weeks
+  - no raw rows or SQL disclosure

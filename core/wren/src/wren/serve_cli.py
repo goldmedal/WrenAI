@@ -149,6 +149,24 @@ def serve_mcp(
             help="Transpile-only mode: disable run_sql, dry_run, and query_cube.",
         ),
     ] = False,
+    service_config: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--service-config",
+            help="Enable governed stdio mode with this trusted deployment configuration.",
+        ),
+    ] = None,
+    agent_profile: Annotated[
+        Optional[Path],
+        typer.Option("--agent-profile", help="Capability profile for governed mode."),
+    ] = None,
+    runtime: Annotated[
+        Optional[Path],
+        typer.Option("--runtime", help="Installed Warble private service entry."),
+    ] = None,
+    warble: Annotated[
+        str, typer.Option("--warble", help="Warble compiler executable.")
+    ] = "warble",
     quiet: Annotated[
         bool,
         typer.Option(
@@ -162,6 +180,35 @@ def serve_mcp(
 
     Backed by an in-process WrenEngine — no ibis-server, no HTTP engine.
     """
+    if service_config is not None:
+        if (
+            transport != "stdio"
+            or allow_write
+            or no_connect
+            or agent_profile is None
+            or runtime is None
+        ):
+            typer.echo(
+                "Governed mode requires stdio, --agent-profile and --runtime; writes and no-connect are unsupported.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        from wren.agent_service import launch  # noqa: PLC0415
+
+        try:
+            launch(
+                project, agent_profile, service_config, runtime, warble, "mcp", profile
+            )
+        except Exception:
+            typer.echo(
+                "Governed service startup failed. Check profile, project, runtime and deployment configuration.",
+                err=True,
+            )
+            raise typer.Exit(1) from None
+        return
+    if agent_profile is not None or runtime is not None:
+        typer.echo("--agent-profile and --runtime require --service-config.", err=True)
+        raise typer.Exit(1)
     if transport not in {"stdio", "http"}:
         typer.echo(
             f"Error: unsupported --transport '{transport}'. Use stdio or http.",
@@ -256,3 +303,42 @@ def serve_mcp(
             no_connect=no_connect,
         )
     run_server(ctx, transport=transport, host=host, port=port)
+
+
+@serve_app.command("agent")
+def serve_agent(
+    agent_profile: Annotated[
+        Path, typer.Option("--agent-profile", help="Warble profile directory.")
+    ],
+    service_config: Annotated[
+        Path,
+        typer.Option(
+            "--service-config", help="Trusted service deployment configuration."
+        ),
+    ],
+    runtime: Annotated[
+        Path, typer.Option("--runtime", help="Installed Warble private service entry.")
+    ],
+    project: Annotated[Optional[Path], typer.Option("--project")] = None,
+    profile: Annotated[
+        Optional[str], typer.Option("--profile", help="Data connection profile.")
+    ] = None,
+    warble: Annotated[str, typer.Option("--warble")] = "warble",
+    transport: Annotated[str, typer.Option("--transport")] = "stdio",
+) -> None:
+    """Serve one project-bound Warble profile through a private pi runtime."""
+    if transport != "stdio":
+        typer.echo("Agent service currently supports local stdio only.", err=True)
+        raise typer.Exit(1)
+    from wren.agent_service import launch  # noqa: PLC0415
+
+    try:
+        launch(
+            project, agent_profile, service_config, runtime, warble, "agent", profile
+        )
+    except Exception:
+        typer.echo(
+            "Agent startup failed. Check profile, project, runtime, model credentials and deployment configuration.",
+            err=True,
+        )
+        raise typer.Exit(1) from None

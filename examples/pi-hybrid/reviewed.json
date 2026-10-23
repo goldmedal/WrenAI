@@ -1,0 +1,107 @@
+{
+  "manifest": {
+    "catalog": "wren",
+    "schema": "public",
+    "models": [
+      {
+        "cached": false,
+        "columns": [
+          {
+            "isCalculated": false,
+            "isPrimaryKey": true,
+            "name": "id",
+            "notNull": true,
+            "properties": {},
+            "type": "INTEGER"
+          },
+          {
+            "isCalculated": false,
+            "name": "name",
+            "notNull": false,
+            "properties": {},
+            "type": "VARCHAR"
+          }
+        ],
+        "name": "customers",
+        "primaryKey": "id",
+        "properties": {
+          "description": "One row per customer. name may be NULL for guest checkouts."
+        },
+        "tableReference": {
+          "catalog": "jaffle",
+          "schema": "main",
+          "table": "customers"
+        }
+      },
+      {
+        "name": "orders",
+        "properties": {
+          "description": "One row per customer order, with the order amount in USD."
+        },
+        "columns": [
+          {
+            "name": "id",
+            "type": "INTEGER",
+            "isCalculated": false,
+            "notNull": true,
+            "isPrimaryKey": true,
+            "properties": {}
+          },
+          {
+            "name": "customer_id",
+            "type": "INTEGER",
+            "isCalculated": false,
+            "notNull": false,
+            "properties": {}
+          },
+          {
+            "name": "order_date",
+            "type": "TIMESTAMP",
+            "isCalculated": false,
+            "notNull": false,
+            "properties": {}
+          },
+          {
+            "name": "amount",
+            "type": "DOUBLE",
+            "isCalculated": false,
+            "notNull": false,
+            "properties": {}
+          }
+        ],
+        "primaryKey": "id",
+        "cached": false,
+        "refSql": "SELECT id, customer_id, order_date, amount FROM jaffle.main.raw_orders"
+      }
+    ],
+    "relationships": [
+      {
+        "name": "orders_customer",
+        "models": [
+          "orders",
+          "customers"
+        ],
+        "joinType": "MANY_TO_ONE",
+        "condition": "orders.customer_id = customers.id"
+      }
+    ],
+    "views": [],
+    "cubes": [],
+    "dataSource": "local_file",
+    "layoutVersion": 3
+  },
+  "rulesSha256": "63b4c43e90bfc79438f2299df789fad90838b81f2db70df1dc26b45af542317f",
+  "sqlSha256": "c60da6b647c952df82a7fb9a508f2ba0f9cbd815769a962a6056a754be1cf6c6",
+  "projectPaths": [
+    "knowledge/knowledge.yml",
+    "knowledge/rules/business-rules.md",
+    "knowledge/rules/weekly-target.md",
+    "knowledge/sql/total-revenue.md",
+    "models/customers/metadata.yml",
+    "models/orders/metadata.yml",
+    "models/orders/ref_sql.sql",
+    "relationships.yml",
+    "wren_project.yml"
+  ],
+  "targetRulesSha256": "32b9bf11270d4d885c87bf443f4914b8339bec60da845c461ce9212f090ff445"
+}

@@ -1,0 +1,30 @@
+name: Standalone pi hybrid fixture
+on:
+  pull_request:
+    paths:
+      - 'examples/pi-hybrid/**'
+      - 'examples/v5-jaffle/**'
+      - 'core/wren/**'
+      - '.github/workflows/pi-hybrid-example.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v6
+      - name: Install isolated Wren dependencies
+        run: uv sync --project core/wren --locked --python 3.12
+      - name: Check fixture helper
+        run: |
+          core/wren/.venv/bin/ruff check examples/pi-hybrid
+          core/wren/.venv/bin/ruff format --check examples/pi-hybrid
+          for file in examples/pi-hybrid/*.mjs examples/pi-hybrid/tests/*.mjs; do node --check "$file"; done
+      - name: Test classifier, evidence, governed CLI and cleanup without models
+        run: npm test --prefix examples/pi-hybrid

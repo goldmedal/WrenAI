@@ -1,0 +1,19 @@
+version: wren-agent-capabilities/1
+entry: analyze_data
+capabilities:
+- id: orders
+  description: Count orders and produce weekly counts or date-range follow-ups only.
+    This deployment does not offer project target evaluation, business-rule comparisons
+    or target status. Do not select this capability for those questions.
+  rules: false
+  inputs:
+  - question
+  - optional reply_to result reference
+  outputs:
+  - total or weekly count report
+  - session result and evidence references
+  limits:
+  - Target evaluation is unsupported; do not delegate target questions through orders.
+  - read-only aggregation
+  - UTC Monday-start weeks
+  - no raw rows or SQL disclosure

@@ -1,0 +1,7 @@
+profile: hybrid-chat
+context:
+  project: binding.yml
+components:
+- use: planner
+- use: data_worker
+  entrypoint: false
