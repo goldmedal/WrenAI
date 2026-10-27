@@ -430,6 +430,26 @@ class Service:
                 if set(args) != {"documents"}:
                     raise ValueError("invalid_request")
                 return self.metadata(s, args["documents"], "worker")
+            if name == "describe_data":
+                if args not in (None, {}):
+                    raise ValueError("invalid_request")
+                only = set(self.config["adhoc"]["models"]) if self.sql else None
+                result = {"kind": "text", "text": self.project.describe(only)}
+                token = uid()
+                ledger[token] = {
+                    "result": result,
+                    "conditions": {},
+                    "internal": {"describe_data": True},
+                    "sources": {},
+                }
+                self.record(
+                    {
+                        "event": "private_describe",
+                        "request_id": request.request_id,
+                        "chars": len(result["text"]),
+                    }
+                )
+                return {"evidence": token, "result": result}
             if name == "run_sql":
                 if direct is not None or not self.sql or not capability.get("sql"):
                     raise PermissionError("denied")
@@ -584,6 +604,11 @@ class Service:
                 for model, columns in saved.get("sources", {}).items():
                     self.require(
                         s, "receive_answer", "answer.sql_result", model, columns=columns
+                    )
+                if saved.get("result", {}).get("kind") == "text":
+                    # Host-generated prose has its own disclosure gate.
+                    self.require(
+                        s, "receive_answer", "answer.description", request.capability
                     )
                 self.require(s, "receive_answer", "answer.approved", request.capability)
                 revision = s["revision"] + 1
@@ -935,6 +960,17 @@ def create_service(
             "capability": "sql_execution:read_only",
             "description": "Generate and execute one read-only DuckDB SQL query over bound semantic models. Read context first. Returns a private result plus evidence token. Only return the exact evidence token object as your final answer; never SQL, prose, aliases or raw metadata. Tables/columns and result disclosure are independently authorized. No external readers or writes. At most 100 rows, 20 columns; use LIMIT for rankings.",
             "parameters": PrivateSQL.model_json_schema(),
+        },
+        {
+            "name": "describe_data",
+            "action": "describe_data",
+            "capability": "context_read",
+            "description": "Ask the host for a business-level summary of the data available for analysis (areas and what they cover; no table, column or rule text). Use it for questions about what data exists. Return the evidence token unchanged.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
         },
         {
             "name": "clarify",

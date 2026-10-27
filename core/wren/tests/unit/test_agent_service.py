@@ -747,3 +747,58 @@ def test_invalid_evidence_is_a_worker_reason_and_denied_stays_bare(service, monk
     }
     denied = asyncio.run(safe(s.metadata, None, ["rules"], "planner"))
     assert denied == {"status": "denied"}
+
+
+def test_describe_data_discloses_a_host_generated_summary(service, monkeypatch):
+    s = service()
+    (s.project.root / "target/mdl.json").write_text(
+        json.dumps(
+            {
+                **json.loads((s.project.root / "target/mdl.json").read_text()),
+                "models": [
+                    {
+                        "name": "orders",
+                        "columns": [],
+                        "properties": {
+                            "description": "Customer orders. One row per order header. Migrated copies carry legacy_ord_id."
+                        },
+                    },
+                    {"name": "status_codes", "columns": [], "properties": {}},
+                ],
+            }
+        )
+    )
+    s.project.version = s.project.fingerprint()
+    seen = {}
+
+    def invoke(callback):
+        out = callback("describe_data", {})
+        seen.update(out)
+        return {"evidence": out["evidence"]}
+
+    install_invoker(monkeypatch, s, invoke)
+    r = ask_request(s)
+    done = s.execute(r)
+    assert done["status"] == "completed"
+    text = done["result"]["text"]
+    assert done["result"]["kind"] == "text" and seen["result"] == done["result"]
+    assert "orders: Customer orders. One row per order header." in text
+    assert "legacy_ord_id" not in text and "- status codes" in text
+    ev = s.evidence(Ref(session_id=r.session_id, evidence_ref=done["evidence_ref"]))
+    assert ev["result"]["kind"] == "text"
+    with pytest.raises(ValueError, match="invalid_request"):
+        install_invoker(monkeypatch, s, lambda cb: cb("describe_data", {"x": 1}))
+        s.execute(Ask(session_id=r.session_id, request_id="d2", expected_revision=done["revision"], capability="orders", question="what data"))
+
+
+def test_describe_data_has_its_own_disclosure_gate(service, monkeypatch):
+    s = service(
+        policy='forbid(principal, action == Service::Action::"receive_answer", resource) when { resource.kind == "answer.description" };'
+    )
+    install_invoker(monkeypatch, s, lambda cb: {"evidence": cb("describe_data", {})["evidence"]})
+    with pytest.raises(PermissionError):
+        s.execute(ask_request(s))
+    s2 = service(policy='forbid(principal, action == Service::Action::"invoke_tool", resource) when { resource.name == "describe_data" };')
+    install_invoker(monkeypatch, s2, lambda cb: {"evidence": cb("describe_data", {})["evidence"]})
+    with pytest.raises(PermissionError):
+        s2.execute(ask_request(s2))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import date
 from pathlib import Path
@@ -72,6 +73,28 @@ class Project:
             self.paths.append(path)
             self.documents[d["id"]] = {**d, "content": path.read_text()}
         self.version = self.fingerprint()
+
+    def describe(self, only=None):
+        """Host-generated, caller-safe summary of the data: one line per model,
+        its business description with every sentence that names an identifier
+        (snake_case or dotted) dropped. No columns, types, relationships or
+        physical tables. The private model can request it but never rewrite it."""
+        manifest = json.loads((self.root / "target/mdl.json").read_text())
+        lines = [
+            "Data available for analysis (business summary; technical names omitted):"
+        ]
+        for m in manifest.get("models", []):
+            if only is not None and m["name"] not in only:
+                continue
+            label = m["name"].replace("_", " ")
+            raw = ((m.get("properties") or {}).get("description") or "").strip()
+            kept = [
+                s.strip()
+                for s in re.split(r"(?<=[.!?])\s+", raw)
+                if s.strip() and not re.search(r"\b\w+(?:_\w+|\.\w+)\b", s)
+            ]
+            lines.append(f"- {label}: {' '.join(kept)}" if kept else f"- {label}")
+        return "\n".join(lines)
 
     def fingerprint(self):
         digest = hashlib.sha256()
