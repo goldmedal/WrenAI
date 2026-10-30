@@ -107,7 +107,8 @@ class RuntimeIPC:
             self.callbacks[ident] = callback
         try:
             self._send({"id": ident, "op": op, **values})
-            return future.result(timeout=100)
+            # Operator-set cap on one runtime call (default 100 s); the runtime's own deadlines sit below it.
+            return future.result(timeout=float(os.environ.get("WREN_IPC_CALL_TIMEOUT_S", "100")))
         finally:
             self.callbacks.pop(ident, None)
 
