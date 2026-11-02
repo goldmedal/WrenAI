@@ -9,7 +9,13 @@ from sqlglot import exp, parse_one
 from wren.context import build_json
 from wren.declared_default_check import DefaultsChecker
 from wren.declared_default_fx import evaluate
-from wren.declared_defaults import RequireRateJoin, read_declared_defaults
+from wren.declared_default_status import fold_all
+from wren.declared_defaults import (
+    ColumnRef,
+    RequireRateJoin,
+    SaleStatuses,
+    read_declared_defaults,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -307,3 +313,53 @@ def test_a_checker_fault_is_no_verdict_not_a_refusal(strict, monkeypatch):
 
     monkeypatch.setattr(fx._Rate, "judge", boom)
     assert evaluate(strict, parse_one(INNER_ASOF, dialect="duckdb")) is None
+
+
+# -- two sale_statuses rules on different columns --------------------------------------------
+
+
+def status_rule(rule_id, column, values, domain):
+    return SaleStatuses(
+        id=rule_id,
+        column=ColumnRef("orders", column),
+        values=values,
+        domain=domain,
+        overridable_by_caller=True,
+        aggregated_only=False,
+    )
+
+
+def two_status_rules():
+    manifest, _ = declared()
+    rules = [
+        status_rule("keep-paid-shipped", "status", ("paid", "shipped"), ("paid", "shipped", "cancelled")),
+        status_rule("keep-usd-eur", "currency", ("USD", "EUR"), ("USD", "EUR", "GBP")),
+    ]
+    return DefaultsChecker(rules, manifest, "duckdb")
+
+
+NARROW_BOTH = "SELECT COUNT(*) FROM orders WHERE status = 'paid' AND currency = 'USD'"
+
+
+def test_a_confirmed_scope_applies_only_to_the_rule_it_was_given_for():
+    checker = two_status_rules()
+    ast = parse_one(NARROW_BOTH, dialect="duckdb")
+    plain = evaluate(checker, ast)
+    assert list(plain.violations) == ["keep-paid-shipped:subset", "keep-usd-eur:subset"]
+    scoped = evaluate(checker, ast, {"keep-paid-shipped": fold_all(["paid"])})
+    assert list(scoped.violations) == ["keep-usd-eur:subset"]
+    assert scoped.checks["keep-paid-shipped"]["result"] == "satisfied_by_caller_scope"
+    assert scoped.checks["keep-usd-eur"]["result"] == "violated"
+
+
+def test_a_scope_for_one_rule_does_not_excuse_another_that_would_otherwise_pass():
+    checker = two_status_rules()
+    ast = parse_one(
+        "SELECT COUNT(*) FROM orders WHERE status = 'paid' AND currency IN ('USD', 'EUR')",
+        dialect="duckdb",
+    )
+    scoped = evaluate(checker, ast, {"keep-usd-eur": fold_all(["USD"])})
+    assert list(scoped.violations) == ["keep-paid-shipped:subset", "keep-usd-eur:superset"]
+    kept = evaluate(checker, ast, {"keep-paid-shipped": fold_all(["paid"])})
+    assert list(kept.violations) == []
+    assert kept.checks["keep-usd-eur"]["result"] == "satisfied"

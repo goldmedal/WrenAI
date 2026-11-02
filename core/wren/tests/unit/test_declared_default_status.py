@@ -50,7 +50,7 @@ def outcome(sql: str, target=None, rule: SaleStatuses = RULE) -> str:
 
 def retained(sql: str) -> list[list[str]]:
     status = _Status(statement(sql), CHECKER, RULE, frozenset())
-    return [display(RULE, kept) for kept in status.retained().values()]
+    return [display(RULE, kept) for kept, _ in status.retained().values()]
 
 
 def count(where: str) -> str:
@@ -103,7 +103,6 @@ SUBSET = [
     "status IN ('paid', 'shipped') AND status <> 'paid'",
     "status = 'paid' AND order_total > 5",
     "status IN ('paid', 'refunded')",
-    "status IS NULL",
     "status = 'refunded'",
 ]
 
@@ -118,6 +117,7 @@ SUPERSET = [
     "status <> 'cancelled'",
     "status IN ('paid', 'shipped', 'pending')",
     "status IS NOT NULL",
+    "status IS NULL",
     "status = 'paid' OR order_total > 5",
     "status IN ('paid', 'shipped') OR order_total > 5",
     "NOT (status = 'cancelled' AND order_total > 5)",
@@ -303,3 +303,134 @@ def test_the_checker_reports_a_violated_status_rule_and_no_verdict_for_an_unread
     assert CHECKER.check(bad) == ["paid-and-shipped"]
     unreadable = parse_one(count("status = currency"), dialect="duckdb")
     assert CHECKER.check(unreadable) is None
+
+
+# -- a row whose status is NULL ------------------------------------------------------------------
+
+NULL_RETAINED = [
+    "status IN ('paid', 'shipped') OR status IS NULL",
+    "status = 'paid' OR status = 'shipped' OR status IS NULL",
+    "status IS NULL OR status IN ('paid', 'shipped')",
+    "(status IN ('paid', 'shipped') OR status IS NULL) AND order_total > 5",
+    "NOT (status IS NOT NULL AND status NOT IN ('paid', 'shipped'))",
+    "status IS NULL",
+    "NOT (NOT (status IS NULL)) OR status IN ('paid', 'shipped')",
+]
+
+
+@pytest.mark.parametrize("where", NULL_RETAINED)
+def test_a_filter_that_can_keep_a_null_status_is_not_satisfied(where):
+    assert outcome(count(where)) == "superset"
+
+
+NULL_EXCLUDED = [
+    "status IS NOT NULL AND status IN ('paid', 'shipped')",
+    "NOT (status IS NULL) AND status IN ('paid', 'shipped')",
+    "NOT (status IS NULL OR status NOT IN ('paid', 'shipped'))",
+    "status IN ('paid', 'shipped') AND status IS NOT NULL AND order_total > 5",
+    "status NOT IN ('cancelled', 'pending')",
+    "status <> 'cancelled' AND status <> 'pending'",
+    "NOT status IN ('cancelled', 'pending')",
+]
+
+
+@pytest.mark.parametrize("where", NULL_EXCLUDED)
+def test_a_filter_that_cannot_keep_a_null_status_is_still_satisfied(where):
+    assert outcome(count(where)) == "satisfied"
+
+
+def test_null_is_not_added_to_the_domain_so_not_in_does_not_keep_it():
+    assert retained(count("status NOT IN ('cancelled', 'pending')")) == [
+        ["paid", "shipped"]
+    ]
+    assert retained(count("status IS NULL")) == [[]]
+
+
+# -- predicates in HAVING --------------------------------------------------------------------
+
+
+def test_a_status_predicate_in_having_is_judged_like_one_in_where():
+    grouped = "SELECT status, COUNT(*) FROM orders GROUP BY status HAVING {having}"
+    assert (
+        outcome(grouped.format(having="status IN ('paid', 'shipped')")) == "satisfied"
+    )
+    assert outcome(grouped.format(having="status = 'paid'")) == "subset"
+    assert outcome(grouped.format(having="status <> 'cancelled'")) == "superset"
+
+
+def test_a_having_on_an_aggregate_does_not_filter_the_status():
+    grouped = "SELECT status, COUNT(*) FROM orders GROUP BY status HAVING {having}"
+    assert outcome(grouped.format(having="COUNT(*) > 5")) == "missing"
+    assert (
+        outcome(grouped.format(having="COUNT(*) > 5 AND status IN ('paid', 'shipped')"))
+        == "satisfied"
+    )
+
+
+# -- filters in the ON clause of an outer join ------------------------------------------------
+
+PAID = "o.status IN ('paid', 'shipped')"
+
+
+def joined(kind: str, on: str, where: str = "") -> str:
+    left, right = (
+        ("customers c", "orders o") if kind == "RIGHT" else ("orders o", "customers c")
+    )
+    sql = f"SELECT SUM(o.order_total) FROM {left} {kind} JOIN {right} ON c.id = o.customer_id AND {on}"
+    return f"{sql} WHERE {where}" if where else sql
+
+
+@pytest.mark.parametrize("kind", ["LEFT", "LEFT OUTER", "FULL", "RIGHT"])
+def test_a_status_filter_on_the_preserved_side_in_an_outer_join_on_filters_nothing(
+    kind,
+):
+    assert outcome(joined(kind, PAID)) == "missing"
+
+
+@pytest.mark.parametrize("kind", ["LEFT", "FULL", "RIGHT"])
+def test_the_same_predicate_in_where_is_a_filter(kind):
+    assert outcome(joined(kind, "TRUE", PAID)) == "satisfied"
+
+
+def test_a_status_filter_on_the_nullable_side_in_an_outer_join_on_still_counts():
+    on_nullable = (
+        "SELECT SUM(o.order_total) FROM customers c "
+        f"LEFT JOIN orders o ON o.customer_id = c.id AND {PAID}"
+    )
+    assert outcome(on_nullable) == "satisfied"
+    assert outcome(on_nullable.replace(PAID, "o.status = 'paid'")) == "subset"
+    right = (
+        "SELECT SUM(o.order_total) FROM orders o "
+        f"RIGHT JOIN customers c ON o.customer_id = c.id AND {PAID}"
+    )
+    assert outcome(right) == "satisfied"
+
+
+def test_a_predicate_that_also_names_the_other_side_filters_neither():
+    mixed = (
+        "SELECT SUM(o.order_total) FROM customers c LEFT JOIN orders o "
+        "ON o.customer_id = c.id AND (o.status IN ('paid', 'shipped') OR c.is_test)"
+    )
+    assert outcome(mixed) == "missing"
+
+
+def test_a_status_filter_in_an_inner_join_on_still_counts():
+    sql = f"SELECT SUM(o.order_total) FROM customers c JOIN orders o ON o.customer_id = c.id AND {PAID}"
+    assert outcome(sql) == "satisfied"
+    assert (
+        outcome(sql.replace("customers c JOIN", "customers c INNER JOIN"))
+        == "satisfied"
+    )
+
+
+def test_a_later_inner_join_filter_on_a_preserved_side_counts():
+    sql = (
+        "SELECT SUM(o.order_total) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id "
+        f"JOIN payments p ON p.order_id = o.id AND {PAID}"
+    )
+    assert outcome(sql) == "satisfied"
+
+
+def test_a_semi_join_condition_filters_nothing():
+    sql = f"SELECT o.id FROM orders o LEFT SEMI JOIN customers c ON c.id = o.customer_id AND {PAID}"
+    assert outcome(sql) == "missing"

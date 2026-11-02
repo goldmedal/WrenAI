@@ -104,6 +104,7 @@ FORM_CODES = frozenset(
         "cube_not_a_table",
     }
 )
+MAX_JOINS = 4
 DUPLICATE_AGGREGATION = "duplicate_aggregation"
 RULE_VIOLATION = "rule_violation"
 NO_VERDICT = "no_verdict"
@@ -393,7 +394,7 @@ class AdHocSQL:
                 raise ValueError("complexity_limit")
             if any(w.args.get("recursive") for w in tree.find_all(exp.With)):
                 raise ValueError("recursive_query")
-            if len(list(tree.find_all(exp.Join))) > 4:
+            if len(list(tree.find_all(exp.Join))) > MAX_JOINS:
                 raise ValueError("join_limit")
             for t in tree.find_all(exp.Table):
                 if t.db or t.catalog or not isinstance(t.this, exp.Identifier):
@@ -403,6 +404,8 @@ class AdHocSQL:
             self._reject_cubes(tree)
             if sum(1 for _ in tree.walk()) > 1000:
                 raise ValueError("complexity_limit")
+            if len(list(tree.find_all(exp.Join))) > MAX_JOINS:
+                raise ValueError("join_limit")
             unqualified = tree.copy()
             tree = qualify(
                 tree,

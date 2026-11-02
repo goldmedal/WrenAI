@@ -89,6 +89,25 @@ def _boolean(node: exp.Expression) -> bool | None:
     return node.this if isinstance(node, exp.Boolean) else None
 
 
+def _restricts(join: exp.Join, conjunct: exp.Expression) -> bool:
+    """Whether ``conjunct`` of ``join``'s ON clause removes rows from the statement's result.
+
+    An outer join keeps every row of its preserved side whatever the ON clause says, so an ON
+    conjunct narrows only the nullable side's own rows. ``FULL`` keeps both sides, and a semi or
+    anti join does not return the right side at all, so none of their ON conjuncts is a filter.
+    """
+    side = (join.side or "").upper()
+    if not side:
+        return True
+    if side == "FULL" or (join.kind or "").upper() in {"SEMI", "ANTI"}:
+        return False
+    tables = {column.table for column in conjunct.find_all(exp.Column)}
+    if not tables or "" in tables:
+        return False
+    own = join.alias_or_name
+    return tables == {own} if side == "LEFT" else own not in tables
+
+
 class _Statement:
     """One qualified statement and the facts rules ask about it."""
 
@@ -99,16 +118,18 @@ class _Statement:
         self.scopes = scopes
         self._scope_of = {id(scope.expression): scope for scope in scopes}
         self._origins: dict[int, _Origin] = {}
-        roots: list[exp.Expression] = [w.this for w in ast.find_all(exp.Where)]
-        roots += [
-            on
+        filters: list[exp.Expression] = [w.this for w in ast.find_all(exp.Where)]
+        joins = [
+            (join, on)
             for join in ast.find_all(exp.Join)
             if (on := join.args.get("on")) is not None
         ]
-        roots += [h.this for h in ast.find_all(exp.Having)]
-        roots += [q.this for q in ast.find_all(exp.Qualify)]
-        self.roots = roots
-        self.conjuncts = [c for root in roots for c in _conjuncts(root)]
+        filters += [h.this for h in ast.find_all(exp.Having)]
+        filters += [q.this for q in ast.find_all(exp.Qualify)]
+        self.roots = [*filters, *(on for _, on in joins)]
+        self.conjuncts = [c for root in filters for c in _conjuncts(root)]
+        for join, on in joins:
+            self.conjuncts += [c for c in _conjuncts(on) if _restricts(join, c)]
         # A table is read when some scope's source is that stored table. A CTE
         # that shadows a model name is a Scope source, while the table inside the
         # CTE body is still a Table source, so shadowing cannot hide a read.

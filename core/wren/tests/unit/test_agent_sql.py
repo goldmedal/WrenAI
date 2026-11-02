@@ -1329,3 +1329,152 @@ def test_a_guarantee_covering_some_reads_of_the_model_leaves_the_others_to_the_p
     assert refused(s, unfiltered).rules == (f"{STATUS}:missing",)
     unexcluded = both.replace("NOT o.is_test AND ", "")
     assert refused(s, unexcluded).rules == ("exclude-test-orders",)
+
+
+# -- filters that filter nothing, NULL statuses, expanded joins and rate defaults --------------
+
+OUTER_ON = [
+    pytest.param(
+        "SELECT SUM(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id "
+        "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        ("exclude-test-orders", f"{STATUS}:missing"),
+        id="left",
+    ),
+    pytest.param(
+        "SELECT SUM(o.amount) FROM orders o FULL JOIN customers c ON c.id = o.customer_id "
+        "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        ("exclude-test-orders", f"{STATUS}:missing"),
+        id="full",
+    ),
+    pytest.param(
+        "SELECT SUM(o.amount) FROM customers c RIGHT JOIN orders o ON c.id = o.customer_id "
+        "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        ("exclude-test-orders", f"{STATUS}:missing"),
+        id="right",
+    ),
+    pytest.param(
+        "SELECT SUM(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id "
+        "AND o.status IN ('paid', 'shipped') WHERE NOT o.is_test",
+        (f"{STATUS}:missing",),
+        id="left-status-only",
+    ),
+    pytest.param(
+        "SELECT SUM(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id "
+        "AND NOT o.is_test WHERE o.status IN ('paid', 'shipped')",
+        ("exclude-test-orders",),
+        id="left-exclusion-only",
+    ),
+]
+
+
+@pytest.mark.parametrize(("sql", "rules"), OUTER_ON)
+def test_a_filter_in_the_on_of_an_outer_join_does_not_filter_its_preserved_side(adhoc, sql, rules):
+    error = refused(adhoc(), sql)
+    assert isinstance(error, DeclaredDefaultMissing)
+    assert error.rules == rules
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT SUM(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id "
+        f"WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        "SELECT SUM(o.amount) FROM customers c LEFT JOIN orders o ON o.customer_id = c.id "
+        "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        "SELECT SUM(o.amount) FROM customers c JOIN orders o ON o.customer_id = c.id "
+        "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+    ],
+)
+def test_a_filter_in_the_on_of_the_nullable_side_or_an_inner_join_counts(adhoc, sql):
+    prepared = adhoc().sql.prepare(sql)
+    assert prepared.checks[STATUS]["result"] == "satisfied"
+    assert prepared.checks["exclude-test-orders"]["result"] == "satisfied"
+
+
+@pytest.mark.parametrize(
+    ("where", "sub"),
+    [
+        ("status IN ('paid', 'shipped') OR status IS NULL", "superset"),
+        ("status = 'paid' OR status = 'shipped' OR status IS NULL", "superset"),
+        ("status IS NULL", "superset"),
+    ],
+)
+def test_a_filter_that_keeps_null_statuses_is_a_violation(adhoc, where, sub):
+    error = refused(adhoc(), f"SELECT COUNT(*) FROM orders WHERE NOT is_test AND ({where})")
+    assert isinstance(error, DeclaredDefaultMissing)
+    assert error.rules == (f"{STATUS}:{sub}",)
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "status IS NOT NULL AND status IN ('paid', 'shipped')",
+        "NOT (status IS NULL) AND status IN ('paid', 'shipped')",
+    ],
+)
+def test_a_filter_that_removes_null_statuses_passes(adhoc, where):
+    prepared = adhoc().sql.prepare(
+        f"SELECT COUNT(*) FROM orders WHERE NOT is_test AND {where}"
+    )
+    assert prepared.checks[STATUS]["result"] == "satisfied"
+
+
+def test_the_join_cap_counts_the_joins_a_view_brings(adhoc):
+    s = adhoc()
+    twice = (
+        "SELECT COUNT(*) FROM usd_line_value a JOIN usd_line_value b ON a.invoice_id = b.invoice_id"
+    )
+    assert s.sql.prepare(twice)
+    # 2 joins written, 3 views of 1 join each: 5 once expanded
+    thrice = "SELECT COUNT(*) FROM usd_line_value a, usd_line_value b, usd_line_value c"
+    error = refused(s, thrice)
+    assert error.code == "join_limit"
+
+
+def test_the_join_cap_still_counts_the_joins_written_out(adhoc):
+    s = adhoc()
+    joins = " ".join(f"JOIN customers c{i} ON c{i}.id = o.customer_id" for i in range(5))
+    assert refused(s, f"SELECT COUNT(*) FROM orders o {joins}").code == "join_limit"
+
+
+@pytest.mark.parametrize("fn", ["GREATEST", "LEAST"])
+def test_a_rate_bounded_by_a_literal_is_a_default_in_disguise(adhoc, fn):
+    s = adhoc()
+    sql = (
+        "SELECT SUM(CASE WHEN i.currency = 'USD' THEN i.amount ELSE i.amount * "
+        f"{fn}(r.rate_to_usd, 1) END) FROM invoices i ASOF LEFT JOIN fx_rates r ON {JOIN}"
+    )
+    prepared = s.sql.prepare(sql)
+    assert prepared.checks[FX]["result"] == "satisfied"
+    assert "fx_default_shape_unverified" in prepared.unverified
+
+
+def test_greatest_over_two_rates_or_inside_the_base_branch_is_not_a_default(adhoc):
+    s = adhoc()
+    two_rates = (
+        "SELECT SUM(CASE WHEN i.currency = 'USD' THEN i.amount ELSE i.amount * "
+        f"GREATEST(r.rate_to_usd, r.rate_to_usd) END) FROM invoices i ASOF LEFT JOIN fx_rates r ON {JOIN}"
+    )
+    assert "fx_default_shape_unverified" not in s.sql.prepare(two_rates).unverified
+    guarded = (
+        "SELECT SUM(CASE WHEN i.currency = 'USD' THEN i.amount * GREATEST(r.rate_to_usd, 1) "
+        f"ELSE i.amount * r.rate_to_usd END) FROM invoices i ASOF LEFT JOIN fx_rates r ON {JOIN}"
+    )
+    assert "fx_default_shape_unverified" not in s.sql.prepare(guarded).unverified
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        f"WITH t AS (SELECT amount AS total_revenue FROM orders WHERE {SCOPED}) "
+        "SELECT SUM(total_revenue) FROM t",
+        f"SELECT SUM(t.total_revenue) FROM (SELECT amount AS total_revenue FROM orders WHERE {SCOPED}) t",
+        f"SELECT SUM(amount) AS total_revenue FROM orders WHERE {SCOPED} HAVING SUM(amount) > 0",
+        f"WITH revenue_cube AS (SELECT amount FROM orders WHERE {SCOPED}) "
+        "SELECT SUM(amount) FROM revenue_cube",
+    ],
+)
+def test_an_alias_or_cte_named_like_a_cube_is_not_the_cube(adhoc, sql):
+    s = adhoc(files=VIEWS)
+    prepared = s.sql.prepare(sql)
+    assert prepared.checks[STATUS]["result"] == "satisfied"

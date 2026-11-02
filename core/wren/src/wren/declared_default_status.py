@@ -14,6 +14,12 @@ that does not mention the status column is "any value may pass"; ``AND`` interse
 ``NOT`` swaps and complements. What a read retains is its ``may`` set, so a filter on another
 column (``AND amount > 5``) narrows nothing and an ``OR`` with one widens to the whole domain.
 
+A row whose status is NULL is not in the domain and is tracked apart, as the truth values the
+filter can take for it under SQL's three-valued logic. Only ``IS NULL`` makes it true; ``=``,
+``IN``, ``NOT IN`` and ``<>`` are unknown for it and ``NOT`` leaves unknown unknown. A read whose
+filters can all be true for a NULL status retains rows outside the declared set, whatever else it
+keeps.
+
 Recognised atoms are ``=``, ``<>``/``!=``, ``IN``, ``NOT IN`` and ``IS [NOT] NULL`` between the
 status column (optionally wrapped in ``LOWER``, ``UPPER`` or ``TRIM``) and string or numeric
 literals. Anything else that touches the column (another column, a function, a subquery, ``LIKE``,
@@ -39,6 +45,11 @@ NOT_APPLICABLE = "not_applicable"
 VIOLATIONS = (MISSING, SUPERSET, SUBSET)
 
 _EMPTY: frozenset[str] = frozenset()
+_TRUE, _FALSE, _UNKNOWN = "true", "false", "unknown"
+_ANY_TRUTH = frozenset({_TRUE, _FALSE, _UNKNOWN})
+_Verdict = tuple[frozenset[str], frozenset[str], frozenset[str]]
+_UNKNOWN_ONLY = frozenset({_UNKNOWN})
+_TRUE_ONLY = frozenset({_TRUE})
 _WRAPPERS = (exp.Lower, exp.Upper, exp.Trim)
 
 
@@ -62,6 +73,35 @@ class StatusJudgment:
 
 def fold_all(values) -> frozenset[str]:
     return frozenset(fold(v) for v in values)
+
+
+def _and_truth(left: frozenset[str], right: frozenset[str]) -> frozenset[str]:
+    out = set()
+    for a in left:
+        for b in right:
+            if _FALSE in (a, b):
+                out.add(_FALSE)
+            elif _UNKNOWN in (a, b):
+                out.add(_UNKNOWN)
+            else:
+                out.add(_TRUE)
+    return frozenset(out)
+
+
+def _or_truth(left: frozenset[str], right: frozenset[str]) -> frozenset[str]:
+    out = set()
+    for a in left:
+        for b in right:
+            if _TRUE in (a, b):
+                out.add(_TRUE)
+            elif _UNKNOWN in (a, b):
+                out.add(_UNKNOWN)
+            else:
+                out.add(_FALSE)
+    return frozenset(out)
+
+
+_NOT_TRUTH = {_TRUE: _FALSE, _FALSE: _TRUE, _UNKNOWN: _UNKNOWN}
 
 
 def display(rule: SaleStatuses, folded: frozenset[str]) -> list[str]:
@@ -211,7 +251,7 @@ class _Status:
             return None if inner is None else inner.strip()
         return None
 
-    def _atom(self, node: exp.Expression) -> tuple[frozenset[str], frozenset[str]]:
+    def _atom(self, node: exp.Expression) -> _Verdict:
         if isinstance(node, (exp.EQ, exp.NEQ)):
             for side, other in (
                 (node.this, node.expression),
@@ -223,7 +263,7 @@ class _Status:
                         raise StatusUndetermined("non_literal")
                     hit = frozenset({fold(text)}) & self.domain
                     kept = hit if isinstance(node, exp.EQ) else self.domain - hit
-                    return kept, kept
+                    return kept, kept, _UNKNOWN_ONLY
             raise StatusUndetermined("unsupported_predicate")
         if isinstance(node, exp.In):
             if (
@@ -237,41 +277,56 @@ class _Status:
             if not texts or any(text is None for text in texts):
                 raise StatusUndetermined("non_literal")
             hit = fold_all(t for t in texts if t is not None) & self.domain
-            return hit, hit
+            return hit, hit, _UNKNOWN_ONLY
         if (
             isinstance(node, exp.Is)
             and isinstance(node.expression, exp.Null)
             and self._status_expr(node.this)
         ):
-            return _EMPTY, _EMPTY
+            return _EMPTY, _EMPTY, _TRUE_ONLY
         raise StatusUndetermined("unsupported_predicate")
 
-    def _eval(self, node: exp.Expression) -> tuple[frozenset[str], frozenset[str]]:
-        """``(must, may)`` over the domain for a boolean ``node``."""
+    def _eval(self, node: exp.Expression) -> _Verdict:
+        """``(must, may, nulls)`` for a boolean ``node``: the domain values it holds for in every
+        row and in some row, and the truth values it can take for a row whose status is NULL."""
         node = _unparen(node)
         if not self._reads_of(node):
-            return _EMPTY, self.domain
+            return _EMPTY, self.domain, _ANY_TRUTH
         if isinstance(node, exp.And):
             left, right = self._eval(node.this), self._eval(node.expression)
-            return left[0] & right[0], left[1] & right[1]
+            return (
+                left[0] & right[0],
+                left[1] & right[1],
+                _and_truth(left[2], right[2]),
+            )
         if isinstance(node, exp.Or):
             left, right = self._eval(node.this), self._eval(node.expression)
-            return left[0] | right[0], left[1] | right[1]
+            return (
+                left[0] | right[0],
+                left[1] | right[1],
+                _or_truth(left[2], right[2]),
+            )
         if isinstance(node, exp.Not):
-            must, may = self._eval(node.this)
-            return self.domain - may, self.domain - must
+            must, may, nulls = self._eval(node.this)
+            return (
+                self.domain - may,
+                self.domain - must,
+                frozenset(_NOT_TRUTH[value] for value in nulls),
+            )
         return self._atom(node)
 
-    def retained(self) -> dict[int, frozenset[str]]:
-        """Per read that some filter mentions, the statuses it can still return."""
-        retained: dict[int, frozenset[str]] = {}
+    def retained(self) -> dict[int, tuple[frozenset[str], bool]]:
+        """Per read that some filter mentions, the statuses it can still return and whether a
+        row with a NULL status can still pass every filter."""
+        retained: dict[int, tuple[frozenset[str], bool]] = {}
         for conjunct in self.st.conjuncts:
             reads = self._reads_of(conjunct)
             if not reads:
                 continue
-            _, may = self._eval(conjunct)
+            _, may, nulls = self._eval(conjunct)
             for read in reads:
-                retained[read] = retained.get(read, self.domain) & may
+                kept, null_kept = retained.get(read, (self.domain, True))
+                retained[read] = (kept & may, null_kept and _TRUE in nulls)
         return retained
 
     def judge(self, target: frozenset[str]) -> str:
@@ -280,9 +335,13 @@ class _Status:
         retained = self.retained()
         found = set()
         for read in self.instances:
-            kept = retained.get(id(read))
-            if kept is None:
+            entry = retained.get(id(read))
+            if entry is None:
                 found.add(MISSING)
+                continue
+            kept, null_kept = entry
+            if null_kept:
+                found.add(SUPERSET)
             elif kept == target:
                 continue
             elif kept < target:

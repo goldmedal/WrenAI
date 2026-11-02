@@ -381,6 +381,43 @@ def test_a_null_tolerant_exclusion_must_stay_on_the_flags_model(checker, atom):
     assert check(checker, LEFT_JOINED.format(atom=atom)) == [EXCLUDE]
 
 
+def on_clause(shape, atom="NOT c.is_test"):
+    return {
+        "left_preserved": f"SELECT COUNT(*) FROM customers c LEFT JOIN orders o ON o.customer_id = c.id AND {atom}",
+        "left_nullable": f"SELECT COUNT(*) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id AND {atom}",
+        "right_preserved": f"SELECT COUNT(*) FROM orders o RIGHT JOIN customers c ON o.customer_id = c.id AND {atom}",
+        "right_nullable": f"SELECT COUNT(*) FROM customers c RIGHT JOIN orders o ON o.customer_id = c.id AND {atom}",
+        "full": f"SELECT COUNT(*) FROM orders o FULL JOIN customers c ON o.customer_id = c.id AND {atom}",
+        "inner": f"SELECT COUNT(*) FROM orders o INNER JOIN customers c ON o.customer_id = c.id AND {atom}",
+        "where": f"SELECT COUNT(*) FROM customers c LEFT JOIN orders o ON o.customer_id = c.id WHERE {atom}",
+    }[shape]
+
+
+@pytest.mark.parametrize("shape", ["left_preserved", "right_preserved", "full"])
+def test_an_exclusion_in_the_on_of_an_outer_join_filters_nothing_on_a_preserved_side(
+    checker, shape
+):
+    assert check(checker, on_clause(shape)) == [EXCLUDE]
+
+
+@pytest.mark.parametrize("shape", ["left_nullable", "right_nullable", "inner", "where"])
+def test_an_exclusion_that_restricts_the_nullable_side_or_an_inner_join_still_counts(
+    checker, shape
+):
+    assert check(checker, on_clause(shape)) == []
+
+
+def test_the_on_clause_of_a_join_still_carries_the_rate_join_whatever_its_side(checker):
+    sql = (
+        "SELECT SUM(p.amount * f.rate_to_usd) FROM "
+        + CHARGES
+        + " LEFT JOIN fx_rates f "
+        "ON f.currency = p.currency AND f.date <= CAST(p.captured_at AS DATE) "
+        "WHERE NOT c.is_test"
+    )
+    assert check(checker, sql) == []
+
+
 # -- require_rate_join -------------------------------------------------------
 
 RATED = (
