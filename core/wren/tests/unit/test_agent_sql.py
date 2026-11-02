@@ -165,7 +165,9 @@ def test_alias_cannot_leak_sql_and_evidence_is_host_owned(adhoc):
     s = adhoc()
     session = s.open()["session_id"]
     result = ask(
-        s, 'SELECT SUM(amount) AS "SELECT PRIVATE SQL FROM secret" FROM orders WHERE NOT is_test AND status IN (\'paid\', \'shipped\')', session
+        s,
+        "SELECT SUM(amount) AS \"SELECT PRIVATE SQL FROM secret\" FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')",
+        session,
     )
     evidence = s.evidence(Ref(session_id=session, evidence_ref=result["evidence_ref"]))
     assert result["result"]["columns"] == [{"key": "c1", "label": "sum_amount"}]
@@ -184,7 +186,10 @@ def test_cedar_column_boundary_before_execution(adhoc, action, kind):
         f'\nforbid(principal, action == Service::Action::"{action}", resource) when {{ resource.kind == "{kind}" && resource.columns.contains("amount") }};'
     )
     with pytest.raises(PermissionError):
-        ask(s, "SELECT SUM(amount) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')")
+        ask(
+            s,
+            "SELECT SUM(amount) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')",
+        )
     assert not any(a.get("event") == "private_sql" for a in s.audit)
 
 
@@ -262,7 +267,9 @@ def test_a_denied_column_is_in_no_worker_visible_projection(adhoc):
             seen.append(cb("list_context", {}))
             seen.append(cb("select_context", {"ids": ["customers"]}))
             seen.append(cb("read_context", {"ids": ["customers", "orders"]}))
-            seen.append(cb("read_context", {"ids": ["rule:knowledge/rules/conventions.md"]}))
+            seen.append(
+                cb("read_context", {"ids": ["rule:knowledge/rules/conventions.md"]})
+            )
             out = cb("run_sql", {"sql": "SELECT COUNT(*) FROM customers"})
             return {"evidence": out["evidence"]}
         return original(op, **kwargs)
@@ -329,7 +336,10 @@ def test_private_can_repair_shape_without_executing_or_disclosing_literal(adhoc)
             assert rejected["error"] == "unsupported_result_shape"
             assert "PRIVATE_SQL" not in json.dumps(rejected)
             result = cb(
-                "run_sql", {"sql": "SELECT SUM(amount) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"}
+                "run_sql",
+                {
+                    "sql": "SELECT SUM(amount) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
+                },
             )
             return {"evidence": result["evidence"]}
         return original(op, **kwargs)
@@ -344,7 +354,10 @@ def test_private_can_repair_shape_without_executing_or_disclosing_literal(adhoc)
 @pytest.mark.parametrize(
     "sql,code",
     [
-        ("SELECT SUM(amt) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')", "unresolved_column"),
+        (
+            "SELECT SUM(amt) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')",
+            "unresolved_column",
+        ),
         (
             "WITH x AS (SELECT SUM(amount) AS total FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')) SELECT grand_total FROM x",
             "unresolved_column",
@@ -370,7 +383,10 @@ def test_private_can_repair_planning_failure_without_authorization_change(
             assert rejected["code"] == code
             assert set(rejected) == {"error", "code", "hint"}
             result = cb(
-                "run_sql", {"sql": "SELECT SUM(amount) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"}
+                "run_sql",
+                {
+                    "sql": "SELECT SUM(amount) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
+                },
             )
             return {"evidence": result["evidence"]}
         return original(op, **kwargs)
@@ -536,9 +552,9 @@ def test_declared_default_counterexamples_are_rejected_and_not_executed(
     ]
     assert not events(s, "private_sql")
     rejected = events(s, "private_sql_rejected")
-    assert [
-        (e["code"], e["sub_code"], e["rules"], e["attempt"]) for e in rejected
-    ] == [("declared_default_missing", "rule_violation", rules, 1)]
+    assert [(e["code"], e["sub_code"], e["rules"], e["attempt"]) for e in rejected] == [
+        ("declared_default_missing", "rule_violation", rules, 1)
+    ]
 
 
 FX_GUARDED = f"SELECT SUM(CASE WHEN i.currency = 'USD' THEN i.amount ELSE i.amount * r.rate_to_usd END) FROM invoices i ASOF LEFT JOIN fx_rates r ON {JOIN}"
@@ -564,7 +580,9 @@ def test_a_rejected_rate_query_is_rewritten_into_the_base_currency_form(adhoc):
         FX: {"applicable": True, "result": "satisfied"},
         STATUS: {"applicable": False, "result": "not_applicable"},
     }
-    assert internal["observed"]["fx_missing_rate_handling"] == "guarded_by_base_currency"
+    assert (
+        internal["observed"]["fx_missing_rate_handling"] == "guarded_by_base_currency"
+    )
 
 
 def test_a_left_join_without_a_guard_runs_and_records_how_a_missing_rate_is_handled(
@@ -617,7 +635,10 @@ def test_checks_and_observed_come_from_the_qualified_statement(adhoc):
 FORM_ERRORS = [
     ("SELECT e FROM customers AS c(a, b, e)", "column_list_alias"),
     ("SELECT * FROM customers AS c(a, b, e)", "column_list_alias"),
-    ("SELECT COUNT(*) FROM customers AS c(a, b, e) WHERE e IS NOT NULL", "column_list_alias"),
+    (
+        "SELECT COUNT(*) FROM customers AS c(a, b, e) WHERE e IS NOT NULL",
+        "column_list_alias",
+    ),
     ("SELECT COUNT(*) FROM orders NATURAL JOIN customers", "natural_join"),
     ("SELECT COUNT(*) FROM customers c1 NATURAL JOIN customers c2", "natural_join"),
     ("SELECT COUNT(*) FROM orders o NATURAL LEFT JOIN customers c", "natural_join"),
@@ -656,7 +677,9 @@ PIVOT = "SELECT SUM(CASE WHEN region = 'North' THEN id ELSE 0 END), SUM(CASE WHE
 def test_a_pivot_with_one_label_per_literal_is_rewritten_with_group_by(adhoc):
     s = adhoc()
     answers, result = run(
-        s, PIVOT, "SELECT region, SUM(id) FROM customers GROUP BY region ORDER BY region"
+        s,
+        PIVOT,
+        "SELECT region, SUM(id) FROM customers GROUP BY region ORDER BY region",
     )
     assert answers[0] == {
         "error": "unsupported_result_shape",
@@ -727,7 +750,10 @@ def test_a_cedar_denial_ends_the_task_as_denied(adhoc):
     s = adhoc(
         '\nforbid(principal, action == Service::Action::"execute_query", resource);'
     )
-    answers, caught = run(s, "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')")
+    answers, caught = run(
+        s,
+        "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')",
+    )
     assert answers == []
     assert isinstance(caught, PermissionError) and str(caught) == "denied"
     failed = [e for e in s.audit if e.get("event") == "task_failed"]
@@ -792,7 +818,9 @@ def test_only_declared_values_of_an_enumerated_column_are_recorded_as_literals()
     }
     gate = AdHocSQL(
         SimpleNamespace(
-            snapshot=SimpleNamespace(catalog=catalog, denied=frozenset(), declarations=())
+            snapshot=SimpleNamespace(
+                catalog=catalog, denied=frozenset(), declarations=()
+            )
         )
     )
     prepared = gate.prepare(
@@ -908,13 +936,18 @@ def test_an_unexpected_planner_error_is_rewritable_never_terminal(adhoc, monkeyp
 
         monkeypatch.setattr(s.sql, "_projection", fail)
         with pytest.raises(QueryFormError) as caught:
-            s.sql.prepare("SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')")
+            s.sql.prepare(
+                "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
+            )
         assert (caught.value.error, caught.value.code) == (
             "unsupported_query",
             "unsupported",
         )
     monkeypatch.undo()
-    _, result = run(s, "SELECT COUNT(*) FROM orders ANTI JOIN customers c USING (id) WHERE NOT is_test AND status IN ('paid', 'shipped')")
+    _, result = run(
+        s,
+        "SELECT COUNT(*) FROM orders ANTI JOIN customers c USING (id) WHERE NOT is_test AND status IN ('paid', 'shipped')",
+    )
     assert result["status"] == "completed"
 
 
@@ -933,7 +966,10 @@ def test_a_cedar_forbid_on_a_model_only_a_semi_join_reads_ends_the_task(adhoc):
         '\nforbid(principal, action == Service::Action::"execute_query", resource) '
         'when { resource.name == "customers" };'
     )
-    ok, _ = run(s, "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')")
+    ok, _ = run(
+        s,
+        "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')",
+    )
     assert ok[0]["evidence"]
     s = adhoc(
         '\nforbid(principal, action == Service::Action::"execute_query", resource) '
@@ -992,7 +1028,9 @@ def test_a_status_filter_that_keeps_the_wrong_set_is_a_violation(adhoc, where, s
 )
 def test_a_filter_that_keeps_exactly_the_declared_set_passes(adhoc, where):
     s = adhoc()
-    prepared = s.sql.prepare(f"SELECT SUM(amount) FROM orders WHERE NOT is_test AND {where}")
+    prepared = s.sql.prepare(
+        f"SELECT SUM(amount) FROM orders WHERE NOT is_test AND {where}"
+    )
     assert prepared.checks[STATUS] == {"applicable": True, "result": "satisfied"}
 
 
@@ -1010,11 +1048,13 @@ def test_a_status_compared_with_a_column_has_no_verdict(adhoc):
     )
 
 
-def test_a_status_violation_is_answered_before_anything_runs_and_points_at_clarify(adhoc):
+def test_a_status_violation_is_answered_before_anything_runs_and_points_at_clarify(
+    adhoc,
+):
     s = adhoc()
     answers, result = run(
         s,
-        f"SELECT SUM(amount) FROM orders WHERE NOT is_test AND status = 'paid'",
+        "SELECT SUM(amount) FROM orders WHERE NOT is_test AND status = 'paid'",
         f"SELECT SUM(amount) FROM orders WHERE {SCOPED}",
     )
     assert answers[0]["rules"] == [f"{STATUS}:subset"]
@@ -1025,7 +1065,9 @@ def test_a_status_violation_is_answered_before_anything_runs_and_points_at_clari
     assert rejected["rules"] == [f"{STATUS}:subset"]
 
 
-def test_an_undetermined_status_filter_is_answered_with_its_rule_and_no_clarify_hint(adhoc):
+def test_an_undetermined_status_filter_is_answered_with_its_rule_and_no_clarify_hint(
+    adhoc,
+):
     s = adhoc()
     answers, result = run(
         s,
@@ -1082,7 +1124,9 @@ def test_a_view_runs_as_the_models_behind_it(adhoc):
     s = adhoc()
     _, result = run(s, "SELECT SUM(v.usd_value) FROM usd_line_value v")
     assert result["result"]["rows"] == [{"c1": 1550.0}]
-    internal = s.sessions[result["session_id"]]["evidence"][result["evidence_ref"]]["internal"]
+    internal = s.sessions[result["session_id"]]["evidence"][result["evidence_ref"]][
+        "internal"
+    ]
     assert internal["checks"][FX]["result"] == "satisfied_by_definition"
     assert internal["observed"]["models"] == ["fx_rates", "invoices"]
     assert "usd_line_value" not in json.dumps(internal["observed"])
@@ -1107,7 +1151,9 @@ def test_a_status_filter_on_top_of_a_view_is_judged_like_any_other(adhoc):
     assert ok.observed["models"] == ["orders"]
 
 
-def test_a_view_that_does_not_guarantee_the_exclusion_leaves_it_to_the_outer_query(adhoc):
+def test_a_view_that_does_not_guarantee_the_exclusion_leaves_it_to_the_outer_query(
+    adhoc,
+):
     s = adhoc(files=VIEWS)
     assert refused(s, f"SELECT SUM(amount) FROM order_facts WHERE {SALES}").rules == (
         "exclude-test-orders",
@@ -1116,7 +1162,9 @@ def test_a_view_that_does_not_guarantee_the_exclusion_leaves_it_to_the_outer_que
 
 def test_a_view_guaranteeing_one_rule_does_not_excuse_the_others(adhoc):
     s = adhoc(files=VIEWS)
-    assert refused(s, "SELECT SUM(amount) FROM clean_orders").rules == (f"{STATUS}:missing",)
+    assert refused(s, "SELECT SUM(amount) FROM clean_orders").rules == (
+        f"{STATUS}:missing",
+    )
     prepared = s.sql.prepare(f"SELECT SUM(amount) FROM clean_orders WHERE {SALES}")
     assert prepared.checks["exclude-test-orders"] == {
         "applicable": True,
@@ -1177,11 +1225,13 @@ def test_a_view_value_joined_to_a_many_side_model_is_marked_duplicated(adhoc):
     s = adhoc()
     sql = (
         "SELECT SUM(v.usd_value) FROM usd_line_value v JOIN orders o "
-        f"ON v.customer_id = o.customer_id WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')"
+        "ON v.customer_id = o.customer_id WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')"
     )
     answers, result = run(s, sql)
     assert answers[0].get("evidence")
-    internal = s.sessions[result["session_id"]]["evidence"][result["evidence_ref"]]["internal"]
+    internal = s.sessions[result["session_id"]]["evidence"][result["evidence_ref"]][
+        "internal"
+    ]
     assert internal["observed"]["duplicate_aggregation"] is True
     assert internal["unverified"] == [
         "duplicate_aggregation",
@@ -1197,10 +1247,10 @@ def test_a_view_value_joined_to_a_many_side_model_is_marked_duplicated(adhoc):
         "SELECT SUM(v.usd_value) FROM usd_line_value v JOIN invoices i ON v.invoice_id = i.id",
         # nothing is aggregated from the view
         "SELECT COUNT(*) FROM usd_line_value v JOIN orders o ON v.customer_id = o.customer_id "
-        f"WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')",
         # the aggregate reads the model, not the view
         "SELECT SUM(o.amount) FROM usd_line_value v JOIN orders o ON v.customer_id = o.customer_id "
-        f"WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')",
     ],
 )
 def test_other_joins_with_a_view_are_not_marked(adhoc, sql):
@@ -1231,11 +1281,16 @@ def test_a_cube_refusal_is_rewritable_and_nothing_else_changes(adhoc):
         "SELECT SUM(total_revenue) FROM revenue_cube",
         f"SELECT SUM(amount) FROM orders WHERE {SCOPED}",
     )
-    assert (answers[0]["error"], answers[0]["code"]) == ("unsupported_query", "cube_not_a_table")
+    assert (answers[0]["error"], answers[0]["code"]) == (
+        "unsupported_query",
+        "cube_not_a_table",
+    )
     assert "cube is not a table" in answers[0]["hint"]
     assert result["status"] == "completed"
     assert not events(s, "task_failed")
-    ok = s.sql.prepare(f"SELECT SUM(amount) AS total_revenue FROM orders WHERE {SCOPED}")
+    ok = s.sql.prepare(
+        f"SELECT SUM(amount) AS total_revenue FROM orders WHERE {SCOPED}"
+    )
     assert ok.labels == ["sum_amount"]
 
 
@@ -1251,10 +1306,14 @@ def test_the_semantics_a_statement_touches_are_listed_as_unverified(adhoc):
     assert view.unverified == ["revenue_definition_match"]
 
 
-def test_unverified_reaches_the_internal_evidence_and_never_names_a_denied_column(adhoc):
+def test_unverified_reaches_the_internal_evidence_and_never_names_a_denied_column(
+    adhoc,
+):
     s = adhoc()
     _, result = run(s, f"SELECT SUM(amount) FROM orders WHERE {SCOPED}")
-    internal = s.sessions[result["session_id"]]["evidence"][result["evidence_ref"]]["internal"]
+    internal = s.sessions[result["session_id"]]["evidence"][result["evidence_ref"]][
+        "internal"
+    ]
     assert internal["unverified"] == ["fiscal_calendar_bounds"]
     assert "email" not in json.dumps(internal)
 
@@ -1281,7 +1340,9 @@ def test_a_default_shape_the_rate_checks_do_not_read_is_unverified(adhoc, rate):
     assert "fx_default_shape_unverified" in prepared.unverified
 
 
-def test_the_plain_guarded_form_has_nothing_unverified_and_the_unguarded_one_is_named(adhoc):
+def test_the_plain_guarded_form_has_nothing_unverified_and_the_unguarded_one_is_named(
+    adhoc,
+):
     s = adhoc()
     assert s.sql.prepare(FX_GUARDED).unverified == []
     assert s.sql.prepare(FX_UNGUARDED).unverified == ["fx_missing_rate_handling"]
@@ -1302,9 +1363,14 @@ def test_a_views_own_columns_are_not_judged_like_text_the_worker_writes(adhoc):
     prepared = s.sql.prepare(f"SELECT COUNT(*) FROM labelled WHERE {SCOPED}")
     assert prepared.checks[STATUS]["result"] == "satisfied"
     # the same cast written by the worker is still refused
-    assert refused(
-        s, f"SELECT CAST(amount AS VARCHAR) FROM orders WHERE {SCOPED}", QueryShapeError
-    ).code == "text_cast"
+    assert (
+        refused(
+            s,
+            f"SELECT CAST(amount AS VARCHAR) FROM orders WHERE {SCOPED}",
+            QueryShapeError,
+        ).code
+        == "text_cast"
+    )
 
 
 TRUSTED_ORDERS = {
@@ -1313,14 +1379,16 @@ TRUSTED_ORDERS = {
 }
 
 
-def test_a_guarantee_covering_some_reads_of_the_model_leaves_the_others_to_the_plain_check(adhoc):
+def test_a_guarantee_covering_some_reads_of_the_model_leaves_the_others_to_the_plain_check(
+    adhoc,
+):
     s = adhoc(files=TRUSTED_ORDERS)
     whole = s.sql.prepare("SELECT SUM(amount) FROM trusted_orders")
     assert whole.checks[STATUS]["result"] == "satisfied_by_definition"
     assert whole.checks["exclude-test-orders"]["result"] == "satisfied_by_definition"
     both = (
         "SELECT SUM(o.amount) FROM orders o JOIN trusted_orders t ON t.id = o.id "
-        f"WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')"
+        "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')"
     )
     prepared = s.sql.prepare(both)
     assert prepared.checks[STATUS]["result"] == "satisfied"
@@ -1392,7 +1460,9 @@ OUTER_ON = [
 
 
 @pytest.mark.parametrize(("sql", "rules"), OUTER_ON)
-def test_a_filter_in_the_on_of_an_outer_join_does_not_filter_its_preserved_side(adhoc, sql, rules):
+def test_a_filter_in_the_on_of_an_outer_join_does_not_filter_its_preserved_side(
+    adhoc, sql, rules
+):
     error = refused(adhoc(), sql)
     assert isinstance(error, DeclaredDefaultMissing)
     assert error.rules == rules
@@ -1402,7 +1472,7 @@ def test_a_filter_in_the_on_of_an_outer_join_does_not_filter_its_preserved_side(
     "sql",
     [
         "SELECT SUM(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id "
-        f"WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')",
         "SELECT SUM(o.amount) FROM customers c JOIN orders o ON o.customer_id = c.id "
         "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
         "SELECT SUM(o.amount) FROM customers c, orders o WHERE o.customer_id = c.id "
@@ -1441,7 +1511,9 @@ def test_a_nullable_side_on_predicate_restricts_a_status_but_is_not_an_exclusion
     ],
 )
 def test_a_filter_that_keeps_null_statuses_is_a_violation(adhoc, where, sub):
-    error = refused(adhoc(), f"SELECT COUNT(*) FROM orders WHERE NOT is_test AND ({where})")
+    error = refused(
+        adhoc(), f"SELECT COUNT(*) FROM orders WHERE NOT is_test AND ({where})"
+    )
     assert isinstance(error, DeclaredDefaultMissing)
     assert error.rules == (f"{STATUS}:{sub}",)
 
@@ -1462,9 +1534,7 @@ def test_a_filter_that_removes_null_statuses_passes(adhoc, where):
 
 def test_the_join_cap_counts_the_joins_a_view_brings(adhoc):
     s = adhoc()
-    twice = (
-        "SELECT COUNT(*) FROM usd_line_value a JOIN usd_line_value b ON a.invoice_id = b.invoice_id"
-    )
+    twice = "SELECT COUNT(*) FROM usd_line_value a JOIN usd_line_value b ON a.invoice_id = b.invoice_id"
     assert s.sql.prepare(twice)
     # 2 joins written, 3 views of 1 join each: 5 once expanded
     thrice = "SELECT COUNT(*) FROM usd_line_value a, usd_line_value b, usd_line_value c"
@@ -1474,7 +1544,9 @@ def test_the_join_cap_counts_the_joins_a_view_brings(adhoc):
 
 def test_the_join_cap_still_counts_the_joins_written_out(adhoc):
     s = adhoc()
-    joins = " ".join(f"JOIN customers c{i} ON c{i}.id = o.customer_id" for i in range(5))
+    joins = " ".join(
+        f"JOIN customers c{i} ON c{i}.id = o.customer_id" for i in range(5)
+    )
     assert refused(s, f"SELECT COUNT(*) FROM orders o {joins}").code == "join_limit"
 
 

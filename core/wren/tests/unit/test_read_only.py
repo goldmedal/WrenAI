@@ -5,7 +5,6 @@ import json
 from unittest.mock import Mock
 
 import pytest
-
 from wren.engine import WrenEngine
 from wren.model.error import ErrorCode, ErrorPhase, WrenError
 from wren.read_only import validate_read_only_query

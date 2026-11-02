@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from sqlglot import exp, parse_one
-
 from wren.context import build_json
 from wren.declared_default_check import DefaultsChecker
 from wren.declared_default_fx import evaluate
@@ -75,7 +74,9 @@ MULTI = (
     "SELECT SUM(p.amount * f.rate_to_usd) FROM payments p JOIN fx_rates f "
     "ON f.currency = p.currency AND f.date <= p.captured_at WHERE 1 = 1"
 )
-INNER_ASOF = f"SELECT SUM(p.amount * f.rate_to_usd) FROM payments p ASOF JOIN fx_rates f ON {ON}"
+INNER_ASOF = (
+    f"SELECT SUM(p.amount * f.rate_to_usd) FROM payments p ASOF JOIN fx_rates f ON {ON}"
+)
 COALESCED = f"SELECT SUM(p.amount * COALESCE(f.rate_to_usd, 1)) FROM payments p ASOF LEFT JOIN fx_rates f ON {ON}"
 BASE_ONLY = (
     "SELECT SUM(CASE WHEN p.currency = 'USD' THEN p.amount ELSE p.amount * f.rate_to_usd END) "
@@ -84,7 +85,10 @@ BASE_ONLY = (
 
 
 def test_an_ordinary_date_join_can_match_several_rates(strict):
-    assert violations(strict, MULTI) == [f"{RATE}:rate_multi_match", f"{RATE}:base_currency_dropped"]
+    assert violations(strict, MULTI) == [
+        f"{RATE}:rate_multi_match",
+        f"{RATE}:base_currency_dropped",
+    ]
 
 
 def test_an_inner_asof_join_is_single_but_drops_the_base_currency(strict):
@@ -151,7 +155,9 @@ UNGUARDED_BRANCHES = {
 }
 
 
-@pytest.mark.parametrize("amount", UNGUARDED_BRANCHES.values(), ids=UNGUARDED_BRANCHES.keys())
+@pytest.mark.parametrize(
+    "amount", UNGUARDED_BRANCHES.values(), ids=UNGUARDED_BRANCHES.keys()
+)
 def test_a_default_in_a_branch_other_currencies_reach_is_refused(strict, amount):
     sql = f"SELECT SUM({amount}) FROM payments p ASOF LEFT JOIN fx_rates f ON {ON}"
     assert violations(strict, sql) == [f"{RATE}:rate_default_literal"]
@@ -190,7 +196,9 @@ def test_the_latest_row_per_amount_through_row_number_is_single(strict):
 
 def test_row_number_that_does_not_keep_the_newest_row_is_not_single(strict):
     # oldest first, and no filter on the row number, are not "the latest rate"
-    assert violations(strict, QUALIFIED.format(order="ASC")) == [f"{RATE}:rate_multi_match"]
+    assert violations(strict, QUALIFIED.format(order="ASC")) == [
+        f"{RATE}:rate_multi_match"
+    ]
     assert violations(strict, RANKED.format(limit=2)) == [f"{RATE}:rate_multi_match"]
 
 
@@ -199,7 +207,9 @@ def test_the_inner_join_inside_a_ranked_source_is_not_the_one_that_drops_rows(st
     assert f"{RATE}:base_currency_dropped" not in violations(
         strict, QUALIFIED.format(order="DESC")
     )
-    inner_outside = QUALIFIED.format(order="DESC").replace("LEFT JOIN ranked", "JOIN ranked")
+    inner_outside = QUALIFIED.format(order="DESC").replace(
+        "LEFT JOIN ranked", "JOIN ranked"
+    )
     assert f"{RATE}:base_currency_dropped" in violations(strict, inner_outside)
 
 
@@ -221,11 +231,13 @@ def test_a_rule_without_the_new_keys_gets_exactly_the_old_verdict():
 def test_the_rules_own_unless_flags_still_excuse_the_statement():
     manifest, rules = declared()
     excused = [
-        replace(r, base_currency="USD", match="single") if isinstance(r, RequireRateJoin) else r
+        replace(r, base_currency="USD", match="single")
+        if isinstance(r, RequireRateJoin)
+        else r
         for r in rules
     ]
     checker = DefaultsChecker(excused, manifest, "duckdb")
-    by_currency = f"SELECT p.currency, SUM(p.amount) FROM payments p WHERE NOT 1 = 0 GROUP BY p.currency"
+    by_currency = "SELECT p.currency, SUM(p.amount) FROM payments p WHERE NOT 1 = 0 GROUP BY p.currency"
     result = verdict(checker, by_currency)
     assert result.checks[RATE] == {"applicable": True, "result": "satisfied"}
     assert RATE not in " ".join(result.violations)
@@ -274,7 +286,9 @@ def test_each_rule_reports_whether_it_applied_and_whether_it_held(both):
     }
 
 
-def test_a_statement_without_an_aggregate_over_the_amount_does_not_apply_the_rate_rule(strict):
+def test_a_statement_without_an_aggregate_over_the_amount_does_not_apply_the_rate_rule(
+    strict,
+):
     result = verdict(strict, "SELECT p.amount FROM payments p")
     assert result.checks[RATE] == {"applicable": False, "result": "not_applicable"}
 
@@ -283,7 +297,11 @@ def test_no_declarations_means_no_checks_and_no_violations():
     manifest, _ = declared()
     empty = DefaultsChecker([], manifest, "duckdb")
     result = verdict(empty, "SELECT SUM(p.amount) FROM payments p")
-    assert (result.violations, result.checks, result.fx_missing_rate_handling) == ((), {}, None)
+    assert (result.violations, result.checks, result.fx_missing_rate_handling) == (
+        (),
+        {},
+        None,
+    )
 
 
 # -- no verdict -----------------------------------------------------------------
@@ -332,7 +350,12 @@ def status_rule(rule_id, column, values, domain):
 def two_status_rules():
     manifest, _ = declared()
     rules = [
-        status_rule("keep-paid-shipped", "status", ("paid", "shipped"), ("paid", "shipped", "cancelled")),
+        status_rule(
+            "keep-paid-shipped",
+            "status",
+            ("paid", "shipped"),
+            ("paid", "shipped", "cancelled"),
+        ),
         status_rule("keep-usd-eur", "currency", ("USD", "EUR"), ("USD", "EUR", "GBP")),
     ]
     return DefaultsChecker(rules, manifest, "duckdb")
@@ -359,7 +382,10 @@ def test_a_scope_for_one_rule_does_not_excuse_another_that_would_otherwise_pass(
         dialect="duckdb",
     )
     scoped = evaluate(checker, ast, {"keep-usd-eur": fold_all(["USD"])})
-    assert list(scoped.violations) == ["keep-paid-shipped:subset", "keep-usd-eur:superset"]
+    assert list(scoped.violations) == [
+        "keep-paid-shipped:subset",
+        "keep-usd-eur:superset",
+    ]
     kept = evaluate(checker, ast, {"keep-paid-shipped": fold_all(["paid"])})
     assert list(kept.violations) == []
     assert kept.checks["keep-usd-eur"]["result"] == "satisfied"

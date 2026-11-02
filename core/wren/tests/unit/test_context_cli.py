@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 import yaml
 from typer.testing import CliRunner
-
 from wren.cli import app
 
 runner = CliRunner()
@@ -274,9 +273,7 @@ def test_init_next_steps_bind_profile_before_validate_and_build(tmp_path, monkey
     to validation. It must first explain how to create/bind a profile."""
     _isolate_profiles(tmp_path / "wren-home", monkeypatch)
 
-    result = runner.invoke(
-        app, ["context", "init", "--empty", "--path", str(tmp_path)]
-    )
+    result = runner.invoke(app, ["context", "init", "--empty", "--path", str(tmp_path)])
     assert result.exit_code == 0, result.output
 
     next_steps = result.output.rsplit("Next:", maxsplit=1)[1]

@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 import pytest
-
 from wren.agent_ipc import PROTOCOL, RuntimeIPC
 
 FAKE_RUNTIME = Path(__file__).parent / "fixtures/fake_runtime.js"
@@ -20,7 +19,9 @@ def ipc(monkeypatch):
     made = []
 
     def make(init=None, **kwargs):
-        runtime = RuntimeIPC(FAKE_RUNTIME, init or {"model": {"apiKey": "secret"}}, **kwargs)
+        runtime = RuntimeIPC(
+            FAKE_RUNTIME, init or {"model": {"apiKey": "secret"}}, **kwargs
+        )
         made.append(runtime)
         return runtime
 
@@ -51,7 +52,9 @@ def test_the_handshake_passes_the_init_payload_through_and_redacts_the_key(ipc):
     assert echoed["model"] == {"apiKey": "<redacted>", "id": "m"}
 
 
-def test_the_call_cap_is_the_given_default_unless_the_environment_overrides_it(ipc, monkeypatch):
+def test_the_call_cap_is_the_given_default_unless_the_environment_overrides_it(
+    ipc, monkeypatch
+):
     runtime = ipc(call_timeout_s=160)
     assert runtime._timeout() == 160
     assert ipc().call_timeout_s == 100
@@ -59,7 +62,9 @@ def test_the_call_cap_is_the_given_default_unless_the_environment_overrides_it(i
     assert runtime._timeout() == 7
 
 
-def test_a_host_timeout_sends_cancel_clears_pending_and_keeps_the_runtime(ipc, monkeypatch):
+def test_a_host_timeout_sends_cancel_clears_pending_and_keeps_the_runtime(
+    ipc, monkeypatch
+):
     monkeypatch.setenv("WREN_IPC_CALL_TIMEOUT_S", "0.4")
     runtime = ipc()
     with pytest.raises(RuntimeError, match="runtime_unavailable") as raised:
@@ -74,7 +79,9 @@ def test_a_host_timeout_sends_cancel_clears_pending_and_keeps_the_runtime(ipc, m
     assert runtime.call("authorize", request={}) is True
 
 
-def test_a_late_tool_call_and_reply_after_the_timeout_do_not_kill_the_runtime(ipc, monkeypatch):
+def test_a_late_tool_call_and_reply_after_the_timeout_do_not_kill_the_runtime(
+    ipc, monkeypatch
+):
     monkeypatch.setenv("WREN_IPC_CALL_TIMEOUT_S", "0.4")
     runtime = ipc()
     with pytest.raises(RuntimeError):
@@ -219,7 +226,9 @@ def test_an_abort_ends_the_wait_now_and_drops_whatever_the_runtime_sends_later(i
     assert {"op": "cancel", "owner": "inv-abort"} in [
         {"op": o.get("op"), "owner": o.get("owner")} for o in seen
     ]
-    assert [o["error"] for o in seen if o.get("type") == "tool_result"] == ["tool_denied"]
+    assert [o["error"] for o in seen if o.get("type") == "tool_result"] == [
+        "tool_denied"
+    ]
     time.sleep(0.2)
     assert runtime.process.poll() is None
     assert runtime.call("authorize", request={}) is True

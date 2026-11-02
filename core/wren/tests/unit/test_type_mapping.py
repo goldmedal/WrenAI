@@ -7,7 +7,6 @@ import subprocess
 import sys
 
 import pytest
-
 from wren.type_mapping import (
     parse_type,
     parse_types,
@@ -130,9 +129,7 @@ def test_parse_types_empty_list() -> None:
         ("", "postgres", "bigquery", ""),
     ],
 )
-def test_translate_type(
-    type_str: str, source: str, target: str, expected: str
-) -> None:
+def test_translate_type(type_str: str, source: str, target: str, expected: str) -> None:
     assert translate_type(type_str, source, target) == expected
 
 
@@ -163,9 +160,7 @@ def test_translate_types_does_not_mutate_input() -> None:
 
 def test_translate_types_custom_type_field() -> None:
     columns = [{"col": "x", "data_type": "int8"}]
-    results = translate_types(
-        columns, "postgres", "bigquery", type_field="data_type"
-    )
+    results = translate_types(columns, "postgres", "bigquery", type_field="data_type")
     assert results[0]["type"] == "INT64"
 
 

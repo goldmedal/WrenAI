@@ -5,7 +5,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlglot import parse_one
-
 from wren.context import build_json
 from wren.declared_default_check import DefaultsChecker, _Statement
 from wren.declared_defaults import read_declared_defaults
@@ -424,7 +423,9 @@ def test_an_exclusion_in_the_on_of_an_outer_join_never_counts_even_on_the_nullab
     ],
     ids=["anti", "semi", "right-group", "left-group"],
 )
-def test_an_exclusion_in_a_bare_semi_anti_or_grouped_join_on_filters_nothing(checker, join):
+def test_an_exclusion_in_a_bare_semi_anti_or_grouped_join_on_filters_nothing(
+    checker, join
+):
     assert check(checker, f"SELECT COUNT(*) FROM {join}") == [EXCLUDE]
 
 

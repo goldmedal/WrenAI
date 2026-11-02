@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 from typer.testing import CliRunner
-
 from wren import __version__
 from wren.cli import app
 

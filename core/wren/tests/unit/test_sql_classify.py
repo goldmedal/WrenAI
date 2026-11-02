@@ -1,7 +1,6 @@
 """Unit tests for sql_classify.is_exploratory()."""
 
 import pytest
-
 from wren.sql_classify import is_exploratory
 
 pytestmark = pytest.mark.unit

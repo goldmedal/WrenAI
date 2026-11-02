@@ -17,7 +17,6 @@ from pathlib import Path
 import click
 import pytest
 import typer
-
 from wren.cli import app
 
 pytestmark = pytest.mark.unit

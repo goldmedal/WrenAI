@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
-
 from wren.connector.clickhouse import (
     ClickHouseConnector,
     _build_clickhouse_arrow_table,
@@ -67,9 +66,7 @@ def test_clickhouse_url_preserves_literal_plus_in_credentials() -> None:
     ``+`` in a password into a space and corrupted the credential. In a URL,
     ``+`` only means space inside a query string — never in userinfo/path.
     """
-    info = _FakeConnInfoFromUrl(
-        "clickhouse://svc+etl:pw+1@clickhouse-host:9000/an+db"
-    )
+    info = _FakeConnInfoFromUrl("clickhouse://svc+etl:pw+1@clickhouse-host:9000/an+db")
 
     out = _build_clickhouse_client_kwargs(info)
 
@@ -80,9 +77,7 @@ def test_clickhouse_url_preserves_literal_plus_in_credentials() -> None:
 
 def test_clickhouse_url_decodes_percent_encoded_database() -> None:
     """A percent-encoded database name in the path must be decoded too."""
-    info = _FakeConnInfoFromUrl(
-        "clickhouse://clickhouse-host:9000/my%20analytics"
-    )
+    info = _FakeConnInfoFromUrl("clickhouse://clickhouse-host:9000/my%20analytics")
 
     out = _build_clickhouse_client_kwargs(info)
 

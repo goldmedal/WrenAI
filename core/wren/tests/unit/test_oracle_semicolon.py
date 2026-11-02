@@ -16,11 +16,10 @@ import pytest
 pytest.importorskip("oracledb")
 
 from wren.connector import oracle as oracle_mod  # noqa: E402
+from wren.connector.base import strip_trailing_semicolon as _strip_trailing_semicolon
 from wren.connector.oracle import (  # noqa: E402
     OracleConnector,
-    
 )
-from wren.connector.base import strip_trailing_semicolon as _strip_trailing_semicolon
 
 
 def _make_mock_connector() -> tuple[OracleConnector, MagicMock]:
@@ -40,9 +39,7 @@ def _make_mock_connector() -> tuple[OracleConnector, MagicMock]:
 
 def test_query_strips_trailing_semicolon_before_subquery_wrap(monkeypatch) -> None:
     connector, cursor = _make_mock_connector()
-    monkeypatch.setattr(
-        oracle_mod, "_build_oracle_arrow_table", lambda c: pa.table({})
-    )
+    monkeypatch.setattr(oracle_mod, "_build_oracle_arrow_table", lambda c: pa.table({}))
     connector.query("SELECT 1;", limit=5)
     (sent,), _ = cursor.execute.call_args
     assert sent == "SELECT * FROM (SELECT 1) t WHERE ROWNUM <= 5"

@@ -63,9 +63,7 @@ def test_connection_url_with_brackets_in_credentials(monkeypatch):
     # delimiters. Plain urlparse raises ValueError on such a URL; the
     # connector sanitises the userinfo segment first (mirrors MySQL).
     captured = _capture_connect(monkeypatch)
-    info = SimpleNamespace(
-        connection_url=_Secret("oracle://user:p[a]ss@host:1521/svc")
-    )
+    info = SimpleNamespace(connection_url=_Secret("oracle://user:p[a]ss@host:1521/svc"))
     _make_oracle_connection(info)
 
     assert captured["user"] == "user"
@@ -79,9 +77,7 @@ def test_connection_url_preserves_ipv6_host(monkeypatch):
     # A legitimate bracketed IPv6 host must still parse; only the userinfo
     # segment is sanitised.
     captured = _capture_connect(monkeypatch)
-    info = SimpleNamespace(
-        connection_url=_Secret("oracle://user:pass@[::1]:1521/svc")
-    )
+    info = SimpleNamespace(connection_url=_Secret("oracle://user:pass@[::1]:1521/svc"))
     _make_oracle_connection(info)
 
     assert captured["host"] == "::1"

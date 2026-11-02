@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from wren.memory.seed_queries import (
     SEED_TAG,
     _relationship_key_columns,
@@ -293,9 +292,7 @@ class TestGenerateSeedQueries:
                 _model("a", "aid", [_col("aid", "varchar")]),
                 _model("b", "bid", [_col("bid", "varchar")]),
             ],
-            "relationships": [
-                {"name": "a_b", "models": ["a", "b"], "condition": None}
-            ],
+            "relationships": [{"name": "a_b", "models": ["a", "b"], "condition": None}],
         }
         pairs = generate_seed_queries(manifest)
         assert not any("with" in p["nl"] for p in pairs)

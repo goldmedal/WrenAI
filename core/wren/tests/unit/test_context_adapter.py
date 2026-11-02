@@ -1,14 +1,12 @@
 """The shared context adapter: loader resolution and validation, the run-time reader."""
 
 import json
-import os
 import stat
 import sys
 import textwrap
 from pathlib import Path
 
 import pytest
-
 from wren import context_adapter as adapter
 from wren.context_adapter import (
     ContextChanged,
@@ -28,7 +26,6 @@ from wren.context_adapter import (
     strip_denied_declaration,
 )
 from wren.declared_defaults import ColumnRef, ExcludeRows, SaleStatuses
-
 
 # --- helpers ------------------------------------------------------------------------------------
 
@@ -126,7 +123,9 @@ def test_env_names_the_loader_and_a_bad_value_does_not_fall_through(tmp_path):
         resolve_loader({adapter.LOADER_ENV: str(plain)})
 
 
-def test_the_in_repo_cargo_build_is_found_release_first_and_env_wins(tmp_path, monkeypatch):
+def test_the_in_repo_cargo_build_is_found_release_first_and_env_wins(
+    tmp_path, monkeypatch
+):
     crate = tmp_path / "core/wren-context-loader"
     (crate / "target/debug").mkdir(parents=True)
     (crate / "target/release").mkdir(parents=True)
@@ -157,10 +156,16 @@ def test_exit_zero_is_not_success_when_the_project_is_unparseable(tmp_path):
     root = project_dir(tmp_path)
     loader = fake_loader(
         tmp_path,
-        prepared={"context_version": 2, "parseable": False, "parse_error": "bad models"},
+        prepared={
+            "context_version": 2,
+            "parseable": False,
+            "parse_error": "bad models",
+        },
         catalog=good_catalog(root),
     )
-    with pytest.raises(ContextUnparseable, match="context_unparseable: bad models") as raised:
+    with pytest.raises(
+        ContextUnparseable, match="context_unparseable: bad models"
+    ) as raised:
         load_snapshot(root, loader)
     assert raised.value.parse_error == "bad models"
 
@@ -195,7 +200,9 @@ def test_unknown_versions_and_a_digest_that_does_not_match_are_incompatible(
 
 def test_a_nonzero_exit_is_a_failure_even_with_good_documents(tmp_path):
     root = project_dir(tmp_path)
-    loader = fake_loader(tmp_path, GOOD_PREPARED, good_catalog(root), 3, "boom\nlast line")
+    loader = fake_loader(
+        tmp_path, GOOD_PREPARED, good_catalog(root), 3, "boom\nlast line"
+    )
     with pytest.raises(ContextLoaderFailed, match="exit 3: last line"):
         load_snapshot(root, loader)
 
@@ -206,7 +213,7 @@ def test_missing_or_garbled_output_is_incompatible(tmp_path):
         load_snapshot(root, fake_loader(tmp_path, None, None))
     garbled = executable(
         tmp_path / "garbled",
-        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -o|--catalog-out) printf '{\"cut' > \"$2\"; shift;; esac; shift; done\n",
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do case $1 in -o|--catalog-out) printf \'{"cut\' > "$2"; shift;; esac; shift; done\n',
     )
     with pytest.raises(ContextLoaderIncompatible):
         load_snapshot(root, garbled)
@@ -233,7 +240,9 @@ def test_an_invalid_denylist_refuses_to_start(tmp_path):
         ],
     )
     loader = fake_loader(tmp_path, GOOD_PREPARED, catalog)
-    with pytest.raises(DeniedColumnsInvalid, match="knowledge/rules/pii.md: customers.nope"):
+    with pytest.raises(
+        DeniedColumnsInvalid, match="knowledge/rules/pii.md: customers.nope"
+    ):
         load_snapshot(root, loader)
 
 
@@ -278,7 +287,9 @@ def real_project(tmp_path):
     except ContextLoaderUnavailable:
         pytest.skip("build core/wren-context-loader or set WREN_CONTEXT_LOADER_BIN")
     examples = Path(__file__).resolve().parents[4] / "examples/serve-agent"
-    spec = importlib.util.spec_from_file_location("setup_for_adapter", examples / "setup.py")
+    spec = importlib.util.spec_from_file_location(
+        "setup_for_adapter", examples / "setup.py"
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.prepare(tmp_path / "fixture")
@@ -345,8 +356,12 @@ def test_a_stale_build_is_inconsistent_and_a_missing_build_is_reported(real_proj
         "denied_columns: [customers.email\ndefaults: []",
     ],
 )
-def test_a_malformed_denylist_in_a_real_project_refuses_to_start(real_project, front_matter):
-    (real_project / "knowledge/rules/conventions.md").write_text(f"---\n{front_matter}\n---\nbody\n")
+def test_a_malformed_denylist_in_a_real_project_refuses_to_start(
+    real_project, front_matter
+):
+    (real_project / "knowledge/rules/conventions.md").write_text(
+        f"---\n{front_matter}\n---\nbody\n"
+    )
     with pytest.raises(DeniedColumnsInvalid):
         load_snapshot(real_project)
 
@@ -383,8 +398,22 @@ def three_models(**kwargs):
                 model("orders", "One row per order.", ("id", "is_test", "amount")),
                 model("fx_rates", None, ("day", "rate")),
             ],
-            "views": [{"name": "revenue", "description": "Revenue per order.", "guarantees": ["a", "b"]}],
-            "cubes": [{"name": "kpi", "base_object": "orders", "measures": [], "dimensions": [], "time_dimensions": []}],
+            "views": [
+                {
+                    "name": "revenue",
+                    "description": "Revenue per order.",
+                    "guarantees": ["a", "b"],
+                }
+            ],
+            "cubes": [
+                {
+                    "name": "kpi",
+                    "base_object": "orders",
+                    "measures": [],
+                    "dimensions": [],
+                    "time_dimensions": [],
+                }
+            ],
         },
         declarations=(EXCLUDE_TEST,),
         **kwargs,
@@ -419,13 +448,18 @@ def test_the_rules_summary_rides_on_the_first_page_without_prose():
         declarations=(EXCLUDE_TEST,),
     )
     text = r.list()["text"]
-    assert "rule knowledge/rules/a.md: defaults: exclude-test-orders; columns: orders.is_test" in text
+    assert (
+        "rule knowledge/rules/a.md: defaults: exclude-test-orders; columns: orders.is_test"
+        in text
+    )
     assert "SECRET PROSE" not in text
 
 
 def test_a_large_project_is_paged_not_truncated_or_refused():
     models = [
-        model(f"model_{i:02d}", f"Business description number {i} for the demo catalog.")
+        model(
+            f"model_{i:02d}", f"Business description number {i} for the demo catalog."
+        )
         for i in range(45)
     ]
     r = reader({"models": models}, budget=1024)
@@ -434,14 +468,17 @@ def test_a_large_project_is_paged_not_truncated_or_refused():
     for number in range(1, r.pages + 1):
         text = r.list(number)["text"]
         assert len(text.encode()) <= 1024, number
-        seen += [l.split(":")[0].split()[1] for l in text.splitlines() if l.startswith("model ")]
+        seen += [
+            l.split(":")[0].split()[1]
+            for l in text.splitlines()
+            if l.startswith("model ")
+        ]
         if number < r.pages:
             assert f"call list_context with page={number + 1}" in text
     assert seen == [m["name"] for m in models]
     assert all(
-        f"Business description number {i} for the demo catalog." in "".join(
-            r.list(n)["text"] for n in range(1, r.pages + 1)
-        )
+        f"Business description number {i} for the demo catalog."
+        in "".join(r.list(n)["text"] for n in range(1, r.pages + 1))
         for i in range(45)
     )
     assert r.list(r.pages + 1) == {"error": "page_out_of_range", "pages": r.pages}
@@ -464,7 +501,9 @@ def test_a_budget_below_the_floor_is_refused():
 
 def test_select_only_records_and_rejects_unknown_ids():
     r = three_models()
-    assert r.select(["orders", "orders", "revenue"]) == {"selected": ["orders", "revenue"]}
+    assert r.select(["orders", "orders", "revenue"]) == {
+        "selected": ["orders", "revenue"]
+    }
     bad = r.select(["orders", "nope"])
     assert bad["error"] == "unknown_context_id" and bad["unknown"] == ["nope"]
     assert r.select([])["error"] == "invalid_ids"
@@ -479,7 +518,9 @@ def test_read_returns_columns_enum_meanings_and_the_rules_that_concern_the_model
         {
             "models": [
                 {
-                    **model("orders", "One row per order.", ("id", "status", "customer_id")),
+                    **model(
+                        "orders", "One row per order.", ("id", "status", "customer_id")
+                    ),
                     "columns": [
                         {"name": "id", "type": "INTEGER", "not_null": True},
                         {
@@ -488,7 +529,11 @@ def test_read_returns_columns_enum_meanings_and_the_rules_that_concern_the_model
                             "description": "Order state.",
                             "enum_values": [{"value": "P", "meaning": "paid"}],
                         },
-                        {"name": "customer_id", "type": "INTEGER", "relationship": "orders_customers"},
+                        {
+                            "name": "customer_id",
+                            "type": "INTEGER",
+                            "relationship": "orders_customers",
+                        },
                         {"name": "hidden_col", "type": "INTEGER", "is_hidden": True},
                     ],
                 },
@@ -504,12 +549,18 @@ def test_read_returns_columns_enum_meanings_and_the_rules_that_concern_the_model
                 }
             ],
             "knowledge_rules": [
-                {"path": "knowledge/rules/by-prose.md", "content": "Revenue comes from orders."},
+                {
+                    "path": "knowledge/rules/by-prose.md",
+                    "content": "Revenue comes from orders.",
+                },
                 {
                     "path": "knowledge/rules/by-declaration.md",
                     "content": "---\ndefaults:\n  - {id: exclude-test-orders, kind: exclude_rows, column: orders.is_test, exclude: true, covers: {reaching: orders, via: many_to_one}}\n---\nNo prose here.",
                 },
-                {"path": "knowledge/rules/unrelated.md", "content": "Nothing about it. Orderly is not orders_x."},
+                {
+                    "path": "knowledge/rules/unrelated.md",
+                    "content": "Nothing about it. Orderly is not orders_x.",
+                },
             ],
         },
         declarations=(EXCLUDE_TEST,),
@@ -526,7 +577,9 @@ def test_read_returns_columns_enum_meanings_and_the_rules_that_concern_the_model
     ]
     assert r.read(["fx_rates"])["rules"] == []
     one = r.read(["rule:knowledge/rules/unrelated.md"])
-    assert one["items"] == [] and one["rules"][0]["content"].startswith("Nothing about it")
+    assert one["items"] == [] and one["rules"][0]["content"].startswith(
+        "Nothing about it"
+    )
 
 
 # --- denied columns are removed from every projection ---------------------------------------
@@ -537,10 +590,18 @@ def denying_reader(budget=4096):
         {
             "models": [
                 {
-                    **model("customers", "Customers. Their email is private. Region is shared.", ("id",)),
+                    **model(
+                        "customers",
+                        "Customers. Their email is private. Region is shared.",
+                        ("id",),
+                    ),
                     "columns": [
                         {"name": "id", "type": "INTEGER"},
-                        {"name": "region", "type": "VARCHAR", "description": "Sales region."},
+                        {
+                            "name": "region",
+                            "type": "VARCHAR",
+                            "description": "Sales region.",
+                        },
                         {
                             "name": "email",
                             "type": "VARCHAR",
@@ -556,7 +617,11 @@ def denying_reader(budget=4096):
                         },
                     ],
                 },
-                model("orders", "Orders reference customers.email for contact.", ("id", "customer_id")),
+                model(
+                    "orders",
+                    "Orders reference customers.email for contact.",
+                    ("id", "customer_id"),
+                ),
             ],
             "relationships": [
                 {
@@ -579,10 +644,18 @@ def denying_reader(budget=4096):
                     "description": "Customer counts. Grouped by email or region.",
                     "measures": [
                         {"name": "customers", "type": "COUNT"},
-                        {"name": "email", "type": "COUNT", "description": "Distinct email."},
+                        {
+                            "name": "email",
+                            "type": "COUNT",
+                            "description": "Distinct email.",
+                        },
                     ],
                     "dimensions": [
-                        {"name": "region", "type": "STRING", "description": "Sales region."},
+                        {
+                            "name": "region",
+                            "type": "STRING",
+                            "description": "Sales region.",
+                        },
                         {"name": "Email", "type": "STRING"},
                     ],
                     "time_dimensions": [{"name": "email", "type": "DATE"}],
@@ -696,7 +769,9 @@ def test_the_declaration_never_reaches_rule_text_whatever_its_yaml_spelling(spel
     r = reader(
         {
             "models": [model("customers", "Customers.", ("id", "email"))],
-            "knowledge_rules": [{"path": path, "content": DECLARATION_SPELLINGS[spelling]}],
+            "knowledge_rules": [
+                {"path": path, "content": DECLARATION_SPELLINGS[spelling]}
+            ],
         },
         denied=[("customers", "email")],
     )
@@ -726,7 +801,9 @@ def test_a_denied_column_that_survives_stripping_refuses_startup():
             reader(
                 {
                     "models": [model("customers", "Customers.", ("id", "email"))],
-                    "knowledge_rules": [{"path": "knowledge/rules/pii.md", "content": content}],
+                    "knowledge_rules": [
+                        {"path": "knowledge/rules/pii.md", "content": content}
+                    ],
                 },
                 denied=[("customers", "email")],
             )
@@ -742,14 +819,18 @@ def test_an_escaped_spelling_of_a_denied_column_in_a_non_declaring_file_refuses_
         reader(
             {
                 "models": [model("customers", "Customers.", ("id", "email"))],
-                "knowledge_rules": [{"path": "knowledge/rules/pii.md", "content": content}],
+                "knowledge_rules": [
+                    {"path": "knowledge/rules/pii.md", "content": content}
+                ],
             },
             denied=[("customers", "email")],
         )
     with pytest.raises(DeniedColumnsInvalid):
         strip_denied_declaration(content, frozenset({("customers", "email")}))
     # The same file is fine when the denied column is not the one it names.
-    assert strip_denied_declaration(content, frozenset({("customers", "id")})) == content
+    assert (
+        strip_denied_declaration(content, frozenset({("customers", "id")})) == content
+    )
 
 
 def test_front_matter_yaml_cannot_read_but_that_mentions_the_key_refuses_startup():
@@ -807,14 +888,27 @@ def test_the_real_loader_carries_the_semantics_and_the_manifest(real_project):
     ("entries", "message"),
     [
         ("  - {id: a, models: [orders], note: x, extra: 1}\n", "semantics_invalid"),
-        ("  - {id: a, models: [ghosts], note: fine}\n", "a: unknown model or view ghosts"),
-        ("  - {id: a, models: [orders], note: 'Ranks by email domain.'}\n", "a: names a denied column"),
+        (
+            "  - {id: a, models: [ghosts], note: fine}\n",
+            "a: unknown model or view ghosts",
+        ),
+        (
+            "  - {id: a, models: [orders], note: 'Ranks by email domain.'}\n",
+            "a: names a denied column",
+        ),
         ("  - {id: a, models: [orders], note: 'Skips customers.email.'}\n", "denied"),
-        ("  - {id: customers-email, models: [orders], note: fine}\n", "names a denied column"),
+        (
+            "  - {id: customers-email, models: [orders], note: fine}\n",
+            "names a denied column",
+        ),
     ],
 )
-def test_a_semantics_entry_that_cannot_be_served_refuses_to_start(real_project, entries, message):
-    (real_project / "knowledge/rules/conventions.md").write_text(semantics_front(entries))
+def test_a_semantics_entry_that_cannot_be_served_refuses_to_start(
+    real_project, entries, message
+):
+    (real_project / "knowledge/rules/conventions.md").write_text(
+        semantics_front(entries)
+    )
     with pytest.raises((SemanticsInvalid, DeniedColumnsInvalid), match=message):
         load_snapshot(real_project)
 
@@ -829,7 +923,9 @@ def test_a_semantics_entry_may_name_a_view(real_project):
     ]
 
 
-def test_a_manifest_and_a_catalog_that_disagree_about_views_are_inconsistent(real_project):
+def test_a_manifest_and_a_catalog_that_disagree_about_views_are_inconsistent(
+    real_project,
+):
     manifest = real_project / "target/mdl.json"
     built = json.loads(manifest.read_text())
     built["views"] = []
@@ -861,4 +957,7 @@ def test_a_sale_statuses_rule_is_listed_on_its_model_and_in_the_rules_summary():
     )
     text = r.list()["text"]
     assert "model orders: One row per order. [defaults: paid-and-shipped]" in text
-    assert "rule knowledge/rules/a.md: defaults: paid-and-shipped; columns: orders.status" in text
+    assert (
+        "rule knowledge/rules/a.md: defaults: paid-and-shipped; columns: orders.status"
+        in text
+    )

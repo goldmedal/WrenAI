@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 import yaml
 from typer.testing import CliRunner
-
 from wren.cli import app
 from wren.genbi.index import MalformedIndexError, index_path, load_index
 

@@ -4,7 +4,6 @@ from copy import deepcopy
 
 import pytest
 from sqlglot import parse_one
-
 from wren.query_semantics import cubes_read_as_tables, query_semantics
 
 pytestmark = pytest.mark.unit

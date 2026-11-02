@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
-
 from wren.cli import app
 from wren.osi import (
     _extract_wren_block,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from wren.connector import factory
 from wren.model.data_source import DataSource
 from wren.model.error import ErrorCode, WrenError

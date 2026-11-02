@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import pyarrow as pa
 import pytest
-
 from wren.connector.mysql import (
     _apply_limit,
     _arrow_decimal_from_mysql_field,
@@ -108,8 +107,7 @@ def test_mysql_url_allows_raw_brackets_in_password(scheme: str) -> None:
 def test_mysql_url_decodes_user_password_and_database() -> None:
     out = _build_mysql_connect_kwargs(
         _FakeConnInfoFromUrl(
-            "mysql://us%40er:p%40ss%20word@db.example.com:3306/my%20db"
-            "?charset=utf8mb4"
+            "mysql://us%40er:p%40ss%20word@db.example.com:3306/my%20db?charset=utf8mb4"
         )
     )
 

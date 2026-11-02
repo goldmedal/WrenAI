@@ -1,7 +1,6 @@
 """Shared strip_trailing_semicolon helper (connector base)."""
 
 import pytest
-
 from wren.connector.base import strip_trailing_semicolon
 
 

@@ -7,7 +7,6 @@ from pathlib import Path
 
 import duckdb
 import yaml
-
 from wren.context import build_json
 
 RULES = """---

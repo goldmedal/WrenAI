@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from wren.config import WrenConfig, load_config
 from wren.model.error import WrenError
 

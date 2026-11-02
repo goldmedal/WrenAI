@@ -20,11 +20,13 @@ EXAMPLES = Path(__file__).resolve().parents[4] / "examples/serve-agent"
 FAKE_RUNTIME = Path(__file__).parent / "fixtures/fake_runtime.js"
 
 GOOD = "SELECT COUNT(*) FROM customers"
-ORDERS = "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
-REJECTED = "SELECT SUM(amt) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
-ENGINE_FAILS = (
-    "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped') AND CAST('abc' AS INTEGER) = 1"
+ORDERS = (
+    "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
 )
+REJECTED = (
+    "SELECT SUM(amt) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
+)
+ENGINE_FAILS = "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped') AND CAST('abc' AS INTEGER) = 1"
 
 
 @pytest.fixture
@@ -169,7 +171,10 @@ def test_a_token_returned_after_the_task_ended_is_dropped_even_if_abort_is_ignor
     [
         ("DELETE FROM orders", "query_denied:not_read_only"),
         ("SELECT * FROM synthetic.main.raw_orders", "query_denied:external_source"),
-        ("SELECT * FROM orders o JOIN missing m ON o.id = m.id", "query_denied:unknown_model"),
+        (
+            "SELECT * FROM orders o JOIN missing m ON o.id = m.id",
+            "query_denied:unknown_model",
+        ),
     ],
 )
 def test_every_authorization_failure_ends_the_task(scripted, sql, detail):
@@ -292,9 +297,17 @@ def test_a_continued_task_keeps_its_budget(scripted):
     assert len(events(s, "private_sql_rejected")) == 3
 
 
-def test_a_function_miss_is_rewritten_inside_the_same_task_and_is_not_terminal(scripted):
+def test_a_function_miss_is_rewritten_inside_the_same_task_and_is_not_terminal(
+    scripted,
+):
     s = scripted()
-    out = s.execute(ask(s, "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped') AND order_date < now()", ORDERS))
+    out = s.execute(
+        ask(
+            s,
+            "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped') AND order_date < now()",
+            ORDERS,
+        )
+    )
     assert out["status"] == "completed" and out["result"]["rows"] == [{"c1": 12}]
     assert [(e["code"], e["sub_code"]) for e in events(s, "private_sql_rejected")] == [
         ("unsupported_query", "unsupported_function")
@@ -305,7 +318,9 @@ def test_a_function_miss_is_rewritten_inside_the_same_task_and_is_not_terminal(s
 
 def test_function_misses_consume_the_rejection_budget(scripted):
     s = scripted()
-    miss = "SELECT now() FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
+    miss = (
+        "SELECT now() FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
+    )
     out = finished(s, ask(s, miss, miss, miss, GOOD))
     assert out == {"status": "unavailable", "reason": "worker"}
     assert exhausted(s) == [{"kind": "rejected", "attempts": 3}]
@@ -329,7 +344,9 @@ def test_an_unexpected_planner_error_is_not_terminal(scripted, monkeypatch):
     ]
 
 
-def test_an_undetermined_statement_counts_toward_the_rejection_total(scripted, monkeypatch):
+def test_an_undetermined_statement_counts_toward_the_rejection_total(
+    scripted, monkeypatch
+):
     import wren.agent_sql as agent_sql  # noqa: PLC0415
 
     real = agent_sql.evaluate

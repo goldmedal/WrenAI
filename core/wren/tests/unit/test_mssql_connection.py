@@ -19,7 +19,6 @@ from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
-
 from wren.connector.mssql import (
     MSSqlConnector,
     _connect_mssql_from_url,

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
-
 from wren.cli import app
 from wren.context import build_json, load_rules, validate_project
 from wren.declared_defaults import (
@@ -387,7 +386,9 @@ def test_a_sale_statuses_rule_may_be_overridable_and_aggregated_only(project):
 
 
 def test_the_domain_defaults_to_the_enum_values_the_catalog_gives(project):
-    declare(project, mutate(SALE, "    domain: [paid, shipped, cancelled, pending]\n", ""))
+    declare(
+        project, mutate(SALE, "    domain: [paid, shipped, cancelled, pending]\n", "")
+    )
     declarations, errors = parse(project)
     assert declarations == []
     assert len(errors) == 1 and "no 'domain'" in errors[0][1]
@@ -405,7 +406,9 @@ def test_the_domain_falls_back_to_the_manifest_enum_values(project):
             "  - name: status\n    type: VARCHAR\n    properties:\n      enum_values: {paid: a, shipped: b, void: c}\n",
         )
     )
-    declare(project, mutate(SALE, "    domain: [paid, shipped, cancelled, pending]\n", ""))
+    declare(
+        project, mutate(SALE, "    domain: [paid, shipped, cancelled, pending]\n", "")
+    )
     (rule,) = parse(project)[0]
     assert rule.domain == ("paid", "shipped", "void")
 
@@ -427,14 +430,26 @@ SALE_INVALID = {
         mutate(SALE, "[paid, shipped, cancelled, pending]", "[paid, Paid, shipped]"),
         "lists a value twice",
     ),
-    "empty values": (mutate(SALE, "values: [paid, shipped]", "values: []"), "values must be a non-empty list"),
+    "empty values": (
+        mutate(SALE, "values: [paid, shipped]", "values: []"),
+        "values must be a non-empty list",
+    ),
     "number as a value": (
         mutate(SALE, "values: [paid, shipped]", "values: [1, 2]"),
         "values must be a non-empty list",
     ),
-    "values not a list": (mutate(SALE, "values: [paid, shipped]", "values: paid"), "values must be a non-empty list"),
-    "unknown column": (mutate(SALE, "orders.status", "orders.nope"), "unknown column 'orders.nope'"),
-    "unknown model": (mutate(SALE, "orders.status", "ghosts.status"), "unknown model 'ghosts'"),
+    "values not a list": (
+        mutate(SALE, "values: [paid, shipped]", "values: paid"),
+        "values must be a non-empty list",
+    ),
+    "unknown column": (
+        mutate(SALE, "orders.status", "orders.nope"),
+        "unknown column 'orders.nope'",
+    ),
+    "unknown model": (
+        mutate(SALE, "orders.status", "ghosts.status"),
+        "unknown model 'ghosts'",
+    ),
     "overridable is not a boolean": (
         SALE + "    overridable_by_caller: yes please\n",
         "'overridable_by_caller' must be true or false",
@@ -466,7 +481,9 @@ def test_a_sale_statuses_error_voids_the_other_declarations_too(project):
 
 
 def test_validate_project_reports_a_sale_statuses_error(project):
-    declare(project, mutate(SALE, "values: [paid, shipped]", "values: [paid, refunded]"))
+    declare(
+        project, mutate(SALE, "values: [paid, shipped]", "values: [paid, refunded]")
+    )
     errors = validate_project(project)
     assert [error.level for error in errors] == ["error"]
     assert "values must all belong to the domain" in str(errors[0])

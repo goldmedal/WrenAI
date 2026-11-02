@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 from sqlglot import exp, parse_one
-
 from wren.config import WrenConfig
 from wren.model.error import ErrorCode, WrenError
 from wren.policy import validate_sql_policy

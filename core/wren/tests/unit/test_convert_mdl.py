@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from wren.context import (
     _AGENTS_MD_TEMPLATE,
     _CAMEL_TO_SNAKE_MAP,
@@ -268,7 +267,9 @@ def test_no_data_source():
     """Missing dataSource — wren_project.yml omits data_source field."""
     mdl = {"catalog": "wren", "schema": "public", "models": [], "views": []}
     files = convert_mdl_to_project(mdl)
-    project = yaml.safe_load(next(f for f in files if f.relative_path == "wren_project.yml").content)
+    project = yaml.safe_load(
+        next(f for f in files if f.relative_path == "wren_project.yml").content
+    )
     assert "data_source" not in project
 
 
@@ -314,14 +315,20 @@ def test_empty_relationships_not_written():
 
 def test_cli_init_from_mdl(tmp_path: Path, sample_mdl_file: Path):
     from typer.testing import CliRunner
-
     from wren.cli import app
 
     runner = CliRunner()
     project_dir = tmp_path / "project"
     result = runner.invoke(
         app,
-        ["context", "init", "--path", str(project_dir), "--from-mdl", str(sample_mdl_file)],
+        [
+            "context",
+            "init",
+            "--path",
+            str(project_dir),
+            "--from-mdl",
+            str(sample_mdl_file),
+        ],
     )
     assert result.exit_code == 0, result.output
     assert "Imported MDL" in result.output
@@ -331,13 +338,19 @@ def test_cli_init_from_mdl(tmp_path: Path, sample_mdl_file: Path):
 
 def test_cli_init_from_mdl_file_not_found(tmp_path: Path):
     from typer.testing import CliRunner
-
     from wren.cli import app
 
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["context", "init", "--path", str(tmp_path), "--from-mdl", "/nonexistent/mdl.json"],
+        [
+            "context",
+            "init",
+            "--path",
+            str(tmp_path),
+            "--from-mdl",
+            "/nonexistent/mdl.json",
+        ],
     )
     assert result.exit_code != 0
     assert "not found" in result.output
@@ -347,13 +360,19 @@ def test_cli_init_from_mdl_no_force_existing(tmp_path: Path, sample_mdl_file: Pa
     """Refuse to overwrite without --force."""
     (tmp_path / "wren_project.yml").write_text("existing")
     from typer.testing import CliRunner
-
     from wren.cli import app
 
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["context", "init", "--path", str(tmp_path), "--from-mdl", str(sample_mdl_file)],
+        [
+            "context",
+            "init",
+            "--path",
+            str(tmp_path),
+            "--from-mdl",
+            str(sample_mdl_file),
+        ],
     )
     assert result.exit_code != 0
     assert "already exists" in result.output
@@ -363,7 +382,6 @@ def test_cli_init_from_mdl_force(tmp_path: Path, sample_mdl_file: Path):
     """Overwrite with --force."""
     (tmp_path / "wren_project.yml").write_text("existing")
     from typer.testing import CliRunner
-
     from wren.cli import app
 
     runner = CliRunner()

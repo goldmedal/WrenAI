@@ -6,7 +6,6 @@ import json
 
 import pytest
 import yaml
-
 from wren.dbt import (
     DbtLoadError,
     convert_dbt_project_to_wren_project,
@@ -331,9 +330,9 @@ class TestLoadDbtArtifacts:
         monkeypatch.setenv("JAFFLE_DUCKDB_PATH", "warehouse/jaffle.duckdb")
         catalog_path = project_dir / "build" / "catalog.json"
         catalog = json.loads(catalog_path.read_text())
-        catalog["nodes"]["model.jaffle_shop.orders"]["columns"]["id"][
-            "type"
-        ] = "character varying(255)"
+        catalog["nodes"]["model.jaffle_shop.orders"]["columns"]["id"]["type"] = (
+            "character varying(255)"
+        )
         catalog_path.write_text(json.dumps(catalog))
 
         imported = convert_dbt_project_to_wren_project(

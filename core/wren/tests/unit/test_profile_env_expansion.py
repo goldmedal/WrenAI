@@ -9,7 +9,6 @@ the same on Windows, macOS, and Linux.
 from __future__ import annotations
 
 import pytest
-
 from wren import profile as profile_mod
 from wren.profile import (
     MissingSecretError,
@@ -48,9 +47,9 @@ def test_expands_simple_var(monkeypatch):
 def test_expands_inside_larger_string(monkeypatch):
     monkeypatch.setenv("USER_NAME", "paul")
     monkeypatch.setenv("HOST_NAME", "db.local")
-    assert expand_profile_secrets({"url": "postgres://${USER_NAME}@${HOST_NAME}/x"}) == {
-        "url": "postgres://paul@db.local/x"
-    }
+    assert expand_profile_secrets(
+        {"url": "postgres://${USER_NAME}@${HOST_NAME}/x"}
+    ) == {"url": "postgres://paul@db.local/x"}
 
 
 def test_undefined_var_raises(monkeypatch):
@@ -80,9 +79,7 @@ def test_double_dollar_escapes_to_literal():
 
 def test_mixed_escape_and_var(monkeypatch):
     monkeypatch.setenv("X", "v")
-    assert expand_profile_secrets({"k": "$${literal}-${X}"}) == {
-        "k": "${literal}-v"
-    }
+    assert expand_profile_secrets({"k": "$${literal}-${X}"}) == {"k": "${literal}-v"}
 
 
 # ── Nested structures ──────────────────────────────────────────────────────
@@ -109,9 +106,7 @@ def test_non_string_values_preserved(monkeypatch):
 def test_list_of_strings_expanded(monkeypatch):
     monkeypatch.setenv("A", "x")
     monkeypatch.setenv("B", "y")
-    assert expand_profile_secrets({"names": ["${A}", "${B}"]}) == {
-        "names": ["x", "y"]
-    }
+    assert expand_profile_secrets({"names": ["${A}", "${B}"]}) == {"names": ["x", "y"]}
 
 
 # ── .env file loading ──────────────────────────────────────────────────────

@@ -10,7 +10,6 @@ import pytest
 pytest.importorskip("mcp")
 
 import pyarrow as pa  # noqa: E402
-
 from wren.mcp_server import ServeContext, _workflow_text, build_server  # noqa: E402
 
 pytestmark = pytest.mark.unit

@@ -6,9 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-
 from wren.context import (
-    UpgradeError,
     _convert_keys,
     _snake_to_camel,
     apply_upgrade,
@@ -1491,11 +1489,8 @@ _PROJECT_FILE = "wren_project.yml"
 # ── Semantic validation tests (view dry-plan + description checks) ─────────
 
 import base64
-import json as _json
 
 import orjson
-import pytest
-
 from wren.context import validate_manifest
 from wren.model.data_source import DataSource
 

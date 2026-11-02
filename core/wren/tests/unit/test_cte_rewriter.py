@@ -7,7 +7,6 @@ import base64
 import orjson
 import pytest
 import sqlglot
-
 from wren.mdl import get_session_context
 from wren.mdl.cte_rewriter import CTERewriter, get_sqlglot_dialect
 from wren.model.data_source import DataSource

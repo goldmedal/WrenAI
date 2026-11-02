@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 from typer.testing import CliRunner
-
 from wren.cli import app
 
 runner = CliRunner()

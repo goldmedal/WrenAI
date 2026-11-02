@@ -8,7 +8,6 @@ extra happens to be installed locally.
 from __future__ import annotations
 
 from typer.testing import CliRunner
-
 from wren.cli import app
 from wren.memory.index_backend import GrepIndex, get_index, resolve_backend
 from wren.memory.markdown import write_query_markdown
