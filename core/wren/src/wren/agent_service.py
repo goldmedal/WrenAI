@@ -633,7 +633,8 @@ class Service:
             checks = internal.get("checks") or {}
             unverified = internal.get("unverified") or []
             if any(
-                c.get("result") not in STORED_CHECK_RESULTS for c in checks.values()
+                not isinstance(c, dict) or c.get("result") not in STORED_CHECK_RESULTS
+                for c in checks.values()
             ):
                 raise ValueError("invalid_evidence")
             projection = {"mandatory_scope": copy.deepcopy(saved["conditions"])}

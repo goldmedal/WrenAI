@@ -909,6 +909,7 @@ def test_invalid_execution_values_are_refused(execution):
 
 def test_execution_limits_passthrough(service, monkeypatch):
     monkeypatch.delenv("WREN_IPC_CALL_TIMEOUT_S", raising=False)
+    monkeypatch.setenv("NVIDIA_INFERENCE_API_KEY", "test-only-dummy-value")
     s = service(runtime_path=FAKE_RUNTIME)
     init = s.ipc.call("echo_init")
     assert init["limits"] == {"deadlineMs": 120000}
@@ -1840,6 +1841,15 @@ def test_the_evidence_permits_have_a_matching_deny(service):
     for kind in ("answer.evidence.checks", "answer.description"):
         assert adhoc.allowed(held, "receive_answer", kind, "analytics") is True
     assert adhoc.allowed(held, "receive_answer", "answer.evidence.checks", "orders") is False
+    assert adhoc.allowed(held, "receive_answer", "answer.descriptions", "analytics") is False
+    assert adhoc.allowed(held, "receive_answer", "answer.evidence", "analytics") is False
+    withheld = service(
+        profile="adhoc",
+        policy='forbid(principal, action == Service::Action::"receive_answer", resource) '
+        'when { resource.kind == "answer.description" };',
+    )
+    held = withheld.sessions[withheld.open()["session_id"]]
+    assert withheld.allowed(held, "receive_answer", "answer.description", "analytics") is False
 
 
 def test_the_setup_presets_are_the_four_modes_and_only_narrow(
@@ -2108,6 +2118,25 @@ def test_evidence_that_cannot_be_projected_is_neither_delivered_nor_kept(service
         return result, internal
 
     monkeypatch.setattr(s.sql, "execute", violated)
+    r = sql_request(s, JOINED)
+    with pytest.raises(ValueError, match="invalid_evidence"):
+        execute(s, r)
+    held = s.sessions[r.session_id]
+    assert not held["results"] and not held["evidence"] and held["revision"] == 0
+    failed = events_named(s, "task_failed")[-1]
+    assert (failed["reason"], failed["detail"]) == ("invalid_evidence", "projection")
+
+
+def test_a_malformed_check_entry_is_neither_delivered_nor_kept(service, monkeypatch):
+    s = service(example_presets=True, preset="full")
+    real = s.sql.execute
+
+    def malformed(prepared):
+        result, internal = real(prepared)
+        internal["checks"] = {**internal["checks"], RULE: "satisfied"}
+        return result, internal
+
+    monkeypatch.setattr(s.sql, "execute", malformed)
     r = sql_request(s, JOINED)
     with pytest.raises(ValueError, match="invalid_evidence"):
         execute(s, r)
