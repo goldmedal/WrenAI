@@ -441,9 +441,9 @@ pub fn declared_default_ids(files: &[KnowledgeRuleFile]) -> (Vec<String>, Vec<St
 pub(crate) enum DeniedDeclaration {
     /// An entry as written (not yet checked against the project's models).
     Entry { path: String, entry: String },
-    /// The file's front-matter could not be read, and the file mentions `denied_columns`, so a
-    /// declaration may have been lost.
-    Unreadable { path: String },
+    /// The file's front-matter is missing or could not be read, and the file mentions
+    /// `denied_columns`, so a declaration may have been lost.
+    Unreadable { path: String, reason: &'static str },
 }
 
 const DENIED_COLUMNS_KEY: &str = "denied_columns";
@@ -453,18 +453,30 @@ const DENIED_COLUMNS_KEY: &str = "denied_columns";
 /// Fail closed: a file whose front-matter cannot be read (unclosed fence, invalid YAML) but whose
 /// text mentions `denied_columns` yields [`DeniedDeclaration::Unreadable`], because the author
 /// plainly meant to declare something and a denylist that was only partly read must not be used.
-/// A value that is not a list of strings, or a bare key, is reported entry by entry.
+/// The same holds for a file with no front-matter at all that mentions the key. A front-matter
+/// key that only nearly spells `denied_columns` (other case, `-` for `_`, singular) is reported as
+/// an invalid entry rather than ignored. A scalar value is read as a one-entry list; a value that
+/// is not a name, or a bare key, is reported entry by entry.
 pub(crate) fn denied_column_declarations(files: &[KnowledgeRuleFile]) -> Vec<DeniedDeclaration> {
     let mut out = Vec::new();
     for file in files {
         let mentions_key = file.content.contains(DENIED_COLUMNS_KEY);
         let front = match front_matter(&file.content) {
             Ok(Some(front)) => front,
-            Ok(None) => continue,
+            Ok(None) => {
+                if mentions_key {
+                    out.push(DeniedDeclaration::Unreadable {
+                        path: file.path.clone(),
+                        reason: "front-matter is missing",
+                    });
+                }
+                continue;
+            }
             Err(_) => {
                 if mentions_key {
                     out.push(DeniedDeclaration::Unreadable {
                         path: file.path.clone(),
+                        reason: "front-matter is unreadable",
                     });
                 }
                 continue;
@@ -476,11 +488,22 @@ pub(crate) fn denied_column_declarations(files: &[KnowledgeRuleFile]) -> Vec<Den
                 if mentions_key {
                     out.push(DeniedDeclaration::Unreadable {
                         path: file.path.clone(),
+                        reason: "front-matter is unreadable",
                     });
                 }
                 continue;
             }
         };
+        if let Some(mapping) = data.as_mapping() {
+            for key in mapping.keys().filter_map(serde_yaml::Value::as_str) {
+                if is_near_miss_key(key) {
+                    out.push(DeniedDeclaration::Entry {
+                        path: file.path.clone(),
+                        entry: format!("near-miss key: {key}"),
+                    });
+                }
+            }
+        }
         let Some(value) = data.get(DENIED_COLUMNS_KEY) else {
             continue;
         };
@@ -503,6 +526,19 @@ pub(crate) fn denied_column_declarations(files: &[KnowledgeRuleFile]) -> Vec<Den
         }
     }
     out
+}
+
+/// A key that case-insensitively matches `denied[_-]?columns?` without being `denied_columns`.
+fn is_near_miss_key(key: &str) -> bool {
+    if key == DENIED_COLUMNS_KEY {
+        return false;
+    }
+    let lowered = key.to_ascii_lowercase();
+    let Some(rest) = lowered.strip_prefix("denied") else {
+        return false;
+    };
+    let rest = rest.strip_prefix(['_', '-']).unwrap_or(rest);
+    matches!(rest, "column" | "columns")
 }
 
 /// Split a leading `---` fenced block off `text`: `Ok(None)` when the text does not open with

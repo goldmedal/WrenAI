@@ -102,6 +102,23 @@ def test_a_non_invoke_timeout_clears_pending_without_a_cancel(ipc, monkeypatch):
     assert runtime.process.poll() is None
 
 
+def test_an_invocation_id_still_pending_or_abandoned_cannot_be_reused(ipc, monkeypatch):
+    monkeypatch.setenv("WREN_IPC_CALL_TIMEOUT_S", "0.3")
+    runtime = ipc()
+    with pytest.raises(RuntimeError):
+        invoke(runtime, "hang", "inv-9")
+    assert "inv-9" in runtime.abandoned
+    with pytest.raises(ValueError, match="invalid_invocation_id"):
+        invoke(runtime, "hang", "inv-9")
+    assert "inv-9" not in runtime.pending
+    runtime.pending["inv-10"] = object()
+    with pytest.raises(ValueError, match="invalid_invocation_id"):
+        invoke(runtime, "hang", "inv-10")
+    runtime.pending.pop("inv-10")
+    assert runtime.process.poll() is None
+    assert runtime.call("authorize", request={}) is True
+
+
 def test_a_reply_for_an_id_the_host_never_sent_is_still_a_protocol_violation(ipc):
     runtime = ipc()
     runtime._send({"id": "s-1", "op": "stray"})

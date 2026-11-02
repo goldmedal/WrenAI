@@ -116,6 +116,8 @@ class RuntimeIPC:
 
     def call(self, op, *, callback=None, invocation_id=None, **values):
         ident = invocation_id or str(uuid.uuid4())
+        if ident in self.pending or ident in self.abandoned:
+            raise ValueError("invalid_invocation_id")
         future = concurrent.futures.Future()
         self.pending[ident] = future
         if callback:

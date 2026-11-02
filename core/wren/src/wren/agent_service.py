@@ -30,7 +30,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from wren.agent_ipc import RuntimeIPC
 from wren.agent_project import Project, Query, contained, count_sql, discover
 from wren.agent_sql import AdHocSQL, PrivateSQL, QueryFormError, QueryShapeError
-from wren.context_adapter import ContextReader, load_snapshot
+from wren.context_adapter import (
+    ContextChanged,
+    ContextReader,
+    load_snapshot,
+    project_digest,
+)
 
 
 def uid():
@@ -1288,6 +1293,8 @@ def _assemble_service(
     reader,
     execution,
 ):
+    if project_digest(root) != snapshot.digest:
+        raise ContextChanged("the project changed while the service was starting")
     project = Project(root, config, engine, snapshot, reader)
     project.paths += [config_path, capabilities_path]
     project.paths += sorted(

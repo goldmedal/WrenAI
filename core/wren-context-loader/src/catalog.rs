@@ -297,13 +297,10 @@ impl CapabilityCatalog {
         let mut denied = std::collections::BTreeSet::new();
         for declaration in declarations {
             match declaration {
-                crate::project::DeniedDeclaration::Unreadable { path } => {
+                crate::project::DeniedDeclaration::Unreadable { path, reason } => {
                     self.denied_columns_invalid = true;
                     self.diagnostics
-                        .push(CatalogDiagnostic::denied_columns_invalid(
-                            &path,
-                            "front-matter is unreadable",
-                        ));
+                        .push(CatalogDiagnostic::denied_columns_invalid(&path, reason));
                 }
                 crate::project::DeniedDeclaration::Entry { path, entry } => {
                     if self.has_column(&entry) {

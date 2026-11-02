@@ -166,11 +166,65 @@ fn unreadable_front_matter_that_mentions_the_key_fails_closed() {
 }
 
 #[test]
-fn front_matter_below_the_opening_lines_is_not_a_declaration() {
-    let project = project_with_rule("# Notes\n\n---\ndenied_columns: [customers.email]\n---\n");
+fn a_scalar_value_is_read_as_a_one_entry_list() {
+    let project = project_with_rule("---\ndenied_columns: customers.email\n---\nbody\n");
     let doc = catalog_json(project.path());
-    assert!(doc.get("denied_columns").is_none());
+    assert_eq!(
+        doc["denied_columns"],
+        serde_json::json!(["customers.email"])
+    );
     assert!(doc.get("denied_columns_invalid").is_none());
+}
+
+#[test]
+fn a_near_miss_key_is_an_invalid_declaration_not_a_silent_no_op() {
+    for key in [
+        "Denied_Columns",
+        "denied-columns",
+        "denied_column",
+        "DENIED-COLUMN",
+        "deniedcolumns",
+    ] {
+        let project = project_with_rule(&format!("---\n{key}: [customers.email]\n---\nbody\n"));
+        let doc = catalog_json(project.path());
+        assert_eq!(doc["denied_columns_invalid"], true, "{key}");
+        assert!(doc.get("denied_columns").is_none(), "{key}");
+        assert_eq!(
+            doc["diagnostics"][0]["entry"],
+            format!("near-miss key: {key}"),
+            "{key}"
+        );
+    }
+    // Keys that merely resemble it are not near misses.
+    let project = project_with_rule(
+        "---\ndenied_columns_note: x\nundenied_columns: x\ndenied: x\n---\nbody\n",
+    );
+    assert!(catalog_json(project.path())
+        .get("denied_columns_invalid")
+        .is_none());
+}
+
+#[test]
+fn a_rule_file_without_front_matter_that_mentions_the_key_fails_closed() {
+    for text in [
+        "# Notes\n\n---\ndenied_columns: [customers.email]\n---\n",
+        "denied_columns: [customers.email]\n",
+        "Remember to list customers.email under denied_columns.\n",
+    ] {
+        let project = project_with_rule(text);
+        let doc = catalog_json(project.path());
+        assert_eq!(doc["denied_columns_invalid"], true, "{text}");
+        assert!(doc.get("denied_columns").is_none(), "{text}");
+        assert_eq!(
+            doc["diagnostics"][0]["entry"], "front-matter is missing",
+            "{text}"
+        );
+    }
+    // Without the key, a file with no front-matter is just prose.
+    let project = project_with_rule("# Notes\n\nNothing declared here.\n");
+    assert!(catalog_json(project.path())
+        .get("denied_columns_invalid")
+        .is_none());
 }
 
 #[test]

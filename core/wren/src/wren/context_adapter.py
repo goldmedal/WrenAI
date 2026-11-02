@@ -39,6 +39,7 @@ LOADER_TIMEOUT_S = 60
 MAX_IDS = 16
 MIN_BUDGET_BYTES = 512
 RULE_PREFIX = "rule:"
+DENIED_KEY = "denied_columns"
 
 _DIGEST_ROOT_FILES = (
     "wren_project.yml",
@@ -375,19 +376,29 @@ def _sentences(text: str) -> list[str]:
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
 
 
-def _mentions_denied(sentence: str, model: str | None, denied: frozenset) -> bool:
+def _mentions_denied(
+    sentence: str, model: str | frozenset | None, denied: frozenset
+) -> bool:
+    """Whether ``sentence`` names a denied column.
+
+    The qualified ``model.column`` is always a match. A bare column name matches only for a
+    column of ``model`` (one model name, or a set of them); ``None`` means no owner is known.
+    """
+    owners = {model} if isinstance(model, str) else (model or frozenset())
     lowered = sentence.lower()
     for owner, column in denied:
         if f"{owner}.{column}".lower() in lowered:
             return True
-        if owner == model and re.search(
+        if owner in owners and re.search(
             rf"\b{re.escape(column)}\b", sentence, re.IGNORECASE
         ):
             return True
     return False
 
 
-def _prose(text: str | None, model: str | None, denied: frozenset) -> str | None:
+def _prose(
+    text: str | None, model: str | frozenset | None, denied: frozenset
+) -> str | None:
     """A description with every sentence that names a denied column removed."""
     kept = [
         s for s in _sentences(_one_line(text)) if not _mentions_denied(s, model, denied)
@@ -395,34 +406,52 @@ def _prose(text: str | None, model: str | None, denied: frozenset) -> str | None
     return " ".join(kept) or None
 
 
-def strip_denied_declaration(text: str) -> str:
+def strip_denied_declaration(text: str, denied: frozenset = frozenset()) -> str:
     """A rule file without its ``denied_columns`` front-matter key.
 
     The declaration is configuration, not a business rule, and it names the very columns
-    that must not be disclosed. Everything else in the file is returned as written.
+    that must not be disclosed. The front-matter is parsed as YAML, the key dropped and the
+    rest re-emitted, so every spelling the loader honours is removed; the body is returned as
+    written. Fail closed: when the front-matter cannot be parsed but mentions the key, or when
+    a denied ``model.column`` still occurs in the front-matter that remains, this raises
+    ``DeniedColumnsInvalid`` rather than serve text that may disclose it.
     """
+    import yaml  # noqa: PLC0415
+
     try:
         front, body = split_front_matter(text)
     except ValueError:
         return text
     if front is None:
         return text
-    kept, skipping = [], False
-    for line in front.splitlines():
-        if re.match(r"^denied_columns\s*:", line):
-            skipping = True
-            continue
-        if skipping and (not line.strip() or line[0] in " \t-#"):
-            continue
-        skipping = False
-        kept.append(line)
-    if all(not line.strip() for line in kept):
-        stripped = body.lstrip("\n")
+    try:
+        data = yaml.safe_load(front)
+    except yaml.YAMLError:
+        if DENIED_KEY in front.lower():
+            raise DeniedColumnsInvalid("front-matter is unreadable") from None
+        data = None
+        remaining = front
+        stripped = text
     else:
-        stripped = "---\n" + "\n".join(kept) + "\n---\n" + body
-    return stripped + (
-        "\n" if text.endswith("\n") and not stripped.endswith("\n") else ""
-    )
+        remaining = front
+        stripped = text
+        if isinstance(data, dict) and DENIED_KEY in data:
+            rest = {k: v for k, v in data.items() if k != DENIED_KEY}
+            if rest:
+                remaining = yaml.safe_dump(
+                    rest, sort_keys=False, allow_unicode=True, default_flow_style=None
+                ).rstrip("\n")
+                stripped = "---\n" + remaining + "\n---\n" + body
+            else:
+                remaining = ""
+                stripped = body.lstrip("\n")
+            if text.endswith("\n") and not stripped.endswith("\n"):
+                stripped += "\n"
+    lowered = remaining.lower()
+    for owner, column in denied:
+        if f"{owner}.{column}".lower() in lowered:
+            raise DeniedColumnsInvalid(f"{owner}.{column} remains in the front-matter")
+    return stripped
 
 
 def _front_ids(content: str) -> list[str]:
@@ -490,7 +519,7 @@ class ContextReader:
         self._rules = [
             {
                 "path": r["path"],
-                "content": strip_denied_declaration(r["content"]),
+                "content": self._stripped(r),
                 "ids": _front_ids(r["content"]),
             }
             for r in catalog.get("knowledge_rules") or []
@@ -502,6 +531,24 @@ class ContextReader:
         self._pages = self._paginate()
 
     # -- items
+
+    def _stripped(self, rule: dict) -> str:
+        try:
+            return strip_denied_declaration(rule["content"], self.denied)
+        except DeniedColumnsInvalid as exc:
+            raise DeniedColumnsInvalid(f"{rule['path']}: {exc.detail}") from None
+
+    def _scope(self, kind: str, item: dict) -> frozenset:
+        """The models whose denied columns a bare name in ``item``'s text may refer to.
+
+        A model refers to itself and a cube to its base object. A view carries no definition
+        the adapter can resolve, so any denied column may be the one it describes.
+        """
+        if kind == "model":
+            return frozenset({item["name"]})
+        if kind == "cube":
+            return frozenset({item["base_object"]})
+        return frozenset(owner for owner, _ in self.denied)
 
     def _relationship_denied(self, relationship: dict) -> bool:
         return _mentions_denied(
@@ -527,7 +574,9 @@ class ContextReader:
         tables = (("model", self._models), ("cube", self._cubes), ("view", self._views))
         for kind, items in tables:
             for name, item in items.items():
-                description = _prose(item.get("description"), name, self.denied)
+                description = _prose(
+                    item.get("description"), self._scope(kind, item), self.denied
+                )
                 tag = ""
                 if kind == "model" and (ids := self._defaults_for(name)):
                     tag = f" [defaults: {','.join(ids)}]"
@@ -730,10 +779,18 @@ class ContextReader:
 
     def _cube_item(self, cube: dict) -> dict:
         base = cube["base_object"]
+        scope = self._scope("cube", cube)
+
+        def members(key: str) -> list[dict]:
+            return [
+                member(m)
+                for m in cube.get(key) or []
+                if (base, str(m["name"]).lower()) not in self.denied
+            ]
 
         def member(m: dict) -> dict:
             out = {"name": m["name"], "type": m["type"]}
-            if description := _prose(m.get("description"), base, self.denied):
+            if description := _prose(m.get("description"), scope, self.denied):
                 out["description"] = description
             for key in ("granularities", "date_range"):
                 if m.get(key):
@@ -744,17 +801,19 @@ class ContextReader:
             "kind": "cube",
             "name": cube["name"],
             "base_object": base,
-            "description": _prose(cube.get("description"), base, self.denied),
-            "measures": [member(m) for m in cube.get("measures") or []],
-            "dimensions": [member(m) for m in cube.get("dimensions") or []],
-            "time_dimensions": [member(m) for m in cube.get("time_dimensions") or []],
+            "description": _prose(cube.get("description"), scope, self.denied),
+            "measures": members("measures"),
+            "dimensions": members("dimensions"),
+            "time_dimensions": members("time_dimensions"),
         }
 
     def _view_item(self, view: dict) -> dict:
         item = {
             "kind": "view",
             "name": view["name"],
-            "description": _prose(view.get("description"), None, self.denied),
+            "description": _prose(
+                view.get("description"), self._scope("view", view), self.denied
+            ),
             "guarantees": list(view.get("guarantees") or []),
         }
         return {k: v for k, v in item.items() if v not in (None, [])}

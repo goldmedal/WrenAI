@@ -533,6 +533,29 @@ def denying_reader(budget=4096):
                     "condition": "orders.customer_id = customers.id",
                 },
             ],
+            "cubes": [
+                {
+                    "name": "customer_cube",
+                    "base_object": "customers",
+                    "description": "Customer counts. Grouped by email or region.",
+                    "measures": [
+                        {"name": "customers", "type": "COUNT"},
+                        {"name": "email", "type": "COUNT", "description": "Distinct email."},
+                    ],
+                    "dimensions": [
+                        {"name": "region", "type": "STRING", "description": "Sales region."},
+                        {"name": "Email", "type": "STRING"},
+                    ],
+                    "time_dimensions": [{"name": "email", "type": "DATE"}],
+                }
+            ],
+            "views": [
+                {
+                    "name": "customer_overview",
+                    "description": "Rollups exposing the email column. Regional rollups.",
+                    "guarantees": [],
+                }
+            ],
             "knowledge_rules": [
                 {
                     "path": "knowledge/rules/pii.md",
@@ -550,7 +573,15 @@ def test_a_denied_column_is_absent_from_every_projection():
     everything = json.dumps(
         [
             r.list(1),
-            r.read(["customers", "orders", "rule:knowledge/rules/pii.md"]),
+            r.read(
+                [
+                    "customers",
+                    "orders",
+                    "customer_cube",
+                    "customer_overview",
+                    "rule:knowledge/rules/pii.md",
+                ]
+            ),
             r.structure_document(),
             r.rules_document(),
             r.describe(),
@@ -568,17 +599,107 @@ def test_a_denied_column_is_absent_from_every_projection():
     assert "orders_customers" in r.structure_document()
 
 
+def test_cube_members_and_view_text_do_not_name_a_denied_column():
+    r = denying_reader()
+    cube, view = r.read(["customer_cube", "customer_overview"])["items"]
+    assert cube["description"] == "Customer counts."
+    assert [m["name"] for m in cube["measures"]] == ["customers"]
+    assert [m["name"] for m in cube["dimensions"]] == ["region"]
+    assert cube["time_dimensions"] == []
+    assert view["description"] == "Regional rollups."
+    listed = r.list(1)["text"]
+    assert "cube customer_cube: Customer counts." in listed
+    assert "view customer_overview: Regional rollups." in listed
+    assert "email" not in (listed + r.structure_document()).lower()
+
+
 def test_strip_denied_declaration_removes_only_the_denylist_key():
     flow = "---\ndenied_columns: [a.b, c.d]\ndefaults: []\n---\nbody\n"
     assert strip_denied_declaration(flow) == "---\ndefaults: []\n---\nbody\n"
-    block = "---\ndefaults:\n  - {id: x}\ndenied_columns:\n  - a.b\n- c.d\n# note\nmore: 1\n---\nbody"
-    assert strip_denied_declaration(block) == "---\ndefaults:\n  - {id: x}\nmore: 1\n---\nbody"
+    block = "---\ndefaults:\n  - {id: x}\ndenied_columns:\n  - a.b\n  - c.d\n# note\nmore: 1\n---\nbody"
+    assert (
+        strip_denied_declaration(block)
+        == "---\ndefaults:\n- {id: x}\nmore: 1\n---\nbody"
+    )
     only = "---\ndenied_columns: [a.b]\n---\n# Title\n\nbody\n"
     assert strip_denied_declaration(only) == "# Title\n\nbody\n"
     plain = "# no front matter\ndenied_columns: [a.b]\n"
     assert strip_denied_declaration(plain) == plain
     unclosed = "---\ndenied_columns: [a.b]\nnever closed"
     assert strip_denied_declaration(unclosed) == unclosed
+    untouched = "---\ndefaults: []\n---\nbody\n"
+    assert strip_denied_declaration(untouched) == untouched
+
+
+DECLARATION_SPELLINGS = {
+    "plain flow": "---\ndenied_columns: [customers.email]\n---\nbody\n",
+    "block list": "---\ndenied_columns:\n  - customers.email\n---\nbody\n",
+    "double-quoted key": '---\n"denied_columns": [customers.email]\n---\nbody\n',
+    "single-quoted key": "---\n'denied_columns': [customers.email]\n---\nbody\n",
+    "complex key": "---\n? denied_columns\n: [customers.email]\n---\nbody\n",
+    "flow-mapping front-matter": '---\n{"denied_columns": ["customers.email"]}\n---\nbody\n',
+    "flow-mapping with another key": '---\n{"denied_columns": ["customers.email"], defaults: []}\n---\nbody\n',
+    "anchor": "---\ndenied_columns: &d [customers.email]\n---\nbody\n",
+    "crlf": "---\r\ndenied_columns: [customers.email]\r\ndefaults: []\r\n---\r\nbody\r\n",
+    "bom": "\ufeff---\ndenied_columns: [customers.email]\n---\nbody\n",
+    "trailing-space key": "---\ndenied_columns : [customers.email]\n---\nbody\n",
+    "trailing-space fences": "---  \ndenied_columns: [customers.email]\n---  \nbody\n",
+    "inline comment": "---\ndenied_columns: [customers.email] # pii\ndefaults: []\n---\nbody\n",
+    "comment between entries": "---\ndenied_columns:\n  # pii\n  - customers.email\nmore: 1\n---\nbody\n",
+    "quoted entry": '---\ndenied_columns:\n  - "customers.email"\n---\nbody\n',
+    "scalar": "---\ndenied_columns: customers.email\n---\nbody\n",
+}
+
+
+@pytest.mark.parametrize("spelling", list(DECLARATION_SPELLINGS))
+def test_the_declaration_never_reaches_rule_text_whatever_its_yaml_spelling(spelling):
+    path = "knowledge/rules/pii.md"
+    r = reader(
+        {
+            "models": [model("customers", "Customers.", ("id", "email"))],
+            "knowledge_rules": [{"path": path, "content": DECLARATION_SPELLINGS[spelling]}],
+        },
+        denied=[("customers", "email")],
+    )
+    served = json.dumps(
+        [
+            r.documents()["rules"],
+            r.rules_document(),
+            r.read([f"rule:{path}"]),
+            r.read(["customers"]),
+            r.list(1),
+        ]
+    )
+    assert "email" not in served.lower()
+    assert "denied_columns" not in served
+    assert "body" in r.rules_document()
+
+
+def test_a_denied_column_that_survives_stripping_refuses_startup():
+    surviving = {
+        "an alias of the declaration": "---\ndenied_columns: &d [customers.email]\nalso: *d\n---\nbody\n",
+        "another key": "---\ndenied_columns: [customers.email]\nnote: customers.email is pii\n---\nbody\n",
+        "a near-miss key": "---\nDenied_Columns: [Customers.Email]\n---\nbody\n",
+        "a nested value": "---\ndefaults:\n  - {id: x, column: customers.email}\n---\nbody\n",
+    }
+    for label, content in surviving.items():
+        with pytest.raises(DeniedColumnsInvalid, match="pii.md"):
+            reader(
+                {
+                    "models": [model("customers", "Customers.", ("id", "email"))],
+                    "knowledge_rules": [{"path": "knowledge/rules/pii.md", "content": content}],
+                },
+                denied=[("customers", "email")],
+            )
+        assert label
+
+
+def test_front_matter_yaml_cannot_read_but_that_mentions_the_key_refuses_startup():
+    broken = "---\ndenied_columns: [customers.email\n---\nbody\n"
+    with pytest.raises(DeniedColumnsInvalid):
+        strip_denied_declaration(broken)
+    unrelated = "---\ndefaults: [oops\n---\nbody\n"
+    assert strip_denied_declaration(unrelated) == unrelated
 
 
 def test_the_category_views_have_fixed_ids_and_kinds_and_no_sql():

@@ -243,6 +243,22 @@ def test_restart_after_a_project_edit_changes_digest_and_documents_without_confi
     assert "Buyers and" not in before["structure"]["content"]
 
 
+def test_an_edit_during_startup_refuses_the_service(service, monkeypatch):
+    import wren.agent_service as agent_service
+
+    open_engine = agent_service.open_engine
+
+    def edit_then_open(*args, **kwargs):
+        engine = open_engine(*args, **kwargs)
+        rules = service.root / "knowledge/rules/conventions.md"
+        rules.write_text(rules.read_text() + "\nEdited while starting.\n")
+        return engine
+
+    monkeypatch.setattr(agent_service, "open_engine", edit_then_open)
+    with pytest.raises(ValueError, match="context_changed"):
+        service()
+
+
 def test_context_loaded_reports_budget_paging_and_identity(service, tmp_path):
     sink = tmp_path / "audit.jsonl"
     s = service(updates={"audit_path": str(sink)})
