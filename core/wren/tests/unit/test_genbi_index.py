@@ -159,7 +159,7 @@ def test_load_index_normalises_null_apps(tmp_path: Path) -> None:
     assert data["apps"] == {}
     assert data["schema_version"] == 1
     # And the normal accessor must not crash on it.
-    from wren.genbi.index import get_app
+    from wren.genbi.index import get_app  # noqa: PLC0415
 
     assert get_app(tmp_path, "missing") is None
 

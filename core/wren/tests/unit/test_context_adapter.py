@@ -469,9 +469,9 @@ def test_a_large_project_is_paged_not_truncated_or_refused():
         text = r.list(number)["text"]
         assert len(text.encode()) <= 1024, number
         seen += [
-            l.split(":")[0].split()[1]
-            for l in text.splitlines()
-            if l.startswith("model ")
+            line.split(":")[0].split()[1]
+            for line in text.splitlines()
+            if line.startswith("model ")
         ]
         if number < r.pages:
             assert f"call list_context with page={number + 1}" in text

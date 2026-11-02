@@ -116,7 +116,7 @@ def test_parse_athena_type_decimal_precision_only_has_scale_0():
     assert _parse_athena_type("decimal(10)") == pa.decimal128(10, 0)
 
 
-def test_parse_athena_type_decimal_small_precision_only():
+def test_parse_athena_type_decimal_small_precision_never_exceeds_scale():
     # Small precision-only case must not produce scale > precision (ArrowInvalid).
     assert _parse_athena_type("decimal(5)") == pa.decimal128(5, 0)
 

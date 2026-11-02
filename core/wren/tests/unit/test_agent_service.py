@@ -333,7 +333,7 @@ def test_restart_after_a_project_edit_changes_digest_and_documents_without_confi
 
 
 def test_an_edit_during_startup_refuses_the_service(service, monkeypatch):
-    import wren.agent_service as agent_service
+    import wren.agent_service as agent_service  # noqa: PLC0415
 
     open_engine = agent_service.open_engine
 
@@ -1625,7 +1625,7 @@ def test_an_answer_outside_the_domain_is_asked_again_once_and_then_fails_the_tas
 def test_the_second_unusable_answer_reaches_the_planner_as_unavailable_worker(
     service, monkeypatch
 ):
-    import asyncio
+    import asyncio  # noqa: PLC0415
 
     s = service(profile="adhoc")
     worker_sees(monkeypatch, s, clarifying(PAID, []))

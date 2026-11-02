@@ -922,7 +922,7 @@ def test_convert_mdl_preserves_dialect(tmp_path):
     file_map = {f.relative_path: f.content for f in files}
 
     # Check schema_version derived from layoutVersion 2
-    import yaml
+    import yaml  # noqa: PLC0415
 
     project = yaml.safe_load(file_map["wren_project.yml"])
     assert project["schema_version"] == 3
@@ -944,7 +944,7 @@ def test_convert_mdl_v1_layout_version(tmp_path):
         "models": [],
     }
     files = convert_mdl_to_project(mdl)
-    import yaml
+    import yaml  # noqa: PLC0415
 
     file_map = {f.relative_path: f.content for f in files}
     project = yaml.safe_load(file_map["wren_project.yml"])
@@ -1488,11 +1488,11 @@ _PROJECT_FILE = "wren_project.yml"
 
 # ── Semantic validation tests (view dry-plan + description checks) ─────────
 
-import base64
+import base64  # noqa: E402
 
-import orjson
-from wren.context import validate_manifest
-from wren.model.data_source import DataSource
+import orjson  # noqa: E402
+from wren.context import validate_manifest  # noqa: E402
+from wren.model.data_source import DataSource  # noqa: E402
 
 
 def _b64(manifest: dict) -> str:
