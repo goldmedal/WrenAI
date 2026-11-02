@@ -42,6 +42,12 @@ EXAMPLES = Path(__file__).resolve().parents[4] / "examples/serve-agent"
 FAKE_RUNTIME = Path(__file__).parent / "fixtures/fake_runtime.js"
 
 
+needs_policy_runtime = pytest.mark.skipif(
+    Path(os.getenv("WARBLE_SERVICE", "")).name == "fake_runtime.js",
+    reason="the scripted runtime evaluates no Cedar policy",
+)
+
+
 @pytest.fixture
 def service(tmp_path):
     runtime, compiler = os.getenv("WARBLE_SERVICE"), os.getenv("WARBLE_BIN")
@@ -147,6 +153,7 @@ def test_real_count_and_evidence(service):
     assert execute(s, request(s, "customers"))["result"]["rows"] == [{"c1": 3}]
 
 
+@needs_policy_runtime
 def test_planner_documents_come_from_the_project_and_the_worker_reads_them(service):
     s = service()
     documents = s.project.documents
@@ -166,6 +173,7 @@ def test_planner_documents_come_from_the_project_and_the_worker_reads_them(servi
 @pytest.mark.parametrize(
     "selection", [[], ["structure"], ["structure", "rules"], ["rules"]]
 )
+@needs_policy_runtime
 def test_metadata_selection_intersection(service, selection):
     s = service(selection=selection)
     for name in ("structure", "rules"):
@@ -180,6 +188,7 @@ def test_metadata_selection_intersection(service, selection):
 @pytest.mark.parametrize(
     "action", ["invoke_component", "execute_query", "receive_answer"]
 )
+@needs_policy_runtime
 def test_denied_capability_query_and_answer(service, action):
     s = service(
         policy=f'forbid(principal, action == Service::Action::"{action}", resource);'
@@ -448,6 +457,7 @@ def test_project_discovery_ignores_global_environment(tmp_path, monkeypatch):
         discover(nested)
 
 
+@needs_policy_runtime
 def test_governed_mcp_omits_legacy_surfaces(service):
     s = service()
     server = build_mcp(s)
@@ -649,6 +659,7 @@ def test_internal_evidence_retained_but_not_projected(service):
     assert "internal" not in public and "COUNT" not in json.dumps(public)
 
 
+@needs_policy_runtime
 def test_private_query_policy_denial_remains_denied(service, monkeypatch):
     s = service(
         policy='forbid(principal, action == Service::Action::"execute_query", resource);'
@@ -678,6 +689,7 @@ NO_PLANNER_METADATA = (
 
 
 @pytest.mark.parametrize("preset", sorted(PRESETS))
+@needs_policy_runtime
 def test_policy_preset_applies_selection_and_is_reported(service, preset):
     s = service(
         selection=["structure", "rules"],
@@ -701,6 +713,7 @@ def test_policy_preset_applies_selection_and_is_reported(service, preset):
     assert "policy_presets" not in s.config and "default_preset" not in s.config
 
 
+@needs_policy_runtime
 def test_policy_preset_default_unknown_and_invalid(service):
     s = service(selection=["rules"], updates={"policy_presets": PRESETS})
     assert s.capabilities_public()["policy_preset"]["name"] is None
@@ -733,6 +746,7 @@ def test_policy_preset_default_unknown_and_invalid(service):
             service(updates=bad)
 
 
+@needs_policy_runtime
 def test_policy_preset_cannot_expand_deployment_policy(service):
     s = service(
         policy=NO_PLANNER_METADATA,
@@ -747,6 +761,7 @@ def test_policy_preset_cannot_expand_deployment_policy(service):
     assert s.metadata(None, ["structure", "rules"], "worker")
 
 
+@needs_policy_runtime
 def test_policy_preset_overrides_the_selection_and_policy_file(service):
     s = service(updates={"policy_presets": PRESETS})
     root = s.project.root
@@ -1079,6 +1094,7 @@ def test_worker_context_tools_authorize_and_audit_the_selection(
     )
 
 
+@needs_policy_runtime
 def test_a_policy_can_deny_the_worker_the_rules_category(service, monkeypatch):
     s = service(
         policy='forbid(principal, action == Service::Action::"receive_metadata", resource) when { principal.role == "worker" && resource.kind == "knowledge.rules" };'
@@ -1098,6 +1114,7 @@ def test_http_transport_requires_loopback_and_local_token(service):
         http_server(build_mcp(s), "0.0.0.0", 0, "secret")
 
 
+@needs_policy_runtime
 def test_http_transport_serves_capabilities_behind_token(service):
     import threading  # noqa: PLC0415
 
@@ -1226,6 +1243,7 @@ def test_unavailable_carries_a_coarse_reason(service, monkeypatch, detail, reaso
     assert out == {"status": "unavailable", "reason": reason}
 
 
+@needs_policy_runtime
 def test_invalid_evidence_is_a_worker_reason_and_denied_stays_bare(
     service, monkeypatch
 ):
@@ -1285,6 +1303,7 @@ def test_describe_data_discloses_a_host_generated_summary(service, monkeypatch):
         )
 
 
+@needs_policy_runtime
 def test_describe_data_has_its_own_disclosure_gate(service, monkeypatch):
     s = service(
         policy='forbid(principal, action == Service::Action::"receive_answer", resource) when { resource.kind == "answer.description" };'
@@ -1388,6 +1407,7 @@ def finishing(sql, out=None):
     return invoke
 
 
+@needs_policy_runtime
 def test_the_status_scope_chain_from_violation_to_confirmed_scope(service, monkeypatch):
     s = service(profile="adhoc", example_presets=True, preset="hidden")
     rejected = []
@@ -1439,6 +1459,7 @@ def test_the_status_scope_chain_from_violation_to_confirmed_scope(service, monke
     )
 
 
+@needs_policy_runtime
 def test_the_clarification_is_kept_in_both_wordings_and_the_policy_picks_what_is_sent(
     service, monkeypatch
 ):
@@ -1803,6 +1824,7 @@ def evidence_of(s, request, response):
 
 
 @pytest.mark.parametrize("preset", PRESET_NAMES)
+@needs_policy_runtime
 def test_each_preset_projects_its_own_evidence_fields_and_get_evidence_agrees(
     service, preset
 ):
@@ -1849,6 +1871,7 @@ def test_each_preset_projects_its_own_evidence_fields_and_get_evidence_agrees(
         assert "sql" not in json.dumps(evidence).lower()
 
 
+@needs_policy_runtime
 def test_hidden_evidence_names_no_rule_model_column_or_count(service):
     s = service(example_presets=True, preset="hidden")
     r = sql_request(s, JOINED)
@@ -1906,6 +1929,7 @@ def test_each_evidence_kind_is_authorized_once_per_reference(service):
     assert evidence_of(s, r, done)["evidence"]["checks"]
 
 
+@needs_policy_runtime
 def test_a_policy_can_withhold_every_evidence_kind_and_the_scope_still_shows(service):
     withheld = "".join(
         f'forbid(principal, action == Service::Action::"receive_answer", resource) '
@@ -1923,6 +1947,7 @@ def test_a_policy_can_withhold_every_evidence_kind_and_the_scope_still_shows(ser
     }
 
 
+@needs_policy_runtime
 def test_the_evidence_permits_have_a_matching_deny(service):
     s = service()
     session = s.open()["session_id"]
@@ -2015,6 +2040,7 @@ def test_the_setup_presets_are_the_four_modes_and_only_narrow(service, tmp_path)
     }
 
 
+@needs_policy_runtime
 def test_a_preset_policy_is_evaluated_with_the_deployment_policy_never_in_its_place(
     service,
 ):
@@ -2050,6 +2076,7 @@ def test_a_preset_policy_is_evaluated_with_the_deployment_policy_never_in_its_pl
         )
 
 
+@needs_policy_runtime
 def test_the_example_service_starts_on_its_declared_default_preset(service):
     s = service(example_presets=True)
     assert s.capabilities_public()["policy_preset"] == {
@@ -2060,6 +2087,7 @@ def test_the_example_service_starts_on_its_declared_default_preset(service):
     assert set(execute(s, request(s))["evidence"]) == EVIDENCE_FIELDS["hidden"]
 
 
+@needs_policy_runtime
 def test_a_project_with_no_declared_default_says_so_in_the_scope(service):
     rules = service.root / "knowledge/rules/conventions.md"
     rules.write_text(
@@ -2330,6 +2358,7 @@ def test_a_denied_column_is_dropped_from_observed_even_if_it_were_recorded(servi
         ("full", True, True),
     ],
 )
+@needs_policy_runtime
 def test_the_clarification_lists_only_what_its_evidence_kinds_allow(
     service, monkeypatch, preset, declared, domain
 ):
@@ -2372,6 +2401,7 @@ def test_the_clarification_lists_only_what_its_evidence_kinds_allow(
     }
 
 
+@needs_policy_runtime
 def test_the_second_asking_of_the_question_follows_the_same_policy(
     service, monkeypatch
 ):
@@ -2392,6 +2422,7 @@ def test_the_second_asking_of_the_question_follows_the_same_policy(
     )
 
 
+@needs_policy_runtime
 def test_each_part_of_the_question_is_decided_on_its_own_kind(service, monkeypatch):
     forbid_checks = (
         'forbid(principal, action == Service::Action::"receive_answer", resource) '
@@ -2445,6 +2476,7 @@ def test_the_clarify_tool_names_both_things_a_worker_may_ask_for(service):
 @pytest.mark.parametrize(
     ("profile", "capability"), [("analysis", "orders"), ("adhoc", "analytics")]
 )
+@needs_policy_runtime
 def test_describe_data_answers_what_data_exists_with_no_column_names(
     service, monkeypatch, profile, capability
 ):
@@ -2864,6 +2896,7 @@ def real_runtime_service(service, monkeypatch):
         stub.close()
 
 
+@needs_policy_runtime
 def test_the_real_runtime_reports_usage_for_a_completed_task(real_runtime_service):
     s, stub = real_runtime_service(scripted_model(COUNTS["orders"]))
     r = ask_request(s)
@@ -2886,6 +2919,7 @@ def test_the_real_runtime_reports_usage_for_a_completed_task(real_runtime_servic
     assert "stub" not in json.dumps(done) and "elapsed" not in json.dumps(done)
 
 
+@needs_policy_runtime
 def test_the_real_runtime_reports_each_retried_provider_attempt(real_runtime_service):
     def refuse(n, body, handler):
         handler.send_response(429 if n == 0 else 503)

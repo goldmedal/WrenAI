@@ -283,19 +283,40 @@ If startup fails, check the profile, compiled IR compatibility, project manifest
 
 ## Re-run the checks
 
-From the Wren Python package directory, install the MCP extra and development
-dependencies, then run the cross-package tests against a built runtime/compiler:
+The checks come in two layers. Both run from the Wren Python package directory
+with the MCP extra installed, and both need the context loader built (see above)
+and the Warble compiler (`WARBLE_BIN`, the published `@warble/cli`).
+
+**CI** (the `agent service tests` job) uses the scripted runtime in
+`tests/unit/fixtures/fake_runtime.js` as `WARBLE_SERVICE`. It evaluates no Cedar
+policy, so the tests that need a real policy engine are skipped there; the rest
+cover the SQL gate, the declared-default checks and the host's own logic:
 
 ```sh
+WARBLE_SERVICE="$PWD/tests/unit/fixtures/fake_runtime.js" \
+WARBLE_BIN="$WARBLE" \
+uv run --extra mcp pytest tests/unit/test_agent_service.py tests/unit/test_agent_sql.py \
+  tests/unit/test_context_adapter.py tests/unit/test_declared_default_fx.py \
+  tests/unit/test_declared_default_status.py tests/unit/test_query_gate_termination.py
+```
+
+**Local gate** (not in CI: the private runtime is not published) runs the same
+files and the rest of the agent group against a built runtime, so Cedar is
+evaluated for real. The runtime refuses an empty model key, so export any
+non-empty `NVIDIA_INFERENCE_API_KEY` (the unit tests make no model call):
+
+```sh
+NVIDIA_INFERENCE_API_KEY=unused \
 WARBLE_SERVICE="$RUNTIME/node_modules/@warble/pi/dist/service.js" \
 WARBLE_BIN="$WARBLE" \
 uv run --extra mcp pytest tests/unit/test_agent_service.py tests/unit/test_agent_sql.py \
-  tests/unit/test_context_adapter.py tests/unit/test_agent_ipc.py tests/unit/test_mcp_server.py
+  tests/unit/test_context_adapter.py tests/unit/test_agent_ipc.py \
+  tests/unit/test_declared_defaults.py tests/unit/test_declared_default_fx.py \
+  tests/unit/test_declared_default_status.py tests/unit/test_query_gate_termination.py \
+  tests/unit/test_mcp_server.py
 ```
 
-The tests that start a real service need the context loader built (see above).
-
-These tests use the actual Cedar subprocess and synthetic Wren database, with
+The local gate uses the actual Cedar subprocess and synthetic Wren database, with
 model calls replaced only where hostile outputs or concurrency must be forced.
 Hosted model acceptance is separate: run the independent planner with your own
 model credentials and inspect both its trace and the configured local audit.

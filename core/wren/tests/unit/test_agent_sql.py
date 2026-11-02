@@ -19,6 +19,11 @@ from wren.agent_sql import (  # noqa: E402
 )
 from wren.context import build_json  # noqa: E402
 
+needs_policy_runtime = pytest.mark.skipif(
+    Path(os.getenv("WARBLE_SERVICE", "")).name == "fake_runtime.js",
+    reason="the scripted runtime evaluates no Cedar policy",
+)
+
 
 @pytest.fixture
 def adhoc(tmp_path):
@@ -161,6 +166,7 @@ def test_admission_denies_unsafe_or_unapproved_sql(adhoc, sql):
     assert not any(a.get("event") == "private_sql" for a in s.audit)
 
 
+@needs_policy_runtime
 def test_alias_cannot_leak_sql_and_evidence_is_host_owned(adhoc):
     s = adhoc()
     session = s.open()["session_id"]
@@ -181,6 +187,7 @@ def test_alias_cannot_leak_sql_and_evidence_is_host_owned(adhoc):
 @pytest.mark.parametrize(
     "action,kind", [("execute_query", "query"), ("receive_answer", "answer.sql_result")]
 )
+@needs_policy_runtime
 def test_cedar_column_boundary_before_execution(adhoc, action, kind):
     s = adhoc(
         f'\nforbid(principal, action == Service::Action::"{action}", resource) when {{ resource.kind == "{kind}" && resource.columns.contains("amount") }};'
@@ -746,6 +753,7 @@ def test_the_three_error_kinds_each_finish_inside_one_task(adhoc):
     assert "abc" not in json.dumps(failed)
 
 
+@needs_policy_runtime
 def test_a_cedar_denial_ends_the_task_as_denied(adhoc):
     s = adhoc(
         '\nforbid(principal, action == Service::Action::"execute_query", resource);'
@@ -961,6 +969,7 @@ def test_a_semi_or_anti_join_target_no_column_names_is_still_a_source(adhoc):
         assert prepared.observed["models"] == ["customers", "orders"]
 
 
+@needs_policy_runtime
 def test_a_cedar_forbid_on_a_model_only_a_semi_join_reads_ends_the_task(adhoc):
     s = adhoc(
         '\nforbid(principal, action == Service::Action::"execute_query", resource) '
@@ -1179,6 +1188,7 @@ def test_a_view_over_a_denied_column_ends_the_task_like_the_column_itself(adhoc)
     assert str(error) == "query_denied:denied_column"
 
 
+@needs_policy_runtime
 def test_the_models_a_view_reads_are_authorized_as_sources(adhoc):
     s = adhoc(
         '\nforbid(principal, action == Service::Action::"execute_query", resource) '
