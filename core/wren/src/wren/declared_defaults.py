@@ -14,7 +14,10 @@ Two kinds exist:
     with a chain of MANY_TO_ONE relationships to it.
 ``require_rate_join``
     Statements that aggregate a listed amount column must read the rate model
-    joined on the amount's currency and on-or-before a transaction date.
+    joined on the amount's currency and on-or-before a transaction date. Two optional
+    keys tighten it (both checked by ``declared_default_fx``): ``match: single``
+    requires the rate source to yield one row per amount row, and ``base_currency``
+    names the currency whose amounts need no rate and must survive the join.
 
 This module parses and validates declarations; ``declared_default_check`` applies
 them to a parsed query.
@@ -25,6 +28,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from sqlglot import exp, parse_one
@@ -33,6 +37,7 @@ from sqlglot.errors import SqlglotError
 RULES_DIR = Path("knowledge") / "rules"
 LEGACY_RULES_FILE = "instructions.md"
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+CURRENCY_PATTERN = re.compile(r"^[A-Za-z0-9]{1,16}$")
 MAX_DECLARATIONS = 8
 KINDS = ("exclude_rows", "require_rate_join")
 _FENCE = "---"
@@ -81,6 +86,8 @@ class RequireRateJoin:
     aggregated_only: bool
     groups_by_currency: bool
     filters_currency_literal: bool
+    base_currency: str | None = None
+    match: Literal["single"] | None = None
 
 
 Declaration = ExcludeRows | RequireRateJoin
@@ -322,7 +329,30 @@ class _Parser:
         )
 
     def require_rate_join(self, path: str, item: dict, rule_id: str) -> None:
-        self.check_keys(path, item, {"id", "kind", "amounts", "rate", "when", "unless"})
+        self.check_keys(
+            path,
+            item,
+            {
+                "id",
+                "kind",
+                "amounts",
+                "rate",
+                "when",
+                "unless",
+                "base_currency",
+                "match",
+            },
+        )
+        base_currency = item.get("base_currency")
+        if base_currency is not None and not (
+            isinstance(base_currency, str) and CURRENCY_PATTERN.fullmatch(base_currency)
+        ):
+            self.error(path, f"'base_currency' must match {CURRENCY_PATTERN.pattern}")
+            base_currency = None
+        match = item.get("match")
+        if match is not None and match != "single":
+            self.error(path, "'match' must be 'single' when present")
+            match = None
         groups: list[AmountGroup] = []
         amounts = item.get("amounts")
         if not isinstance(amounts, list) or not amounts:
@@ -387,6 +417,8 @@ class _Parser:
                 aggregated_only=aggregated_only,
                 groups_by_currency="groups_by_currency" in used,
                 filters_currency_literal="filters_currency_literal" in used,
+                base_currency=base_currency,
+                match=match,
             )
         )
 

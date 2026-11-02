@@ -17,6 +17,10 @@ DEFAULT_CALL_TIMEOUT_S = 100.0
 ABANDONED_LIMIT = 1024
 
 
+class TaskAborted(RuntimeError):
+    """The host ended the task and stopped waiting for the runtime."""
+
+
 class RuntimeIPC:
     def __init__(self, runtime: Path, init: dict, call_timeout_s: float | None = None):
         self.pending = {}
@@ -158,6 +162,17 @@ class RuntimeIPC:
 
     def cancel(self, owner):
         return self.call("cancel", **{"owner": owner})
+
+    def abort(self, owner):
+        """End a task now: ask the runtime to cancel it and stop waiting for its answer.
+
+        The call that waits for ``owner`` fails with ``TaskAborted``; whatever the runtime
+        still sends for it (a tool call, a final value) is refused or dropped.
+        """
+        future = self.pending.pop(owner, None)
+        self._abandon(owner, cancel=True)
+        if future is not None and not future.done():
+            future.set_exception(TaskAborted())
 
     def close(self):
         try:

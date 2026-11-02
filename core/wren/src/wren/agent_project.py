@@ -5,24 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from wren.context_adapter import ContextReader, Snapshot, project_digest
-
-
-class Query(BaseModel):
-    """Transitional count request: ``SELECT COUNT(*)`` over one model of the project.
-
-    It exists so a deployment can offer a bounded count without SQL authoring; it is planned
-    and executed through the same path as ``run_sql``.
-    """
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-    model: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", max_length=128)
-
-
-def count_sql(model: str) -> str:
-    return f'SELECT COUNT(*) FROM "{model}"'
 
 
 def discover(explicit: Path | None) -> Path:

@@ -260,8 +260,16 @@ def test_the_real_loader_snapshot_matches_the_python_digest(real_project):
     assert snap.digest == project_digest(real_project)
     assert snap.loader_identity.startswith("sha256:")
     assert snap.denied == {("customers", "email")}
-    assert [d.id for d in snap.declarations] == ["exclude-test-orders"]
-    assert [m["name"] for m in snap.catalog["models"]] == ["customers", "orders"]
+    assert [d.id for d in snap.declarations] == [
+        "exclude-test-orders",
+        "convert-invoices-to-usd",
+    ]
+    assert [m["name"] for m in snap.catalog["models"]] == [
+        "customers",
+        "fx_rates",
+        "invoices",
+        "orders",
+    ]
 
 
 def test_the_digest_follows_project_sources_and_ignores_the_build(real_project):

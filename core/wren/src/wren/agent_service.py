@@ -22,14 +22,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import sqlglot
 import yaml
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
 from wren.agent_ipc import RuntimeIPC
-from wren.agent_project import Project, Query, contained, count_sql, discover
-from wren.agent_sql import AdHocSQL, PrivateSQL, QueryFormError, QueryShapeError
+from wren.agent_project import Project, contained, discover
+from wren.agent_sql import (
+    AdHocSQL,
+    DeclaredDefaultUndetermined,
+    PrivateSQL,
+    QueryFormError,
+    QueryShapeError,
+)
 from wren.context_adapter import (
     ContextChanged,
     ContextReader,
@@ -83,6 +88,9 @@ EXECUTION_INT_FIELDS = {
 DEFAULT_DEADLINE_MS = 120000
 DEFAULT_MAX_SQL_ATTEMPTS = 6
 IPC_MARGIN_S = 40
+REJECTION_LIMIT = 2
+UNDETERMINED_LIMIT = 1
+UNAVAILABLE_LIMIT = 1
 
 
 @dataclass(frozen=True)
@@ -138,6 +146,64 @@ def execution_from_config(config: dict) -> Execution:
         else DEFAULT_MAX_SQL_ATTEMPTS
     )
     return Execution(limits, limits["deadlineMs"], attempts)
+
+
+class BudgetExhausted(RuntimeError):
+    """A SQL budget of the task ran out; the host ends the task (``detail`` is for the audit)."""
+
+    def __init__(self, kind: str, attempts: int):
+        super().__init__("budget_exhausted")
+        self.kind, self.attempts = kind, attempts
+        self.detail = f"budget_exhausted:{kind}"
+
+
+class SqlBudget:
+    """The worker's SQL attempts in one task, counted by the host.
+
+    Rejections before execution may be rewritten ``REJECTION_LIMIT`` times (a statement the
+    checker could not judge only ``UNDETERMINED_LIMIT`` time); an engine failure may be retried
+    ``UNAVAILABLE_LIMIT`` time; ``max_attempts`` caps everything. Each ``note_*`` returns
+    ``(kind, count)`` when that budget is spent. A task that waits for a clarification and is
+    continued keeps the same instance.
+    """
+
+    def __init__(self, max_attempts: int):
+        self.max_attempts = max_attempts
+        self.attempts = self.rejected = self.undetermined = self.unavailable = 0
+        self.lock = threading.Lock()
+
+    def start(self):
+        with self.lock:
+            self.attempts += 1
+            if self.attempts > self.max_attempts:
+                return "sql_attempts", self.attempts
+
+    def rejected_before_execution(self, undetermined: bool):
+        with self.lock:
+            self.rejected += 1
+            self.undetermined += undetermined
+            if self.undetermined > UNDETERMINED_LIMIT:
+                return "undetermined", self.undetermined
+            if self.rejected > REJECTION_LIMIT:
+                return "rejected", self.rejected
+
+    def failed_in_engine(self):
+        with self.lock:
+            self.unavailable += 1
+            if self.unavailable > UNAVAILABLE_LIMIT:
+                return "query_unavailable", self.unavailable
+
+
+HINTS = {
+    "unsupported_query": "This SQL was NOT executed: it could not be planned against the bound models. Reference only bound models and columns and aliases you defined, keep at most four joins, and use no correlated subqueries, LATERAL joins, recursive CTEs, NATURAL joins, positional #N references or column lists on table aliases. Rewrite the query within the same permissions.",
+    "unsupported_result_shape": "This SQL was NOT executed. Return source columns, native dates and numeric aggregations. Use one row with one column per metric, not UNION rows with literal metric-name strings. No string constants, formatting, text casts or concatenation in result columns. Generate a different query within the same permissions.",
+    "declared_default_missing": "This SQL was NOT executed: it does not apply a default rule the project declares for the models it reads (the rule ids are listed; the context index marks them as [defaults: ...]). Rewrite it so each rule applies, within the same permissions.",
+    "declared_default_undetermined": "This SQL was NOT executed: the host could not check it against the project's declared default rules. Use plain references to bound models and columns and rewrite it; you get one such retry.",
+}
+SHAPE_HINTS = {
+    "duplicate_label": "This SQL was NOT executed: two result columns would carry the same label. Use GROUP BY so the key is a data column instead of one column per literal.",
+}
+UNAVAILABLE_HINT = "Check the bound schema and DuckDB SQL syntax. Return at most 100 rows and 20 columns. Do not infer data from an error."
 
 
 def reject_legacy(config: dict) -> None:
@@ -274,20 +340,12 @@ class Metadata(Strict):
     documents: list[str] = Field(max_length=32)
 
 
-class Direct(Strict):
-    session_id: str
-    request_id: str
-    expected_revision: int = Field(ge=0)
-    capability: str
-    query: Query
-
-
 class SQL(Strict):
     session_id: str
     request_id: str
     expected_revision: int = Field(ge=0)
     capability: str
-    sql: str = Field(max_length=8192)
+    sql: str = Field(min_length=1, max_length=8192)
 
 
 class Service:
@@ -374,22 +432,6 @@ class Service:
             )
         if rules and documents["rules"]["content"]:
             self.require(session, "receive_metadata", "knowledge.rules", "rules", role)
-
-    def canonical_count(self, sql: str) -> dict:
-        """The count request a governed ``run_sql`` may carry: exactly ``SELECT COUNT(*)`` of one model."""
-        try:
-            tree = sqlglot.parse_one(sql, read="duckdb")
-        except sqlglot.errors.SqlglotError:
-            raise PermissionError("unsupported_query") from None
-        for ident in tree.find_all(sqlglot.exp.Identifier):
-            ident.set("quoted", False)
-        for model in self.sql.schema:
-            canonical = sqlglot.parse_one(count_sql(model), read="duckdb")
-            for ident in canonical.find_all(sqlglot.exp.Identifier):
-                ident.set("quoted", False)
-            if tree == canonical:
-                return {"model": model}
-        raise PermissionError("unsupported_query")
 
     def capabilities_public(self):
         return {
@@ -513,7 +555,7 @@ class Service:
             )
         return {k: saved[k] for k in ("result", "completed_at", "conditions")}
 
-    def execute(self, request: Ask | Direct, *, direct=None, continuation=None):
+    def execute(self, request: Ask | SQL, *, direct=None, continuation=None):
         s = self.session(request.session_id)
         if not s["lock"].acquire(blocking=False):
             raise ValueError("conflict")
@@ -528,7 +570,7 @@ class Service:
             raise PermissionError("denied")
         self.require(s, "invoke_component", "capability", request.capability)
         tool = (
-            "query"
+            "run_sql"
             if direct is not None
             else "continue_task"
             if continuation
@@ -568,16 +610,20 @@ class Service:
             context = previous["result"]
             if previous.get("sources"):
                 context = {**context, "original_question": previous["question"]}
+        budget = SqlBudget(self.execution.max_sql_attempts)
         if continuation:
             pending = s["pending"].get(continuation["ref"])
             if not pending or pending.get("consumed"):
                 raise ValueError("context_changed")
+            budget = pending.get("budget") or budget
             context = {
                 "original_question": pending["question"],
                 "user_answer": continuation["answer"],
             }
         ledger = {}
         policy_denied = False
+        ended = None
+        ending = threading.Lock()
         owner = uid()
         s["active"] = owner
 
@@ -672,7 +718,45 @@ class Service:
                 )
                 return {"evidence": token, "result": result}
 
+            def stop(kind, attempts):
+                self.record(
+                    {
+                        "event": "private_sql_budget_exhausted",
+                        "request_id": request.request_id,
+                        "kind": kind,
+                        "attempts": attempts,
+                    }
+                )
+                return BudgetExhausted(kind, attempts)
+
+            def reject(exc):
+                # Nothing ran and nothing was authorized; the codes name the worker's own
+                # mistake, never a model, column or rule text.
+                entry = {
+                    "event": "private_sql_rejected",
+                    "request_id": request.request_id,
+                    "code": exc.error,
+                    "sub_code": exc.code,
+                    "attempt": budget.attempts,
+                }
+                if exc.rules:
+                    entry["rules"] = list(exc.rules)
+                self.record(entry)
+                over = budget.rejected_before_execution(
+                    isinstance(exc, DeclaredDefaultUndetermined)
+                )
+                if over:
+                    raise stop(*over)
+                answer = {"error": exc.error, "code": exc.code}
+                if exc.rules:
+                    answer["rules"] = list(exc.rules)
+                answer["hint"] = SHAPE_HINTS.get(exc.code) or HINTS[exc.error]
+                return answer
+
             def run_private(sql, role, with_result):
+                over = budget.start()
+                if over:
+                    raise stop(*over)
                 self.record(
                     {
                         "event": "private_sql_attempt",
@@ -682,27 +766,9 @@ class Service:
                 )
                 try:
                     prepared = self.sql.prepare(sql)
-                except QueryFormError as exc:
-                    # Nothing ran and nothing was authorized; the code names the
-                    # worker's own mistake, never a model, column or rule.
-                    self.record(
-                        {
-                            "event": "private_sql_rejected",
-                            "request_id": request.request_id,
-                            "code": str(exc),
-                        }
-                    )
-                    return {
-                        "error": "unsupported_query",
-                        "code": str(exc),
-                        "hint": "This SQL was NOT executed: it could not be planned against the bound models. Reference only bound models and columns and aliases you defined, keep at most four joins, and use no correlated subqueries, LATERAL joins or recursive CTEs. Rewrite the query within the same permissions.",
-                    }
-                except QueryShapeError:
-                    return {
-                        "error": "unsupported_result_shape",
-                        "hint": "This SQL was NOT executed. Return source columns, native dates and numeric aggregations. Use one row with one column per metric, not UNION rows with literal metric-name strings. No string constants, formatting, text casts or concatenation in result columns. Generate a different query within the same permissions.",
-                    }
-                for model, columns in prepared[1].items():
+                except (QueryFormError, QueryShapeError) as exc:
+                    return reject(exc)
+                for model, columns in prepared.sources.items():
                     self.require(
                         s, "execute_query", "query", model, role, columns=columns
                     )
@@ -712,23 +778,31 @@ class Service:
                     )
                 try:
                     result, internal = self.sql.execute(prepared)
-                except Exception:
-                    return {
-                        "error": "query_unavailable",
-                        "hint": "Check the bound schema and DuckDB SQL syntax. Return at most 100 rows and 20 columns. Do not infer data from an error.",
-                    }
+                except Exception as exc:
+                    self.record(
+                        {
+                            "event": "private_sql_failed",
+                            "request_id": request.request_id,
+                            "error_class": type(exc).__name__,
+                            "attempt": budget.attempts,
+                        }
+                    )
+                    over = budget.failed_in_engine()
+                    if over:
+                        raise stop(*over) from None
+                    return {"error": "query_unavailable", "hint": UNAVAILABLE_HINT}
                 token = uid()
                 ledger[token] = {
                     "result": result,
                     "conditions": result["mandatory_scope"],
                     "internal": internal,
-                    "sources": prepared[1],
+                    "sources": prepared.sources,
                 }
                 self.record(
                     {
                         "event": "private_sql",
-                        "sql": prepared[0],
-                        "sources": prepared[1],
+                        "sql": prepared.sql,
+                        "sources": prepared.sources,
                         "result": result,
                         "role": role,
                     }
@@ -740,10 +814,12 @@ class Service:
                 return {"evidence": token}
 
             if name == "run_sql":
-                if direct is not None or not capability.get("sql"):
+                if not capability.get("sql"):
                     raise PermissionError("denied")
                 value = PrivateSQL.model_validate(args)
-                return run_private(value.sql, "worker", True)
+                return run_private(
+                    value.sql, "worker" if direct is None else "planner", True
+                )
             if name == "clarify":
                 if args == {"missing": "analysis_definition"} and capability.get("sql"):
                     token = uid()
@@ -752,42 +828,65 @@ class Service:
                     }
                     return {"evidence": token}
                 raise ValueError("invalid_clarification")
-            if name != "query":
-                raise PermissionError("denied")
-            # Transitional: a bounded count over one model, planned as SQL and run through
-            # the same entry as run_sql.
-            q = Query.model_validate(args)
-            return run_private(
-                count_sql(q.model), "worker" if direct is None else "planner", False
-            )
+            raise PermissionError("denied")
+
+        def end(exc):
+            """End the task now: later tool calls are refused and the runtime stops waiting."""
+            nonlocal ended
+            with ending:
+                if ended is not None:
+                    return
+                ended = exc
+            if direct is None:
+                self.ipc.abort(owner)
 
         def guarded_callback(name, args):
             nonlocal policy_denied
+            if ended is not None:
+                raise PermissionError("task_ended")
             try:
                 return callback(name, args)
-            except PermissionError:
+            except PermissionError as exc:
+                # An authorization failure is final: a rewrite cannot make it allowed.
                 policy_denied = True
+                exc.detail = getattr(exc, "detail", None) or str(exc)
+                end(exc)
+                raise
+            except BudgetExhausted as exc:
+                end(exc)
                 raise
 
         try:
             if direct is not None:
-                raw = callback("query", direct)
+                out = guarded_callback("run_sql", direct)
+                if "evidence" not in out:
+                    # Rejected or failed: the caller gets the worker-visible error.
+                    return out
+                raw = {"evidence": out["evidence"]}
             else:
                 self.require_context(s, "worker", rules=True)
-                raw = self.ipc.call(
-                    "invoke",
-                    callback=guarded_callback,
-                    invocation_id=owner,
-                    request=json.dumps(
-                        {
-                            "capability": capability,
-                            "question": request.question,
-                            "previous": context,
-                            "context_index": self.project.reader.list(1)["text"],
-                        },
-                        ensure_ascii=False,
-                    ),
-                )
+                try:
+                    raw = self.ipc.call(
+                        "invoke",
+                        callback=guarded_callback,
+                        invocation_id=owner,
+                        request=json.dumps(
+                            {
+                                "capability": capability,
+                                "question": request.question,
+                                "previous": context,
+                                "context_index": self.project.reader.list(1)["text"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                except Exception:
+                    if ended is not None:
+                        raise ended from None
+                    raise
+                if ended is not None:
+                    # Whatever the runtime handed back after the task ended is dropped.
+                    raise ended
             with self.lock:
                 self.session(s["id"])
                 if (
@@ -830,6 +929,7 @@ class Service:
                     s["pending"][ref] = {
                         "question": request.question,
                         "capability": request.capability,
+                        "budget": budget,
                     }
                     response.update(
                         status="needs_clarification",
@@ -929,6 +1029,8 @@ def unavailable_reason(exc: BaseException) -> str:
     if isinstance(exc, ValueError) and str(exc) == "invalid_evidence":
         return "worker"
     detail = str(getattr(exc, "detail", "") or "")
+    if isinstance(exc, BudgetExhausted):
+        return "worker"
     code = detail.rsplit(":", 1)[-1] if ":" in detail else ""
     for reason, codes in UNAVAILABLE_REASONS.items():
         if code in codes:
@@ -1021,33 +1123,9 @@ def build_mcp(service: Service):
     else:
 
         @expose()
-        async def query(request: Direct) -> dict:
-            """Execute a governed count of one model; same gates as the agent."""
-            return await safe(
-                service.execute, request, direct=request.query.model_dump()
-            )
-
-        @expose()
         async def run_sql(request: SQL) -> dict:
-            """Only the canonical SELECT COUNT(*) of one model is supported. Other SQL is denied."""
-
-            def run():
-                service.require(
-                    service.session(request.session_id),
-                    "invoke_tool",
-                    "tool",
-                    "run_sql",
-                )
-                q = service.canonical_count(request.sql)
-                return service.execute(
-                    Direct(
-                        **{k: v for k, v in request.model_dump().items() if k != "sql"},
-                        query=Query(**q),
-                    ),
-                    direct=q,
-                )
-
-            return await safe(run)
+            """Run one read-only DuckDB SELECT over the bound models through the same gate as the private worker. A statement that is rejected before it runs returns {error, code, hint} and executes nothing."""
+            return await safe(service.execute, request, direct={"sql": request.sql})
 
     # Resources are registered only when currently authorized. No legacy resource
     # registration is reused, including its full MDL, SQL-only, prompt or writes.
@@ -1240,17 +1318,10 @@ def worker_tools() -> list[dict]:
             },
         },
         {
-            "name": "query",
-            "action": "query",
-            "capability": "sql_execution:read_only",
-            "description": "Count the rows of one project model (SELECT COUNT(*)). Return the evidence token unchanged.",
-            "parameters": Query.model_json_schema(),
-        },
-        {
             "name": "run_sql",
             "action": "run_sql",
             "capability": "sql_execution:read_only",
-            "description": "Generate and execute one read-only DuckDB SQL query over bound semantic models. Read context first. Returns a private result plus evidence token. Only return the exact evidence token object as your final answer; never SQL, prose, aliases or raw metadata. Tables/columns and result disclosure are independently authorized. No external readers or writes. At most 100 rows, 20 columns; use LIMIT for rankings.",
+            "description": "Generate and execute one read-only DuckDB SQL query over bound semantic models. Read context first. Returns a private result plus evidence token. Only return the exact evidence token object as your final answer; never SQL, prose, aliases or raw metadata. Tables/columns and result disclosure are independently authorized. No external readers or writes. At most 100 rows, 20 columns; use LIMIT for rankings. A statement that is rejected before it runs returns {error, code, hint} (and the rule ids in rules) and executes nothing: rewrite it, you have two rewrites and one retry after an engine failure. A denied column, an unknown model or an external source ends the task.",
             "parameters": PrivateSQL.model_json_schema(),
         },
         {
@@ -1336,6 +1407,9 @@ def _assemble_service(
         fd = os.open(audit_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         service.audit_sink = os.fdopen(fd, "w")
     service.record(reader.loaded_event())
+    if not snapshot.declarations:
+        # Nothing is enforced for this project: say so where the operator will read it.
+        service.record({"event": "declared_defaults_missing_in_project"})
 
     stopped = False
 

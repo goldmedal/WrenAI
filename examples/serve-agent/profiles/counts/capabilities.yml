@@ -7,6 +7,7 @@ capabilities:
     deployment offers counts only; do not select this capability for rankings, sums,
     averages, breakdowns or target comparisons.
   rules: false
+  sql: true
   inputs:
   - question
   - optional reply_to result reference

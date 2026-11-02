@@ -128,3 +128,44 @@ def test_a_reply_for_an_id_the_host_never_sent_is_still_a_protocol_violation(ipc
 def test_the_usage_envelope_of_a_limits_aware_runtime_never_reaches_the_caller(ipc):
     runtime = ipc()
     assert invoke(runtime, "with_calls", "inv-3") == {"evidence": "fake-token"}
+
+
+def test_an_abort_ends_the_wait_now_and_drops_whatever_the_runtime_sends_later(ipc):
+    import threading  # noqa: PLC0415
+
+    from wren.agent_ipc import TaskAborted  # noqa: PLC0415
+
+    runtime = ipc()
+    outcome = []
+
+    def waiting():
+        try:
+            outcome.append(invoke(runtime, "late_tool_call", "inv-abort"))
+        except Exception as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    thread = threading.Thread(target=waiting)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while "inv-abort" not in runtime.pending and time.monotonic() < deadline:
+        time.sleep(0.02)
+    runtime.abort("inv-abort")
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert len(outcome) == 1 and isinstance(outcome[0], TaskAborted)
+    assert "inv-abort" not in runtime.pending and "inv-abort" in runtime.abandoned
+    # The fake answers the cancel with a late tool call and a late reply for the same task:
+    # the first is refused, the second is dropped, and the runtime keeps running.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        seen = ops(runtime)
+        if any(o.get("type") == "tool_result" for o in seen):
+            break
+        time.sleep(0.05)
+    assert {"op": "cancel", "owner": "inv-abort"} in [
+        {"op": o.get("op"), "owner": o.get("owner")} for o in seen
+    ]
+    assert [o["error"] for o in seen if o.get("type") == "tool_result"] == ["tool_denied"]
+    time.sleep(0.2)
+    assert runtime.process.poll() is None
+    assert runtime.call("authorize", request={}) is True

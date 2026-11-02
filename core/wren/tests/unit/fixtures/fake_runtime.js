@@ -20,6 +20,11 @@
 //                        cancelled owner, as a real runtime can before it notices the cancel
 //   "with_calls"         reply {value, calls}: the usage envelope of a limits-aware runtime
 //   "slow"               reply after `delay_ms`
+//   "script"             call the host's tools one after another, whatever each answer was
+//                        (a `tool_denied` does not stop it, as a runtime that has not yet noticed
+//                        a cancel would carry on), then reply {evidence: <the last token any
+//                        tool result carried>}. `steps` is [{tool, args}]. The behaviour may be
+//                        given as the `question` of an ask, so a service-level test can drive it.
 const readline = require("node:readline");
 
 const PROTOCOL = "warble-private-service/1";
@@ -27,6 +32,7 @@ let init = null;
 const seen = [];
 const cancelled = new Set();
 const waiting = new Map();
+const toolWaiters = new Map();
 let sequence = 0;
 
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\n");
@@ -46,9 +52,27 @@ function parseRequest(raw) {
   }
 }
 
+function callTool(owner, name, args) {
+  const id = ++sequence;
+  send({ type: "tool_call", id, owner, name, args });
+  return new Promise((resolve) => toolWaiters.set(id, resolve));
+}
+
+async function script(m, steps) {
+  let token = "fake-token";
+  for (const step of steps) {
+    const result = await callTool(m.id, step.tool, step.args || {});
+    if (result.value && typeof result.value.evidence === "string") token = result.value.evidence;
+  }
+  send({ id: m.id, value: { evidence: token } });
+}
+
 function invoke(m) {
   const request = parseRequest(m.request);
-  switch (request.behavior || "evidence") {
+  const named = parseRequest(request.question);
+  switch (request.behavior || named.behavior || "evidence") {
+    case "script":
+      return void script(m, named.steps || request.steps || []);
     case "echo":
       return send({ id: m.id, value: request });
     case "hang":
@@ -80,6 +104,11 @@ lines.on("line", (line) => {
   const m = JSON.parse(line);
   if (m.type === "tool_result") {
     seen.push({ type: "tool_result", owner: m.owner, error: m.error || null });
+    const waiter = toolWaiters.get(m.id);
+    if (waiter) {
+      toolWaiters.delete(m.id);
+      waiter(m);
+    }
     return;
   }
   if (m.op !== "ops" && m.op !== "echo_init") seen.push({ op: m.op, owner: m.owner || null });

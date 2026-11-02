@@ -317,3 +317,40 @@ def test_context_validate_exits_non_zero_on_an_invalid_declaration(project):
     result = CliRunner().invoke(app, ["context", "validate", "--path", str(project)])
     assert result.exit_code == 1
     assert "declared default rule: unknown kind" in result.output
+
+
+def test_a_rate_rule_may_declare_a_base_currency_and_single_match(project):
+    declare(project, RATE + "    base_currency: USD\n    match: single\n")
+    declarations, errors = parse(project)
+    assert errors == []
+    (rule,) = declarations
+    assert (rule.base_currency, rule.match) == ("USD", "single")
+
+
+def test_a_rate_rule_without_the_new_keys_declares_neither(project):
+    declare(project, RATE)
+    (rule,) = parse(project)[0]
+    assert (rule.base_currency, rule.match) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("    base_currency: [USD]\n", "'base_currency' must match"),
+        ("    base_currency: 'US D'\n", "'base_currency' must match"),
+        ("    base_currency: ''\n", "'base_currency' must match"),
+        ("    match: many\n", "'match' must be 'single'"),
+        ("    match: on_or_before\n", "'match' must be 'single'"),
+    ],
+)
+def test_the_new_rate_keys_are_validated(project, extra, message):
+    declare(project, RATE + extra)
+    declarations, errors = parse(project)
+    assert declarations == []
+    assert len(errors) == 1 and errors[0][1].startswith(message)
+
+
+def test_the_new_rate_keys_are_not_accepted_on_an_exclusion_rule(project):
+    declare(project, EXCLUDE + "    base_currency: USD\n")
+    _, errors = parse(project)
+    assert [m for _, m in errors] == ["unknown field 'base_currency'"]

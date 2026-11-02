@@ -18,7 +18,7 @@ required_capabilities:
 - sql_execution:read_only
 - context_read
 borrowed_actions:
-- query
+- run_sql
 - list_context
 - select_context
 - read_context

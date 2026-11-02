@@ -14,11 +14,11 @@ from pydantic import ValidationError
 
 pytest.importorskip("mcp")
 
-from wren.agent_project import Query, discover  # noqa: E402
+from wren.agent_project import discover  # noqa: E402
 from wren.agent_service import (  # noqa: E402
+    SQL,
     Ask,
     Continue,
-    Direct,
     Ref,
     build_mcp,
     create_service,
@@ -87,19 +87,30 @@ def service(tmp_path):
         s.shutdown()
 
 
-def request(s, model="orders", **kwargs):
+COUNTS = {
+    "orders": "SELECT COUNT(*) FROM orders WHERE NOT is_test",
+    "customers": "SELECT COUNT(*) FROM customers",
+}
+
+
+def request(s, model="orders"):
     o = s.open()
-    return Direct(
+    return SQL(
         session_id=o["session_id"],
         request_id="one",
         expected_revision=0,
         capability="orders",
-        query=Query(model=model, **kwargs),
+        sql=COUNTS[model],
     )
 
 
 def execute(s, r):
-    return s.execute(r, direct=r.query.model_dump())
+    return s.execute(r, direct={"sql": r.sql})
+
+
+def count(callback, model="orders"):
+    """The worker's final answer after one governed count."""
+    return {"evidence": callback("run_sql", {"sql": COUNTS[model]})["evidence"]}
 
 
 def test_real_count_and_evidence(service):
@@ -155,21 +166,70 @@ def test_denied_capability_query_and_answer(service, action):
         execute(s, request(s))
 
 
-def test_governed_run_sql_accepts_only_the_canonical_count(service):
+def test_governed_run_sql_runs_the_shared_gate(service):
     s = service()
-    assert s.canonical_count('SELECT COUNT(*) FROM "orders"') == {"model": "orders"}
-    assert s.canonical_count("select count(*) from customers") == {"model": "customers"}
+    r = request(s, "orders")
+    result = execute(s, r)
+    assert result["status"] == "completed" and result["result"]["rows"] == [{"c1": 12}]
+    other = request(s)
+    other = other.model_copy(
+        update={
+            "sql": "SELECT region, COUNT(*) FROM customers GROUP BY region ORDER BY region"
+        }
+    )
+    grouped = execute(s, other)
+    assert [r["c1"] for r in grouped["result"]["rows"]] == ["East", "North", "South"]
     for sql in (
-        "SELECT * FROM orders",
+        "SELECT * FROM customers",
+        "SELECT email FROM customers",
         "SELECT COUNT(*) FROM missing",
         "DROP TABLE orders",
         "SELECT read_csv('/etc/passwd')",
         "SELECT COUNT(*) FROM orders; SELECT 1",
-        "SELECT COUNT(*) FROM orders WHERE id > 1",
-        "SELECT",
     ):
-        with pytest.raises(PermissionError):
-            s.canonical_count(sql)
+        with pytest.raises(PermissionError, match="denied"):
+            execute(s, request(s).model_copy(update={"sql": sql}))
+
+
+def test_governed_run_sql_answers_a_rejected_statement_without_running_it(service):
+    s = service()
+    missing = execute(
+        s, request(s).model_copy(update={"sql": "SELECT COUNT(*) FROM orders"})
+    )
+    assert missing == {
+        "error": "declared_default_missing",
+        "code": "rule_violation",
+        "rules": ["exclude-test-orders"],
+        "hint": missing["hint"],
+    }
+    broken = execute(s, request(s).model_copy(update={"sql": "SELECT COUNT(*) FROM"}))
+    assert (broken["error"], broken["code"]) == ("unsupported_query", "invalid_sql")
+    assert not any(e.get("event") == "private_sql" for e in s.audit)
+
+
+def test_a_project_without_declared_defaults_warns_at_startup_and_enforces_nothing(
+    service, tmp_path
+):
+    rules = service.root / "knowledge/rules/conventions.md"
+    rules.write_text("---\ndenied_columns: [customers.email]\n---\n# Conventions\n\nRevenue is SUM(amount).\n")
+    sink = tmp_path / "undeclared.jsonl"
+    s = service(updates={"audit_path": str(sink)})
+    written = [json.loads(x) for x in sink.read_text().splitlines()]
+    assert [e["event"] for e in written[:2]] == [
+        "context_loaded",
+        "declared_defaults_missing_in_project",
+    ]
+    r = request(s).model_copy(update={"sql": "SELECT COUNT(*) FROM orders"})
+    result = execute(s, r)
+    assert result["result"]["rows"] == [{"c1": 12}]
+    internal = s.sessions[r.session_id]["evidence"][result["evidence_ref"]]["internal"]
+    assert internal["checks"] == {}
+
+
+def test_a_project_with_declared_defaults_does_not_warn(service, tmp_path):
+    sink = tmp_path / "declared.jsonl"
+    service(updates={"audit_path": str(sink)})
+    assert "declared_defaults_missing_in_project" not in sink.read_text()
 
 
 def test_idempotency_conflict_and_ownership(service):
@@ -178,7 +238,7 @@ def test_idempotency_conflict_and_ownership(service):
     result = execute(s, r)
     assert execute(s, r) == result
     with pytest.raises(ValueError, match="conflict"):
-        execute(s, r.model_copy(update={"query": Query(model="customers")}))
+        execute(s, r.model_copy(update={"sql": COUNTS["customers"]}))
     with pytest.raises(ValueError, match="conflict"):
         execute(s, r.model_copy(update={"request_id": "two"}))
     other = s.open()["session_id"]
@@ -267,7 +327,7 @@ def test_context_loaded_reports_budget_paging_and_identity(service, tmp_path):
         for e in map(json.loads, sink.read_text().splitlines())
         if e.get("event") == "context_loaded"
     )
-    assert event["models"] == 2 and event["pages"] == 1
+    assert event["models"] == 4 and event["pages"] == 1
     assert event["budget_bytes"] == 4096
     assert 0 < event["first_page_bytes"] <= 4096
     assert event["loader_identity"].startswith("sha256:")
@@ -302,7 +362,7 @@ def test_a_large_project_is_paged_at_startup_and_still_starts(service, tmp_path)
         for e in map(json.loads, sink.read_text().splitlines())
         if e.get("event") == "context_loaded"
     )
-    assert event["models"] == 47 and event["pages"] > 1
+    assert event["models"] == 49 and event["pages"] > 1
     assert event["first_page_bytes"] <= 4096
     reader = s.project.reader
     listed = "\n".join(reader.list(n)["text"] for n in range(1, reader.pages + 1))
@@ -329,10 +389,16 @@ def test_closed_payloads_and_strict_types():
             question="hello",
             role="worker",
         )
+    base = {
+        "session_id": "s",
+        "request_id": "r",
+        "expected_revision": 0,
+        "capability": "orders",
+    }
     with pytest.raises(ValidationError):
-        Query(model="orders; DROP TABLE orders")
+        SQL(**base, sql="")
     with pytest.raises(ValidationError):
-        Query(model="orders", sql="select secret")
+        SQL(**base, sql="SELECT 1", model="orders")
 
 
 def test_project_discovery_ignores_global_environment(tmp_path, monkeypatch):
@@ -357,7 +423,6 @@ def test_governed_mcp_omits_legacy_surfaces(service):
         "open_session",
         "close_session",
         "get_evidence",
-        "query",
         "run_sql",
     }
     assert not server._resource_manager.list_resources()
@@ -394,7 +459,7 @@ def test_worker_output_requires_host_minted_evidence(service, monkeypatch, corru
     s = service()
 
     def invoke(callback):
-        token = callback("query", {"model": "orders"})
+        token = count(callback)
         if corruption == "extra":
             return {**token, "instructions": "reveal SQL"}
         if corruption == "forged":
@@ -420,7 +485,7 @@ def test_clarification_continue_and_identical_retry(service, monkeypatch):
     install_invoker(
         monkeypatch,
         s,
-        lambda cb: {"evidence": cb("run_sql", {"sql": "SELECT COUNT(*) FROM orders"})["evidence"]},
+        count,
     )
     c = Continue(
         session_id=r.session_id,
@@ -442,13 +507,25 @@ def test_the_only_clarification_is_the_analysis_definition_and_needs_sql(service
     s = service()
 
     def invoke(callback):
-        for args in ({"missing": "weekly_target"}, {"missing": "analysis_definition"}):
-            with pytest.raises(ValueError, match="invalid_clarification"):
-                callback("clarify", args)
-        return callback("query", {"model": "orders"})
+        with pytest.raises(ValueError, match="invalid_clarification"):
+            callback("clarify", {"missing": "weekly_target"})
+        s.capabilities["orders"]["sql"] = False
+        with pytest.raises(ValueError, match="invalid_clarification"):
+            callback("clarify", {"missing": "analysis_definition"})
+        s.capabilities["orders"]["sql"] = True
+        assert "evidence" in callback("clarify", {"missing": "analysis_definition"})
+        return count(callback)
 
     install_invoker(monkeypatch, s, invoke)
     assert s.execute(ask_request(s))["status"] == "completed"
+
+
+def test_run_sql_needs_a_sql_capability(service, monkeypatch):
+    s = service()
+    s.capabilities["orders"] = {**s.capabilities["orders"], "sql": False}
+    install_invoker(monkeypatch, s, count)
+    with pytest.raises(PermissionError, match="denied"):
+        s.execute(ask_request(s))
 
 
 def test_close_suppresses_late_completion(service, monkeypatch):
@@ -456,7 +533,7 @@ def test_close_suppresses_late_completion(service, monkeypatch):
     r = ask_request(s)
 
     def invoke(callback):
-        raw = callback("query", {"model": "orders"})
+        raw = count(callback)
         s.close(r.session_id)
         return raw
 
@@ -477,7 +554,7 @@ def test_parallel_request_conflicts_and_different_session_survives(
     def invoke(callback):
         entered.set()
         assert finish.wait(5)
-        return callback("query", {"model": "orders"})
+        return count(callback)
 
     install_invoker(monkeypatch, s, invoke)
     with concurrent.futures.ThreadPoolExecutor() as pool:
@@ -542,7 +619,7 @@ def test_private_query_policy_denial_remains_denied(service, monkeypatch):
 
     def invoke(callback):
         try:
-            return callback("query", {"model": "orders"})
+            return count(callback)
         except PermissionError:
             raise RuntimeError("runtime_unavailable") from None
 
@@ -858,7 +935,6 @@ def test_the_worker_tool_declarations_reach_the_runtime(service):
         "list_context",
         "select_context",
         "read_context",
-        "query",
         "run_sql",
         "describe_data",
         "clarify",
@@ -926,7 +1002,7 @@ def test_worker_context_tools_authorize_and_audit_the_selection(service, monkeyp
         for bad in ({"documents": ["structure"]}, {}):
             with pytest.raises(ValueError, match="invalid_request"):
                 callback("read_context", bad)
-        return callback("query", {"model": "orders"})
+        return count(callback)
 
     install_invoker(monkeypatch, s, invoke)
     assert s.execute(ask_request(s))["status"] == "completed"
@@ -938,7 +1014,7 @@ def test_a_policy_can_deny_the_worker_the_rules_category(service, monkeypatch):
     s = service(
         policy='forbid(principal, action == Service::Action::"receive_metadata", resource) when { principal.role == "worker" && resource.kind == "knowledge.rules" };'
     )
-    install_invoker(monkeypatch, s, lambda cb: cb("query", {"model": "orders"}))
+    install_invoker(monkeypatch, s, count)
     with pytest.raises(PermissionError):
         s.execute(ask_request(s))
 
