@@ -431,6 +431,25 @@ def test_a_later_inner_join_filter_on_a_preserved_side_counts():
     assert outcome(sql) == "satisfied"
 
 
+@pytest.mark.parametrize("kind", ["ANTI", "SEMI"])
+def test_a_bare_semi_or_anti_join_condition_filters_nothing(kind):
+    sql = f"SELECT o.id FROM orders o {kind} JOIN customers c ON c.id = o.customer_id AND {PAID}"
+    assert outcome(sql) == "missing"
+
+
+GROUP = "(customers c JOIN customers d ON d.id = c.id)"
+
+
+def test_a_joined_group_has_no_name_to_tell_its_side_so_its_on_filters_nothing():
+    for sql in (
+        "SELECT SUM(o.order_total) FROM customers c RIGHT JOIN "
+        f"(orders o JOIN customers d ON d.id = o.customer_id) ON c.id = o.customer_id AND {PAID}",
+        f"SELECT SUM(o.order_total) FROM orders o LEFT JOIN {GROUP} ON c.id = o.customer_id AND {PAID}",
+        f"SELECT SUM(o.order_total) FROM orders o RIGHT JOIN {GROUP} ON c.id = o.customer_id AND {PAID}",
+    ):
+        assert outcome(sql) == "missing"
+
+
 def test_a_semi_join_condition_filters_nothing():
     sql = f"SELECT o.id FROM orders o LEFT SEMI JOIN customers c ON c.id = o.customer_id AND {PAID}"
     assert outcome(sql) == "missing"

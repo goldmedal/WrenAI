@@ -400,11 +400,32 @@ def test_an_exclusion_in_the_on_of_an_outer_join_filters_nothing_on_a_preserved_
     assert check(checker, on_clause(shape)) == [EXCLUDE]
 
 
-@pytest.mark.parametrize("shape", ["left_nullable", "right_nullable", "inner", "where"])
-def test_an_exclusion_that_restricts_the_nullable_side_or_an_inner_join_still_counts(
+@pytest.mark.parametrize("shape", ["inner", "where"])
+def test_an_exclusion_in_where_or_an_inner_join_counts(checker, shape):
+    assert check(checker, on_clause(shape)) == []
+
+
+@pytest.mark.parametrize("shape", ["left_nullable", "right_nullable"])
+def test_an_exclusion_in_the_on_of_an_outer_join_never_counts_even_on_the_nullable_side(
     checker, shape
 ):
-    assert check(checker, on_clause(shape)) == []
+    assert check(checker, on_clause(shape)) == [EXCLUDE]
+
+
+@pytest.mark.parametrize(
+    "join",
+    [
+        "customers c ANTI JOIN orders o ON o.customer_id = c.id AND NOT c.is_test",
+        "customers c SEMI JOIN orders o ON o.customer_id = c.id AND NOT c.is_test",
+        "orders o RIGHT JOIN (customers c JOIN customers d ON d.id = c.id) "
+        "ON c.id = o.customer_id AND NOT c.is_test",
+        "customers c LEFT JOIN (orders o JOIN customers d ON d.id = o.customer_id) "
+        "ON o.customer_id = c.id AND NOT c.is_test",
+    ],
+    ids=["anti", "semi", "right-group", "left-group"],
+)
+def test_an_exclusion_in_a_bare_semi_anti_or_grouped_join_on_filters_nothing(checker, join):
+    assert check(checker, f"SELECT COUNT(*) FROM {join}") == [EXCLUDE]
 
 
 def test_the_on_clause_of_a_join_still_carries_the_rate_join_whatever_its_side(checker):

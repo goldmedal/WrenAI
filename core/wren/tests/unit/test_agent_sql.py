@@ -1353,6 +1353,30 @@ OUTER_ON = [
         id="right",
     ),
     pytest.param(
+        "SELECT SUM(o.amount) FROM orders o ANTI JOIN customers c ON c.id = o.customer_id "
+        "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        ("exclude-test-orders", f"{STATUS}:missing"),
+        id="bare-anti",
+    ),
+    pytest.param(
+        "SELECT SUM(o.amount) FROM orders o SEMI JOIN customers c ON c.id = o.customer_id "
+        "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        ("exclude-test-orders", f"{STATUS}:missing"),
+        id="bare-semi",
+    ),
+    pytest.param(
+        "SELECT SUM(o.amount) FROM customers c RIGHT JOIN (orders o JOIN customers d ON d.id = o.customer_id) "
+        "ON c.id = o.customer_id AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        ("exclude-test-orders", f"{STATUS}:missing"),
+        id="right-to-group",
+    ),
+    pytest.param(
+        "SELECT SUM(o.amount) FROM orders o LEFT JOIN (customers c JOIN customers d ON d.id = c.id) "
+        "ON c.id = o.customer_id AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        ("exclude-test-orders", f"{STATUS}:missing"),
+        id="left-to-group",
+    ),
+    pytest.param(
         "SELECT SUM(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id "
         "AND o.status IN ('paid', 'shipped') WHERE NOT o.is_test",
         (f"{STATUS}:missing",),
@@ -1379,14 +1403,31 @@ def test_a_filter_in_the_on_of_an_outer_join_does_not_filter_its_preserved_side(
     [
         "SELECT SUM(o.amount) FROM orders o LEFT JOIN customers c ON c.id = o.customer_id "
         f"WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')",
-        "SELECT SUM(o.amount) FROM customers c LEFT JOIN orders o ON o.customer_id = c.id "
-        "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
         "SELECT SUM(o.amount) FROM customers c JOIN orders o ON o.customer_id = c.id "
+        "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
+        "SELECT SUM(o.amount) FROM customers c, orders o WHERE o.customer_id = c.id "
         "AND NOT o.is_test AND o.status IN ('paid', 'shipped')",
     ],
 )
-def test_a_filter_in_the_on_of_the_nullable_side_or_an_inner_join_counts(adhoc, sql):
+def test_a_filter_in_the_where_or_an_inner_join_counts(adhoc, sql):
     prepared = adhoc().sql.prepare(sql)
+    assert prepared.checks[STATUS]["result"] == "satisfied"
+    assert prepared.checks["exclude-test-orders"]["result"] == "satisfied"
+
+
+NULLABLE_ON = (
+    "SELECT SUM(o.amount) FROM customers c LEFT JOIN orders o ON o.customer_id = c.id "
+    "AND NOT o.is_test AND o.status IN ('paid', 'shipped')"
+)
+
+
+def test_a_nullable_side_on_predicate_restricts_a_status_but_is_not_an_exclusion(adhoc):
+    s = adhoc()
+    error = refused(s, NULLABLE_ON)
+    assert isinstance(error, DeclaredDefaultMissing)
+    assert error.rules == ("exclude-test-orders",)
+    status_only = NULLABLE_ON.replace("NOT o.is_test AND ", "") + " WHERE NOT o.is_test"
+    prepared = s.sql.prepare(status_only)
     assert prepared.checks[STATUS]["result"] == "satisfied"
     assert prepared.checks["exclude-test-orders"]["result"] == "satisfied"
 
@@ -1447,6 +1488,15 @@ def test_a_rate_bounded_by_a_literal_is_a_default_in_disguise(adhoc, fn):
     prepared = s.sql.prepare(sql)
     assert prepared.checks[FX]["result"] == "satisfied"
     assert "fx_default_shape_unverified" in prepared.unverified
+
+
+@pytest.mark.parametrize("fn", ["GREATEST", "LEAST"])
+def test_a_rate_bounded_by_a_non_literal_is_unverified_too(adhoc, fn):
+    sql = (
+        "SELECT SUM(CASE WHEN i.currency = 'USD' THEN i.amount ELSE i.amount * "
+        f"{fn}(r.rate_to_usd, 2 - 1) END) FROM invoices i ASOF LEFT JOIN fx_rates r ON {JOIN}"
+    )
+    assert "fx_default_shape_unverified" in adhoc().sql.prepare(sql).unverified
 
 
 def test_greatest_over_two_rates_or_inside_the_base_branch_is_not_a_default(adhoc):

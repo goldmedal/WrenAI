@@ -559,15 +559,18 @@ class _Rate:
         forms: a numeric (or NULL) default, and a ``IS [NOT] NULL`` test. A non-literal or nested
         default (``COALESCE(rate, 2 - 1)``, a ``CASE`` inside a ``CASE``) and a ``CASE`` on the
         rate that is not such a test (``CASE WHEN rate > 0 ...``) are not judged, so they are
-        reported rather than passed on trust. So is ``GREATEST`` / ``LEAST`` of a rate and a
-        number outside a base-currency branch: DuckDB ignores NULL there, so a missing rate
-        becomes that number, a default in disguise.
+        reported rather than passed on trust. So is ``GREATEST`` / ``LEAST`` of a rate and any other
+        non-NULL value (a number or an expression) outside a base-currency branch: DuckDB ignores
+        NULL there, so a missing rate becomes that value, a default in disguise.
         """
         for node in self.st.ast.find_all(exp.Greatest, exp.Least):
             args = [node.this, *node.expressions]
             if (
                 any(self._is_rate(a) for a in args)
-                and any(_numeric_literal(a) for a in args)
+                and any(
+                    not self._is_rate(a) and not isinstance(_unparen(a), exp.Null)
+                    for a in args
+                )
                 and not self._guarded(node)
             ):
                 return True

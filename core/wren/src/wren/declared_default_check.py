@@ -89,22 +89,29 @@ def _boolean(node: exp.Expression) -> bool | None:
     return node.this if isinstance(node, exp.Boolean) else None
 
 
+def _outer(join: exp.Join) -> bool:
+    """Whether ``join`` keeps rows its ON clause does not match (any outer, semi or anti join)."""
+    return bool(join.side) or (join.kind or "").upper() in {"SEMI", "ANTI"}
+
+
 def _restricts(join: exp.Join, conjunct: exp.Expression) -> bool:
     """Whether ``conjunct`` of ``join``'s ON clause removes rows from the statement's result.
 
     An outer join keeps every row of its preserved side whatever the ON clause says, so an ON
     conjunct narrows only the nullable side's own rows. ``FULL`` keeps both sides, and a semi or
-    anti join does not return the right side at all, so none of their ON conjuncts is a filter.
+    anti join, bare or sided, does not return the right side at all, so none of their ON
+    conjuncts is a filter. A joined side with no name (a parenthesised join group) cannot be told
+    from the preserved side, so its conjuncts do not count either.
     """
     side = (join.side or "").upper()
-    if not side:
-        return True
     if side == "FULL" or (join.kind or "").upper() in {"SEMI", "ANTI"}:
         return False
+    if not side:
+        return True
     tables = {column.table for column in conjunct.find_all(exp.Column)}
-    if not tables or "" in tables:
-        return False
     own = join.alias_or_name
+    if not own or not tables or "" in tables:
+        return False
     return tables == {own} if side == "LEFT" else own not in tables
 
 
@@ -128,8 +135,14 @@ class _Statement:
         filters += [q.this for q in ast.find_all(exp.Qualify)]
         self.roots = [*filters, *(on for _, on in joins)]
         self.conjuncts = [c for root in filters for c in _conjuncts(root)]
+        # What reaches the fact rows: WHERE and the ON of an inner or comma join. A nullable-side
+        # ON conjunct of an outer join narrows that side only, so an exclusion cannot rest on it.
+        self.reaching = list(self.conjuncts)
         for join, on in joins:
-            self.conjuncts += [c for c in _conjuncts(on) if _restricts(join, c)]
+            kept = [c for c in _conjuncts(on) if _restricts(join, c)]
+            self.conjuncts += kept
+            if not _outer(join):
+                self.reaching += kept
         # A table is read when some scope's source is that stored table. A CTE
         # that shadows a model name is a Scope source, while the table inside the
         # CTE body is still a Table source, so shadowing cannot hide a read.
@@ -327,7 +340,7 @@ class _Statement:
 
     def _addresses(self, rule: ExcludeRows) -> bool:
         flag = self.checker.flag_of(rule)
-        if any(self.polarity(c, rule) == "incl" for c in self.conjuncts):
+        if any(self.polarity(c, rule) == "incl" for c in self.reaching):
             return True
         grouped = [
             column
@@ -349,9 +362,9 @@ class _Statement:
         if rule.addresses_column and self._addresses(rule):
             return False
         for atom in self.checker.atoms_of(rule):
-            if any(self.canonical(c) == atom for c in self.conjuncts):
+            if any(self.canonical(c) == atom for c in self.reaching):
                 return False
-        return not any(self.polarity(c, rule) == "excl" for c in self.conjuncts)
+        return not any(self.polarity(c, rule) == "excl" for c in self.reaching)
 
     # -- require_rate_join ----------------------------------------------
 
