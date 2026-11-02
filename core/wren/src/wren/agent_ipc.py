@@ -107,9 +107,14 @@ class RuntimeIPC:
                         failure.detail = ":".join(
                             str(x)[:80] for x in (m["error"], m.get("diagnostic")) if x
                         )
+                        # The per-attempt usage and counters are audit-only and arrive
+                        # unvalidated; the service checks every field before it records one.
+                        failure.calls = m.get("calls")
+                        failure.turns = m.get("turns")
+                        failure.tool_calls = m.get("toolCalls")
                         future.set_exception(failure)
                     else:
-                        future.set_result(m["value"])
+                        future.set_result((m["value"], m.get("calls")))
         except Exception:
             self.process.kill()
         finally:
@@ -118,7 +123,13 @@ class RuntimeIPC:
                     future.set_exception(RuntimeError("runtime_unavailable"))
             self.pending.clear()
 
-    def call(self, op, *, callback=None, invocation_id=None, **values):
+    def call(self, op, *, callback=None, invocation_id=None, usage=None, **values):
+        """Send one op and wait for its reply.
+
+        ``usage``, when given, receives the runtime's per-attempt ``calls`` of a successful
+        reply (a failed one carries them on the exception). They are audit-only and never part
+        of the returned value.
+        """
         ident = invocation_id or str(uuid.uuid4())
         if ident in self.pending or ident in self.abandoned:
             raise ValueError("invalid_invocation_id")
@@ -129,7 +140,10 @@ class RuntimeIPC:
         try:
             self._send({"id": ident, "op": op, **values})
             # The runtime's own deadlines sit below this cap. The operator can override it.
-            return future.result(timeout=self._timeout())
+            value, calls = future.result(timeout=self._timeout())
+            if usage is not None and calls is not None:
+                usage["calls"] = calls
+            return value
         except concurrent.futures.TimeoutError:
             self._abandon(ident, cancel=op == "invoke")
             failure = RuntimeError("runtime_unavailable")

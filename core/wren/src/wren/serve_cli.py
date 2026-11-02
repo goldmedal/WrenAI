@@ -153,7 +153,7 @@ def serve_mcp(
         Optional[Path],
         typer.Option(
             "--service-config",
-            help="Enable governed stdio mode with this trusted deployment configuration.",
+            help="Enable governed stdio mode with this trusted deployment configuration (version 2: config_version, caller, project_id, policy, private_model, optional execution and policy_presets).",
         ),
     ] = None,
     agent_profile: Annotated[
@@ -313,7 +313,9 @@ def serve_agent(
     service_config: Annotated[
         Path,
         typer.Option(
-            "--service-config", help="Trusted service deployment configuration."
+            "--service-config",
+            help="Trusted service deployment configuration, version 2 (config_version: 2; "
+            "caller, project_id, policy, private_model, optional execution and policy_presets).",
         ),
     ],
     runtime: Annotated[
@@ -337,7 +339,7 @@ def serve_agent(
         Optional[str],
         typer.Option(
             "--policy-preset",
-            help="Named preset from service.yml policy_presets; default_preset when omitted.",
+            help="Named preset from service.yml policy_presets (hidden, structure, rules or full in the example); default_preset when omitted.",
         ),
     ] = None,
 ) -> None:
@@ -380,7 +382,9 @@ def serve_agent_presets(
     service_config: Annotated[
         Path,
         typer.Option(
-            "--service-config", help="Trusted service deployment configuration."
+            "--service-config",
+            help="Trusted service deployment configuration, version 2 (config_version: 2; "
+            "caller, project_id, policy, private_model, optional execution and policy_presets).",
         ),
     ],
 ) -> None:

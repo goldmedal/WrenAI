@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import copy
 import functools
 import hmac
 import json
@@ -181,15 +182,129 @@ def parse_status_answer(answer: str, rule: SaleStatuses) -> frozenset[str] | Non
     return folded if folded <= fold_all(rule.domain) else None
 
 
+def clarification_question(
+    rule: SaleStatuses, *, declared: bool = False, domain: bool = False
+) -> str:
+    """The status-scope question, listing only what the caller may be told.
+
+    ``declared`` adds the rule's declared set (a business rule: the ``rules`` category);
+    ``domain`` adds the column's whole value set (structure: the ``observed`` category). Each
+    is decided separately by the host; neither is ever part of the plain wording.
+    """
+    ask = "請以逗號分隔列出要分析的狀態。"
+    if declared and domain:
+        return (
+            "規則預設只納入這些訂單狀態："
+            + "、".join(rule.values)
+            + "；可選的狀態有："
+            + "、".join(rule.domain)
+            + f"。請問是否只分析其中某些狀態？{ask}"
+        )
+    if declared:
+        return (
+            "規則預設只納入這些訂單狀態："
+            + "、".join(rule.values)
+            + f"。請問是否只分析其中某些狀態？{ask}"
+        )
+    if domain:
+        return (
+            "請指定要分析的訂單狀態；可選的狀態有："
+            + "、".join(rule.domain)
+            + f"。{ask}"
+        )
+    return "請指定要分析的訂單狀態"
+
+
 def status_clarifications(rule: SaleStatuses) -> dict[str, str]:
-    """The two wordings of the status-scope question; the host sends ``without_disclosure``
-    until the disclosure policy picks one."""
+    """The two base wordings of the status-scope question, kept with the pending task. The
+    host picks the wording the policy allows when it sends the question
+    (``clarification_question``)."""
     return {
-        "with_disclosure": "規則預設只納入這些訂單狀態："
-        + "、".join(rule.values)
-        + "。請問是否只分析其中某些狀態？請以逗號分隔列出要分析的狀態。",
-        "without_disclosure": "請指定要分析的訂單狀態",
+        "with_disclosure": clarification_question(rule, declared=True),
+        "without_disclosure": clarification_question(rule),
     }
+
+
+EVIDENCE_CHECKS = "answer.evidence.checks"
+EVIDENCE_SUMMARY = "answer.evidence.checks_summary"
+EVIDENCE_OBSERVED = "answer.evidence.observed"
+EVIDENCE_UNVERIFIED = "answer.evidence.unverified"
+EVIDENCE_KINDS = (
+    EVIDENCE_CHECKS,
+    EVIDENCE_SUMMARY,
+    EVIDENCE_OBSERVED,
+    EVIDENCE_UNVERIFIED,
+)
+SATISFIED_RESULTS = frozenset(
+    {"satisfied", "satisfied_by_definition", "satisfied_by_caller_scope"}
+)
+STORED_CHECK_RESULTS = SATISFIED_RESULTS | {"not_applicable"}
+CHECK_FIELDS = ("applicable", "result", "scope")
+OBSERVED_FIELDS = (
+    "models",
+    "columns",
+    "joins",
+    "aggregated",
+    "filters",
+    "status_literals",
+)
+MODEL_CALL_COUNTS = {
+    "turn": "turn",
+    "elapsedMs": "elapsed_ms",
+    "input": "input",
+    "output": "output",
+    "reasoning": "reasoning",
+    "cacheRead": "cache_read",
+    "toolCalls": "tool_calls",
+}
+MODEL_CALL_LABELS = {
+    "stopReason": "stop_reason",
+    "rawStopReason": "raw_stop_reason",
+    "status": "status",
+}
+MODEL_CALL_LABEL = re.compile(r"[a-z0-9_]{0,32}")
+MODEL_CALL_LIMIT = 512
+COUNT_MAX = 2**53
+
+
+def count_or_none(value):
+    """A runtime counter, or ``None`` when it is not a plain non-negative integer."""
+    return value if type(value) is int and 0 <= value <= COUNT_MAX else None
+
+
+def model_call_events(calls) -> tuple[list[dict], int]:
+    """The audit fields of the runtime's per-attempt ``calls``, and how many were dropped.
+
+    ``calls`` is a provider-influenced channel: an entry is kept only when it has exactly the
+    ten documented keys, every counter is a plain non-negative integer and every label matches
+    ``[a-z0-9_]{0,32}``. Nothing else is copied, and none of it reaches a prompt, the public
+    answer or evidence.
+    """
+    if calls is None:
+        return [], 0
+    if not isinstance(calls, list):
+        return [], 1
+    kept, dropped = [], 0
+    for entry in calls[:MODEL_CALL_LIMIT]:
+        valid = (
+            isinstance(entry, dict)
+            and set(entry) == {*MODEL_CALL_COUNTS, *MODEL_CALL_LABELS}
+            and all(count_or_none(entry[key]) is not None for key in MODEL_CALL_COUNTS)
+            and all(
+                isinstance(entry[key], str) and MODEL_CALL_LABEL.fullmatch(entry[key])
+                for key in MODEL_CALL_LABELS
+            )
+        )
+        if not valid:
+            dropped += 1
+            continue
+        kept.append(
+            {
+                **{field: entry[key] for key, field in MODEL_CALL_COUNTS.items()},
+                **{field: entry[key] for key, field in MODEL_CALL_LABELS.items()},
+            }
+        )
+    return kept, dropped + max(len(calls) - MODEL_CALL_LIMIT, 0)
 
 
 class SqlBudget:
@@ -311,7 +426,9 @@ def read_policy_presets(config: dict) -> tuple[str | None, dict[str, dict]]:
 
 def apply_policy_preset(config: dict, requested: str | None) -> dict:
     """Overlay one preset at startup. Top-level values stay the fallback; a
-    preset never adds keys outside PRESET_KEYS and cannot widen policy.cedar."""
+    preset never adds keys outside PRESET_KEYS. Its ``policy`` file is evaluated in
+    addition to the deployment policy (``preset_policy``), never in its place, so a
+    preset can only narrow what the deployment policy allows."""
     default, presets = read_policy_presets(config)
     name = requested if requested is not None else default
     if name is None:
@@ -323,6 +440,9 @@ def apply_policy_preset(config: dict, requested: str | None) -> dict:
     merged = {
         k: v for k, v in config.items() if k not in ("policy_presets", "default_preset")
     }
+    overrides = dict(overrides)
+    if "policy" in overrides:
+        merged["preset_policy"] = overrides.pop("policy")
     merged.update(overrides)
     merged["policy_preset"] = {"name": name, "available": sorted(presets)}
     return merged
@@ -475,6 +595,120 @@ class Service:
         if rules and documents["rules"]["content"]:
             self.require(session, "receive_metadata", "knowledge.rules", "rules", role)
 
+    def record_model_calls(self, request_id: str, calls) -> None:
+        """One ``model_call`` audit event per provider attempt the runtime reported.
+
+        A runtime that predates the usage report sends none; that is not an error."""
+        events, dropped = model_call_events(calls)
+        for event in events:
+            self.record({"event": "model_call", "request_id": request_id, **event})
+        if dropped:
+            self.record(
+                {
+                    "event": "model_calls_dropped",
+                    "request_id": request_id,
+                    "count": dropped,
+                }
+            )
+
+    def project_evidence(self, s, ref: str) -> dict:
+        """What the planner may learn about how a result was checked.
+
+        ``get_evidence`` and the completed ``ask_data`` / ``run_sql`` response both come
+        through here. Each of the four ``answer.evidence.*`` kinds is authorized once per
+        reference (the policy is fixed within a session) and the projection is kept with it.
+        Only the fields below are copied; a violated or undetermined verdict is never stored,
+        so it cannot appear, and the projection checks that.
+        """
+        saved = s["evidence"].get(ref) or s["results"].get(ref)
+        if saved is None:
+            raise PermissionError("denied")
+        if "projection" not in saved:
+            capability = saved["capability"]
+            permitted = {
+                kind: self.allowed(s, "receive_answer", kind, capability)
+                for kind in EVIDENCE_KINDS
+            }
+            internal = saved.get("internal") or {}
+            checks = internal.get("checks") or {}
+            unverified = internal.get("unverified") or []
+            if any(
+                c.get("result") not in STORED_CHECK_RESULTS for c in checks.values()
+            ):
+                raise ValueError("invalid_evidence")
+            projection = {"mandatory_scope": copy.deepcopy(saved["conditions"])}
+            if permitted[EVIDENCE_SUMMARY]:
+                applicable = any(c.get("applicable") is True for c in checks.values())
+                projection["checks_summary"] = (
+                    "all_satisfied" if applicable else "none_applicable"
+                )
+                projection["has_unverified_semantics"] = bool(unverified)
+            if permitted[EVIDENCE_CHECKS]:
+                projection["checks"] = {
+                    rule: {k: copy.deepcopy(c[k]) for k in CHECK_FIELDS if k in c}
+                    for rule, c in checks.items()
+                }
+            if permitted[EVIDENCE_OBSERVED]:
+                projection["observed"] = self.observed_facts(internal.get("observed"))
+            if permitted[EVIDENCE_UNVERIFIED]:
+                projection["unverified"] = list(unverified)
+            saved["projection"] = projection
+        return copy.deepcopy(saved["projection"])
+
+    def observed_facts(self, observed) -> dict:
+        """The AST facts of ``observed`` that a ``structure`` reader may see, named one by one.
+
+        A denied column cannot reach an executed statement, but the projection still drops one
+        rather than relying on that."""
+        observed = observed or {}
+        denied = self.sql.denied
+
+        def hidden(qualified: str) -> bool:
+            model, _, column = qualified.lower().partition(".")
+            return (model, column) in denied
+
+        facts = {
+            key: copy.deepcopy(observed[key])
+            for key in OBSERVED_FIELDS
+            if key in observed
+        }
+        if "columns" in facts:
+            facts["columns"] = {
+                model: [c for c in columns if (model.lower(), c.lower()) not in denied]
+                for model, columns in facts["columns"].items()
+            }
+        if "filters" in facts:
+            facts["filters"] = [f for f in facts["filters"] if not hidden(f["column"])]
+        if "status_literals" in facts:
+            facts["status_literals"] = {
+                column: values
+                for column, values in facts["status_literals"].items()
+                if not hidden(column)
+            }
+        return facts
+
+    def clarification_question(self, s, request, rule: SaleStatuses) -> str:
+        """The status-scope question the policy lets this caller read.
+
+        It goes through the same ``receive_answer`` check as an answer: the declared set needs
+        ``answer.evidence.checks`` and the column's value set needs ``answer.evidence.observed``,
+        decided separately."""
+        declared = self.allowed(
+            s, "receive_answer", EVIDENCE_CHECKS, request.capability
+        )
+        domain = self.allowed(
+            s, "receive_answer", EVIDENCE_OBSERVED, request.capability
+        )
+        self.record(
+            {
+                "event": "clarification_sent",
+                "request_id": request.request_id,
+                "rule": rule.id,
+                "disclosure": {"set": declared, "domain": domain},
+            }
+        )
+        return clarification_question(rule, declared=declared, domain=domain)
+
     def capabilities_public(self):
         return {
             "version": "wren-agent-capabilities/1",
@@ -595,7 +829,11 @@ class Service:
             self.require(
                 s, "receive_answer", "answer.sql_result", model, columns=columns
             )
-        return {k: saved[k] for k in ("result", "completed_at", "conditions")}
+        return {
+            "result": saved["result"],
+            "completed_at": saved["completed_at"],
+            "evidence": self.project_evidence(s, request.evidence_ref),
+        }
 
     def execute(self, request: Ask | SQL, *, direct=None, continuation=None):
         s = self.session(request.session_id)
@@ -693,6 +931,7 @@ class Service:
                         }
                     )
         ledger = {}
+        usage = {}
         policy_denied = False
         ended = None
         ending = threading.Lock()
@@ -988,6 +1227,7 @@ class Service:
                         "invoke",
                         callback=guarded_callback,
                         invocation_id=owner,
+                        usage=usage,
                         request=json.dumps(
                             {
                                 "capability": capability,
@@ -998,10 +1238,18 @@ class Service:
                             ensure_ascii=False,
                         ),
                     )
-                except Exception:
+                except Exception as exc:
+                    # Audit-only: the runtime's usage and counters ride on its failure.
+                    usage["calls"] = getattr(exc, "calls", None)
+                    usage["turns"] = count_or_none(getattr(exc, "turns", None))
+                    usage["tool_calls"] = count_or_none(
+                        getattr(exc, "tool_calls", None)
+                    )
+                    self.record_model_calls(request.request_id, usage["calls"])
                     if ended is not None:
                         raise ended from None
                     raise
+                self.record_model_calls(request.request_id, usage.get("calls"))
                 if ended is not None:
                     # Whatever the runtime handed back after the task ended is dropped.
                     raise ended
@@ -1022,6 +1270,9 @@ class Service:
                             "raw_keys": sorted(raw)[:8]
                             if isinstance(raw, dict)
                             else None,
+                            "turns": None,
+                            "tool_calls": None,
+                            "sql_attempts": budget.attempts,
                         }
                     )
                     raise ValueError("invalid_evidence")
@@ -1058,9 +1309,14 @@ class Service:
                             if key in saved
                         },
                     }
+                    question = saved["clarification"]
+                    if saved.get("status_rule"):
+                        question = self.clarification_question(
+                            s, request, self.status_rules[saved["status_rule"]]
+                        )
                     response.update(
                         status="needs_clarification",
-                        question=saved["clarification"],
+                        question=question,
                         continuation_ref=ref,
                     )
                 else:
@@ -1076,11 +1332,29 @@ class Service:
                     }
                     s["results"][ref] = public
                     s["evidence"][ev] = public
+                    try:
+                        evidence = self.project_evidence(s, ev)
+                    except ValueError:
+                        # Evidence the host cannot project is not delivered, and is not kept.
+                        del s["results"][ref], s["evidence"][ev]
+                        self.record(
+                            {
+                                "event": "task_failed",
+                                "request_id": request.request_id,
+                                "reason": "invalid_evidence",
+                                "detail": "projection",
+                                "turns": None,
+                                "tool_calls": None,
+                                "sql_attempts": budget.attempts,
+                            }
+                        )
+                        raise
                     response.update(
                         status="completed",
                         result_ref=ref,
                         evidence_ref=ev,
                         result=saved["result"],
+                        evidence=evidence,
                     )
                 if continuation:
                     s["pending"][continuation["ref"]]["consumed"] = True
@@ -1102,6 +1376,9 @@ class Service:
                         "request_id": request.request_id,
                         "reason": "denied" if policy_denied else str(exc)[:80],
                         "detail": getattr(exc, "detail", None),
+                        "turns": usage.get("turns"),
+                        "tool_calls": usage.get("tool_calls"),
+                        "sql_attempts": budget.attempts,
                     }
                 )
             if policy_denied:
@@ -1472,11 +1749,14 @@ def worker_tools() -> list[dict]:
             "name": "clarify",
             "action": "clarify",
             "capability": "context_read",
-            "description": "Ask the user to define the metric or analysis only when it cannot be determined from the context or the question.",
+            "description": "Ask the user to define the metric or analysis only when it cannot be determined from the context or the question (missing=analysis_definition). missing=status_scope is only for a statement that run_sql refused for its order statuses when the question itself names the statuses to analyze.",
             "parameters": {
                 **index,
                 "properties": {
-                    "missing": {"type": "string", "enum": ["analysis_definition"]}
+                    "missing": {
+                        "type": "string",
+                        "enum": ["analysis_definition", "status_scope"],
+                    }
                 },
                 "required": ["missing"],
             },
@@ -1511,6 +1791,11 @@ def _assemble_service(
     project.version = project.fingerprint()
     policy_path = contained(config_path.parent, config["policy"])
     project.paths.append(policy_path)
+    policies = [policy_path.read_text()]
+    if config.get("preset_policy"):
+        preset_path = contained(config_path.parent, config["preset_policy"])
+        project.paths.append(preset_path)
+        policies.append(preset_path.read_text())
     project.version = project.fingerprint()
     selection = config.get("metadata_selection", [])
     metadata_condition = (
@@ -1523,7 +1808,7 @@ def _assemble_service(
     ipc = RuntimeIPC(
         runtime,
         {
-            "policies": [policy_path.read_text(), selection_policy],
+            "policies": [*policies, selection_policy],
             "ir": ir if mode == "agent" else None,
             "entry": entry,
             "model": {

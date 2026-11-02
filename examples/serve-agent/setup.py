@@ -131,6 +131,53 @@ def write_model(project: Path, name, description, columns, ref_sql):
     (directory / "ref_sql.sql").write_text(ref_sql)
 
 
+PRESET_SELECTIONS = {
+    "hidden": [],
+    "structure": ["structure"],
+    "rules": ["rules"],
+    "full": ["structure", "rules"],
+}
+# What each preset leaves out of a result's evidence: a forbid per answer.evidence.* kind. The
+# checks_summary kind (an all-satisfied / none-applicable flag and whether anything is
+# unverified) is part of every preset.
+PRESET_WITHHELD = {
+    "hidden": ["checks", "observed", "unverified"],
+    "structure": ["checks", "unverified"],
+    "rules": ["observed"],
+    "full": [],
+}
+
+
+def preset_policy(name: str) -> str:
+    """A preset's Cedar file. The service evaluates it in addition to ``policy.cedar`` and every
+    request must pass both, so it permits everything and forbids each evidence kind the preset
+    withholds: it can narrow the deployment policy and never widen it, and an edit to
+    ``policy.cedar`` always applies."""
+    forbids = "".join(
+        'forbid(principal, action == Service::Action::"receive_answer", resource)\n'
+        f'when {{ resource.kind == "answer.evidence.{kind}" }};\n'
+        for kind in PRESET_WITHHELD[name]
+    )
+    return (
+        f"// Preset {name}: evaluated together with policy.cedar, so it can only narrow it.\n"
+        "permit(principal, action, resource);\n" + forbids
+    )
+
+
+def write_policy_presets(project: Path) -> None:
+    """Write ``policy-<preset>.cedar`` beside ``policy.cedar`` and declare the four presets in
+    ``service.yml`` (``hidden`` is the default)."""
+    for name in PRESET_SELECTIONS:
+        (project / f"policy-{name}.cedar").write_text(preset_policy(name))
+    config = yaml.safe_load((project / "service.yml").read_text())
+    config["default_preset"] = "hidden"
+    config["policy_presets"] = {
+        name: {"metadata_selection": selection, "policy": f"policy-{name}.cedar"}
+        for name, selection in PRESET_SELECTIONS.items()
+    }
+    (project / "service.yml").write_text(yaml.safe_dump(config, sort_keys=False))
+
+
 def prepare(destination: Path):
     """A standard Wren project (orders and customers) with its data and service.yml."""
     destination.mkdir(mode=0o700)
@@ -301,6 +348,7 @@ def prepare(destination: Path):
     }
     (project / "service.yml").write_text(yaml.safe_dump(config, sort_keys=False))
     shutil.copyfile(Path(__file__).with_name("policy.cedar"), project / "policy.cedar")
+    write_policy_presets(project)
 
 
 def prepare_adhoc(destination: Path):
@@ -310,6 +358,7 @@ def prepare_adhoc(destination: Path):
         Path(__file__).with_name("adhoc-policy.cedar"),
         destination / "project/policy.cedar",
     )
+    write_policy_presets(destination / "project")
 
 
 if __name__ == "__main__":

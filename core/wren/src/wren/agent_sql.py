@@ -181,6 +181,7 @@ class AdHocSQL:
             c.lower() for columns in self.schema.values() for c in columns
         }
         self.semantics = list(catalog.get("semantics") or [])
+        self.declared_defaults = bool(snapshot.declarations)
         self.views, self.broken_views = self._read_views(snapshot, catalog)
         self.checker = DefaultsChecker(
             snapshot.declarations,
@@ -464,8 +465,13 @@ class AdHocSQL:
                 raise DeclaredDefaultMissing(RULE_VIOLATION, verdict.violations)
             if verdict.undetermined:
                 raise DeclaredDefaultUndetermined(NO_VERDICT, verdict.undetermined)
-            # COUNT(*) has no Column nodes; its table still receives authorization.
-            conditions = {}
+            # COUNT(*) has no Column nodes; its table still receives authorization. The scope
+            # names what the host enforces on every statement; it carries no rule text, and
+            # no rule or model name.
+            conditions = {
+                "kind": "project_defaults",
+                "declared_defaults_enforced": self.declared_defaults,
+            }
             leaves = self._leaves(scopes[-1])
             labels = [self._label(x, leaves[0]) for x in leaves[0].expression.selects]
             if not labels or len(labels) > 20:

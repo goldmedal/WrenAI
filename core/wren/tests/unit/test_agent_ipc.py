@@ -125,9 +125,63 @@ def test_a_reply_for_an_id_the_host_never_sent_is_still_a_protocol_violation(ipc
     assert runtime.process.wait(timeout=5) != 0
 
 
-def test_the_usage_envelope_of_a_limits_aware_runtime_never_reaches_the_caller(ipc):
+def test_the_usage_of_a_limits_aware_runtime_is_kept_apart_from_the_returned_value(ipc):
     runtime = ipc()
     assert invoke(runtime, "with_calls", "inv-3") == {"evidence": "fake-token"}
+    usage = {}
+    value = runtime.call(
+        "invoke",
+        request=json.dumps({"behavior": "with_calls"}),
+        invocation_id="inv-3b",
+        callback=lambda name, args: "ok",
+        usage=usage,
+    )
+    assert value == {"evidence": "fake-token"}
+    assert [c["status"] for c in usage["calls"]] == ["ok"]
+    assert "calls" not in value
+
+
+def test_a_reply_without_usage_leaves_the_usage_out_parameter_empty(ipc):
+    runtime = ipc()
+    usage = {}
+    runtime.call(
+        "invoke",
+        request=json.dumps({"behavior": "evidence"}),
+        invocation_id="inv-3c",
+        callback=lambda name, args: "ok",
+        usage=usage,
+    )
+    assert usage == {}
+
+
+def test_a_failure_carries_the_runtime_usage_and_counters_on_the_exception(ipc):
+    runtime = ipc()
+    calls = [{"turn": 1, "status": "ok"}]
+    with pytest.raises(RuntimeError, match="runtime_unavailable") as raised:
+        invoke(
+            runtime,
+            "fail_with_calls",
+            "inv-4",
+            diagnostic="turn_limit",
+            calls=calls,
+            turns=12,
+            toolCalls=7,
+        )
+    failure = raised.value
+    assert failure.detail == "service_unavailable:turn_limit"
+    assert (failure.calls, failure.turns, failure.tool_calls) == (calls, 12, 7)
+    assert runtime.process.poll() is None
+
+
+def test_a_failure_without_usage_has_no_calls_and_a_killed_runtime_none_either(ipc):
+    runtime = ipc()
+    with pytest.raises(RuntimeError) as raised:
+        invoke(runtime, "fail_with_calls", "inv-5", diagnostic="invalid_json")
+    assert raised.value.detail == "service_unavailable:invalid_json"
+    assert raised.value.calls is None
+    stray = ipc()
+    stray._send({"id": "s-2", "op": "stray"})
+    assert stray.process.wait(timeout=5) != 0
 
 
 def test_an_abort_ends_the_wait_now_and_drops_whatever_the_runtime_sends_later(ipc):

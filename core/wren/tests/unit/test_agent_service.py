@@ -5,7 +5,9 @@ import concurrent.futures
 import importlib.util
 import json
 import os
+import re
 import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,9 @@ pytest.importorskip("mcp")
 from wren.agent_project import discover  # noqa: E402
 from wren.agent_service import (  # noqa: E402
     SQL,
+    UNAVAILABLE_REASONS,
     Ask,
+    BudgetExhausted,
     Continue,
     Ref,
     StatusScopeUnresolved,
@@ -64,15 +68,26 @@ def service(tmp_path):
         preset=None,
         runtime_path=None,
         profile="analysis",
+        example_presets=False,
     ):
         config = yaml.safe_load((root / "service.yml").read_text())
         config["metadata_selection"] = list(selection)
+        base = "adhoc-policy.cedar" if profile == "adhoc" else "policy.cedar"
+        policy_text = (EXAMPLES / base).read_text() + policy
+        if example_presets:
+            # The presets setup.py declares, over this test's own deployment policy.
+            for name, declared in config["policy_presets"].items():
+                preset_file = root / f"policy-{name}-{len(instances)}.cedar"
+                preset_file.write_text(module.preset_policy(name))
+                declared["policy"] = preset_file.name
+        else:
+            config.pop("policy_presets", None)
+            config.pop("default_preset", None)
         config.update(updates or {})
         config_path = root / f"service-{len(instances)}.yml"
         policy_path = root / f"policy-{len(instances)}.cedar"
         config["policy"] = policy_path.name
-        base = "adhoc-policy.cedar" if profile == "adhoc" else "policy.cedar"
-        policy_path.write_text((EXAMPLES / base).read_text() + policy)
+        policy_path.write_text(policy_text)
         config_path.write_text(yaml.safe_dump(config))
         s = create_service(
             root,
@@ -1316,7 +1331,7 @@ def finishing(sql, out=None):
 
 
 def test_the_status_scope_chain_from_violation_to_confirmed_scope(service, monkeypatch):
-    s = service(profile="adhoc")
+    s = service(profile="adhoc", example_presets=True, preset="hidden")
     rejected = []
     worker_sees(monkeypatch, s, clarifying(PAID, rejected))
     r = asking(s, s.open()["session_id"], 0, "one")
@@ -1364,10 +1379,10 @@ def test_the_status_scope_chain_from_violation_to_confirmed_scope(service, monke
     assert "caller_scope" not in json.dumps(s.evidence(Ref(session_id=r.session_id, evidence_ref=done["evidence_ref"])))
 
 
-def test_the_clarification_is_kept_in_both_wordings_and_only_the_plain_one_is_sent(
+def test_the_clarification_is_kept_in_both_wordings_and_the_policy_picks_what_is_sent(
     service, monkeypatch
 ):
-    s = service(profile="adhoc")
+    s = service(profile="adhoc", example_presets=True, preset="hidden")
     worker_sees(monkeypatch, s, clarifying(PAID, []))
     r = asking(s, s.open()["session_id"], 0, "one")
     response = s.execute(r)
@@ -1634,3 +1649,1063 @@ def test_a_direct_caller_is_not_pointed_at_a_clarification_it_cannot_make(servic
     assert [e["event"] for e in s.audit if e.get("event", "").startswith("private_sql_rej")] == [
         "private_sql_rejected"
     ]
+
+
+# -- evidence: four kinds, four presets ------------------------------------------------------------
+
+PRESET_NAMES = ("hidden", "structure", "rules", "full")
+JOINED = (
+    "SELECT c.region, COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id "
+    "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped') GROUP BY c.region"
+)
+EVIDENCE_FIELDS = {
+    "hidden": {"mandatory_scope", "checks_summary", "has_unverified_semantics"},
+    "structure": {"mandatory_scope", "checks_summary", "has_unverified_semantics", "observed"},
+    "rules": {
+        "mandatory_scope",
+        "checks_summary",
+        "has_unverified_semantics",
+        "checks",
+        "unverified",
+    },
+    "full": {
+        "mandatory_scope",
+        "checks_summary",
+        "has_unverified_semantics",
+        "checks",
+        "unverified",
+        "observed",
+    },
+}
+PRIVATE_WORDS = (
+    "exclude-test-orders",
+    "convert-invoices-to-usd",
+    RULE,
+    "fiscal_calendar_bounds",
+    "orders",
+    "customers",
+    "is_test",
+    "region",
+    "status",
+    "paid",
+    "email",
+    "violated",
+    "undetermined",
+    "SELECT",
+)
+
+
+def sql_request(s, sql, request_id="one"):
+    return SQL(
+        session_id=s.open()["session_id"],
+        request_id=request_id,
+        expected_revision=0,
+        capability="orders",
+        sql=sql,
+    )
+
+
+def evidence_of(s, request, response):
+    return s.evidence(
+        Ref(session_id=request.session_id, evidence_ref=response["evidence_ref"])
+    )
+
+
+@pytest.mark.parametrize("preset", PRESET_NAMES)
+def test_each_preset_projects_its_own_evidence_fields_and_get_evidence_agrees(
+    service, preset
+):
+    s = service(example_presets=True, preset=preset)
+    r = sql_request(s, JOINED)
+    done = execute(s, r)
+    evidence = done["evidence"]
+    assert set(evidence) == EVIDENCE_FIELDS[preset]
+    assert evidence_of(s, r, done) == {
+        "result": done["result"],
+        "completed_at": s.sessions[r.session_id]["evidence"][done["evidence_ref"]][
+            "completed_at"
+        ],
+        "evidence": evidence,
+    }
+    assert evidence["mandatory_scope"] == {
+        "kind": "project_defaults",
+        "declared_defaults_enforced": True,
+    }
+    assert evidence["checks_summary"] == "all_satisfied"
+    assert evidence["has_unverified_semantics"] is True
+    if "checks" in evidence:
+        assert evidence["checks"]["exclude-test-orders"] == {
+            "applicable": True,
+            "result": "satisfied",
+        }
+        assert evidence["checks"][RULE] == {"applicable": True, "result": "satisfied"}
+        assert evidence["checks"]["convert-invoices-to-usd"]["applicable"] is False
+        assert evidence["unverified"] == ["fiscal_calendar_bounds"]
+    if "observed" in evidence:
+        assert evidence["observed"]["models"] == ["customers", "orders"]
+        assert evidence["observed"]["columns"] == {
+            "customers": ["id", "region"],
+            "orders": ["customer_id", "is_test", "status"],
+        }
+        assert evidence["observed"]["joins"] == [["customers", "orders"]]
+        assert evidence["observed"]["aggregated"] is True
+        assert evidence["observed"]["status_literals"] == {
+            "orders.status": ["paid", "shipped"]
+        }
+        assert {"column": "orders.status", "operator": "in"} in evidence["observed"]["filters"]
+        assert "sql" not in json.dumps(evidence).lower()
+
+
+def test_hidden_evidence_names_no_rule_model_column_or_count(service):
+    s = service(example_presets=True, preset="hidden")
+    r = sql_request(s, JOINED)
+    done = execute(s, r)
+    text = json.dumps(done["evidence"])
+    assert done["evidence"] == {
+        "mandatory_scope": {"kind": "project_defaults", "declared_defaults_enforced": True},
+        "checks_summary": "all_satisfied",
+        "has_unverified_semantics": True,
+    }
+    for word in PRIVATE_WORDS:
+        assert word not in text, word
+    assert "email" not in json.dumps(evidence_of(s, r, done)["evidence"])
+    denied = [
+        e
+        for e in s.audit
+        if e.get("kind", "").startswith("answer.evidence.") and e.get("allowed") is False
+    ]
+    assert {e["kind"] for e in denied} == {
+        "answer.evidence.checks",
+        "answer.evidence.observed",
+        "answer.evidence.unverified",
+    }
+
+
+def test_each_evidence_kind_is_authorized_once_per_reference(service):
+    s = service(example_presets=True, preset="full")
+    r = sql_request(s, JOINED)
+    done = execute(s, r)
+    kinds = [e["kind"] for e in s.audit if e.get("kind", "").startswith("answer.evidence.")]
+    assert sorted(kinds) == sorted(
+        [
+            "answer.evidence.checks",
+            "answer.evidence.checks_summary",
+            "answer.evidence.observed",
+            "answer.evidence.unverified",
+        ]
+    )
+    again = evidence_of(s, r, done)
+    assert again["evidence"] == done["evidence"]
+    assert len([e for e in s.audit if e.get("kind", "").startswith("answer.evidence.")]) == 4
+    saved = s.sessions[r.session_id]["evidence"][done["evidence_ref"]]
+    assert saved["projection"] == done["evidence"]
+    saved_copy = evidence_of(s, r, done)["evidence"]
+    saved_copy["checks"].clear()
+    assert evidence_of(s, r, done)["evidence"]["checks"]
+
+
+def test_a_policy_can_withhold_every_evidence_kind_and_the_scope_still_shows(service):
+    withheld = "".join(
+        f'forbid(principal, action == Service::Action::"receive_answer", resource) '
+        f'when {{ resource.kind == "answer.evidence.{kind}" }};'
+        for kind in ("checks", "checks_summary", "observed", "unverified")
+    )
+    s = service(policy=withheld)
+    done = execute(s, request(s))
+    assert done["status"] == "completed"
+    assert done["evidence"] == {
+        "mandatory_scope": {"kind": "project_defaults", "declared_defaults_enforced": True}
+    }
+
+
+def test_the_evidence_permits_have_a_matching_deny(service):
+    s = service()
+    session = s.open()["session_id"]
+    held = s.sessions[session]
+    for kind in (
+        "answer.evidence.checks",
+        "answer.evidence.checks_summary",
+        "answer.evidence.observed",
+        "answer.evidence.unverified",
+    ):
+        assert s.allowed(held, "receive_answer", kind, "orders") is True
+        assert s.allowed(held, "receive_answer", kind, "other") is False
+    for kind in ("answer.evidence", "answer.evidence.sql", "answer.evidence.violations"):
+        assert s.allowed(held, "receive_answer", kind, "orders") is False
+    assert s.allowed(held, "invoke_tool", "tool", "describe_data", "planner") is True
+    adhoc = service(profile="adhoc")
+    held = adhoc.sessions[adhoc.open()["session_id"]]
+    assert adhoc.allowed(held, "invoke_tool", "tool", "describe_data", "worker") is True
+    assert adhoc.allowed(held, "invoke_tool", "tool", "describe_data", "planner") is False
+    for kind in ("answer.evidence.checks", "answer.description"):
+        assert adhoc.allowed(held, "receive_answer", kind, "analytics") is True
+    assert adhoc.allowed(held, "receive_answer", "answer.evidence.checks", "orders") is False
+
+
+def test_the_setup_presets_are_the_four_modes_and_only_narrow(
+    service, tmp_path
+):
+    module = importlib.util.module_from_spec(
+        spec := importlib.util.spec_from_file_location(
+            "setup_presets", EXAMPLES / "setup.py"
+        )
+    )
+    spec.loader.exec_module(module)
+    for adhoc in (False, True):
+        destination = tmp_path / ("adhoc" if adhoc else "plain")
+        (module.prepare_adhoc if adhoc else module.prepare)(destination)
+        project = destination / "project"
+        config = yaml.safe_load((project / "service.yml").read_text())
+        default, presets = read_policy_presets(config)
+        assert default == "hidden" and sorted(presets) == sorted(PRESET_NAMES)
+        for name, declared in presets.items():
+            assert declared["metadata_selection"] == module.PRESET_SELECTIONS[name]
+            text = (project / declared["policy"]).read_text()
+            assert text == module.preset_policy(name)
+            statements = [x for x in text.split(";") if x.strip()]
+            assert statements[0].split("\n", 1)[1].strip() == "permit(principal, action, resource)"
+            assert len(statements) == 1 + len(module.PRESET_WITHHELD[name])
+            assert all(x.lstrip().startswith("forbid(") for x in statements[1:])
+    from typer.testing import CliRunner  # noqa: PLC0415
+
+    from wren.serve_cli import serve_app  # noqa: PLC0415
+
+    out = CliRunner().invoke(
+        serve_app,
+        ["agent-presets", "--service-config", str(tmp_path / "plain/project/service.yml")],
+    )
+    assert json.loads(out.output) == {
+        "default": "hidden",
+        "presets": ["full", "hidden", "rules", "structure"],
+    }
+
+
+def test_a_preset_policy_is_evaluated_with_the_deployment_policy_never_in_its_place(service):
+    no_descriptions = (
+        'forbid(principal, action == Service::Action::"receive_answer", resource) '
+        'when { resource.kind == "answer.description" };'
+    )
+    s = service(policy=no_descriptions, example_presets=True, preset="full")
+    session = s.sessions[s.open()["session_id"]]
+    # "full" permits everything the deployment policy does, but an edit to the deployment
+    # policy still applies under a preset, and a preset that permits more cannot undo it.
+    assert s.allowed(session, "receive_answer", "answer.description", "orders") is False
+    assert s.allowed(session, "receive_answer", "answer.evidence.checks", "orders") is True
+    widening = s.project.root / "widening.cedar"
+    widening.write_text("permit(principal, action, resource);\n")
+    wide = service(
+        policy=no_descriptions,
+        updates={"policy_presets": {"wide": {"policy": widening.name}}},
+        preset="wide",
+    )
+    held = wide.sessions[wide.open()["session_id"]]
+    assert wide.allowed(held, "receive_answer", "answer.description", "orders") is False
+    assert widening in wide.project.paths
+    default = service(policy=no_descriptions, example_presets=True, preset="hidden")
+    with pytest.raises(PermissionError):
+        default.require(
+            default.sessions[default.open()["session_id"]],
+            "receive_answer",
+            "answer.description",
+            "orders",
+        )
+
+
+def test_the_example_service_starts_on_its_declared_default_preset(service):
+    s = service(example_presets=True)
+    assert s.capabilities_public()["policy_preset"] == {
+        "name": "hidden",
+        "available": ["full", "hidden", "rules", "structure"],
+    }
+    assert s.capabilities_public()["metadata_documents"] == []
+    assert set(execute(s, request(s))["evidence"]) == EVIDENCE_FIELDS["hidden"]
+
+
+def test_a_project_with_no_declared_default_says_so_in_the_scope(service):
+    rules = service.root / "knowledge/rules/conventions.md"
+    rules.write_text(
+        "---\ndenied_columns: [customers.email]\n---\n# Conventions\n\nRevenue is SUM(amount).\n"
+    )
+    s = service(example_presets=True, preset="hidden")
+    done = execute(s, request(s).model_copy(update={"sql": "SELECT COUNT(*) FROM orders"}))
+    assert done["evidence"] == {
+        "mandatory_scope": {"kind": "project_defaults", "declared_defaults_enforced": False},
+        "checks_summary": "none_applicable",
+        "has_unverified_semantics": False,
+    }
+
+
+# -- evidence agrees with the statement that ran, recomputed without the host's code ---------------
+
+STATUS_DOMAIN = ("paid", "shipped", "cancelled", "pending")
+RECOMPUTED = {
+    "count": COUNTS["orders"],
+    "join": JOINED,
+    "customers only": COUNTS["customers"],
+    "aliased exclusions": (
+        "SELECT o.status, SUM(o.amount) FROM orders AS o "
+        "WHERE o.is_test = FALSE AND o.status <> 'cancelled' AND o.status <> 'pending' "
+        "GROUP BY o.status"
+    ),
+}
+
+
+def recomputed(sql):
+    """What the statement keeps of ``orders``, worked out by DuckDB over every status and flag
+    combination, and the models and filter operators read straight from sqlglot's tree. Nothing
+    here uses the host's checker or its observed-facts code."""
+    import duckdb  # noqa: PLC0415
+    import sqlglot  # noqa: PLC0415
+    from sqlglot import exp  # noqa: PLC0415
+
+    tree = sqlglot.parse_one(sql, read="duckdb")
+    tables = {t.alias_or_name: t.name for t in tree.find_all(exp.Table)}
+    where = tree.args.get("where")
+    operators = set()
+
+    def walk(node, negated):
+        while isinstance(node, exp.Paren):
+            node = node.this
+        if isinstance(node, (exp.And, exp.Or)):
+            walk(node.this, negated)
+            walk(node.expression, negated)
+        elif isinstance(node, exp.Not):
+            walk(node.this, not negated)
+        elif isinstance(node, exp.Column):
+            operators.add((node, "is false" if negated else "is true"))
+        else:
+            name = {exp.EQ: "=", exp.NEQ: "<>", exp.In: "in"}[type(node)]
+            operators.add((node.this, name))
+
+    if where is not None:
+        walk(where.this, False)
+    filters = {
+        (f"{tables[col.table or next(iter(tables))]}.{col.name}", operator)
+        for col, operator in operators
+    }
+    kept = None
+    if "orders" in tables.values():
+        alias = next(a for a, m in tables.items() if m == "orders")
+        rows = ", ".join(
+            f"('{status}', {flag})" for status in STATUS_DOMAIN for flag in ("TRUE", "FALSE")
+        )
+        condition = where.this.sql(dialect="duckdb") if where is not None else "TRUE"
+        with duckdb.connect() as db:
+            out = db.execute(
+                f"SELECT status, is_test FROM (SELECT * FROM (VALUES {rows}) "
+                f"AS v(status, is_test)) AS {alias} WHERE {condition}"
+            ).fetchall()
+        kept = ({status for status, _ in out}, any(flag for _, flag in out))
+    return sorted(set(tables.values())), filters, kept
+
+
+@pytest.mark.parametrize("label", sorted(RECOMPUTED))
+def test_the_checks_and_observed_facts_match_what_the_statement_does(service, label):
+    sql = RECOMPUTED[label]
+    models, filters, kept = recomputed(sql)
+    s = service(example_presets=True, preset="full")
+    r = sql_request(s, sql)
+    done = execute(s, r)
+    evidence = done["evidence"]
+    assert evidence["observed"]["models"] == models
+    assert {
+        (f["column"], f["operator"]) for f in evidence["observed"]["filters"]
+    } == filters
+    checks = evidence["checks"]
+    if kept is None:
+        assert checks["exclude-test-orders"] == {"applicable": False, "result": "not_applicable"}
+        assert checks[RULE] == {"applicable": False, "result": "not_applicable"}
+        assert evidence["checks_summary"] == "none_applicable"
+        return
+    statuses, test_rows_kept = kept
+    assert not test_rows_kept and statuses == {"paid", "shipped"}
+    assert checks["exclude-test-orders"]["result"] == "satisfied"
+    assert checks[RULE]["result"] == "satisfied"
+    assert evidence["checks_summary"] == "all_satisfied"
+    internal = s.sessions[r.session_id]["evidence"][done["evidence_ref"]]["internal"]
+    assert internal["observed"]["models"] == models
+
+
+def test_a_view_guarantee_shows_as_satisfied_by_definition(service):
+    s = service(example_presets=True, preset="full")
+    r = sql_request(s, "SELECT SUM(usd_value) FROM usd_line_value")
+    checks = execute(s, r)["evidence"]["checks"]
+    assert checks["convert-invoices-to-usd"] == {
+        "applicable": True,
+        "result": "satisfied_by_definition",
+    }
+    assert checks["exclude-test-orders"]["applicable"] is False
+
+
+def test_a_violation_the_worker_corrected_leaves_no_trace_in_the_evidence(service, monkeypatch):
+    s = service(profile="adhoc", example_presets=True, preset="full")
+    seen = []
+
+    def invoke(callback):
+        seen.append(callback("run_sql", {"sql": NO_TEST_FILTER_DEFAULT_SET}))
+        seen.append(
+            callback(
+                "run_sql",
+                {"sql": "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status = customer_id"},
+            )
+        )
+        seen.append(callback("run_sql", {"sql": DEFAULT_SET}))
+        return {"evidence": seen[-1]["evidence"]}
+
+    worker_sees(monkeypatch, s, invoke)
+    r = asking(s, s.open()["session_id"], 0, "one")
+    done = s.execute(r)
+    assert [x.get("error") for x in seen[:2]] == [
+        "declared_default_missing",
+        "declared_default_undetermined",
+    ]
+    assert done["status"] == "completed"
+    for text in (
+        json.dumps(done["evidence"]),
+        json.dumps(s.evidence(Ref(session_id=r.session_id, evidence_ref=done["evidence_ref"]))),
+    ):
+        for word in (
+            "violated",
+            "undetermined",
+            "rule_violation",
+            "no_verdict",
+            "missing",
+            "subset",
+            "superset",
+        ):
+            assert word not in text, word
+    assert all(
+        c["result"] in {"satisfied", "not_applicable", "satisfied_by_definition", "satisfied_by_caller_scope"}
+        for c in done["evidence"]["checks"].values()
+    )
+    assert [e["sub_code"] for e in events_named(s, "private_sql_rejected")] == [
+        "rule_violation",
+        "no_verdict",
+    ]
+
+
+def test_evidence_that_somehow_holds_a_violated_check_is_not_projected(service):
+    s = service(example_presets=True, preset="full")
+    r = sql_request(s, JOINED)
+    done = execute(s, r)
+    saved = s.sessions[r.session_id]["evidence"][done["evidence_ref"]]
+    saved["internal"]["checks"][RULE]["result"] = "violated"
+    del saved["projection"]
+    with pytest.raises(ValueError, match="invalid_evidence"):
+        evidence_of(s, r, done)
+    assert asyncio.run(
+        safe(s.evidence, Ref(session_id=r.session_id, evidence_ref=done["evidence_ref"]))
+    ) == {"status": "unavailable", "reason": "worker"}
+
+
+def test_evidence_that_cannot_be_projected_is_neither_delivered_nor_kept(service, monkeypatch):
+    s = service(example_presets=True, preset="full")
+    real = s.sql.execute
+
+    def violated(prepared):
+        result, internal = real(prepared)
+        internal["checks"][RULE]["result"] = "violated"
+        return result, internal
+
+    monkeypatch.setattr(s.sql, "execute", violated)
+    r = sql_request(s, JOINED)
+    with pytest.raises(ValueError, match="invalid_evidence"):
+        execute(s, r)
+    held = s.sessions[r.session_id]
+    assert not held["results"] and not held["evidence"] and held["revision"] == 0
+    failed = events_named(s, "task_failed")[-1]
+    assert (failed["reason"], failed["detail"]) == ("invalid_evidence", "projection")
+
+
+def test_a_denied_column_is_dropped_from_observed_even_if_it_were_recorded(service):
+    s = service(example_presets=True, preset="full")
+    r = sql_request(s, JOINED)
+    done = execute(s, r)
+    saved = s.sessions[r.session_id]["evidence"][done["evidence_ref"]]
+    observed = saved["internal"]["observed"]
+    observed["columns"]["customers"].append("email")
+    observed["filters"].append({"column": "customers.email", "operator": "="})
+    observed["status_literals"]["customers.email"] = ["x@example.invalid"]
+    observed["fx_missing_rate_handling"] = "unguarded_left_join"
+    observed["duplicate_aggregation"] = True
+    del saved["projection"]
+    text = json.dumps(evidence_of(s, r, done)["evidence"]["observed"])
+    assert "email" not in text and "x@example" not in text
+    assert "unguarded" not in text and "duplicate_aggregation" not in text
+
+
+# -- the clarification question goes through the same disclosure check as an answer -----------------
+
+
+@pytest.mark.parametrize(
+    ("preset", "declared", "domain"),
+    [
+        ("hidden", False, False),
+        ("structure", False, True),
+        ("rules", True, False),
+        ("full", True, True),
+    ],
+)
+def test_the_clarification_lists_only_what_its_evidence_kinds_allow(
+    service, monkeypatch, preset, declared, domain
+):
+    s = service(profile="adhoc", example_presets=True, preset=preset)
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    response = s.execute(r)
+    text = response["question"]
+    assert response["status"] == "needs_clarification"
+    assert ("規則預設只納入" in text) is declared
+    assert all(v in text for v in ("cancelled", "pending")) is domain
+    assert ("paid" in text) is (declared or domain)
+    if declared and not domain:
+        assert "shipped" in text and "cancelled" not in text and "pending" not in text
+    if not declared and not domain:
+        assert text == "請指定要分析的訂單狀態"
+    sent = events_named(s, "clarification_sent")
+    assert sent == [
+        {
+            "t": sent[0]["t"],
+            "event": "clarification_sent",
+            "request_id": "one",
+            "rule": RULE,
+            "disclosure": {"set": declared, "domain": domain},
+        }
+    ]
+    asked = [e for e in s.audit if e.get("action") == "receive_answer" and e.get("kind") in {
+        "answer.evidence.checks",
+        "answer.evidence.observed",
+    }]
+    assert {e["kind"]: e["allowed"] for e in asked} == {
+        "answer.evidence.checks": declared,
+        "answer.evidence.observed": domain,
+    }
+
+
+def test_the_second_asking_of_the_question_follows_the_same_policy(service, monkeypatch):
+    s = service(profile="adhoc", example_presets=True, preset="rules")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    first = s.execute(r)
+    second = s.continue_task(answering(first, r.session_id, 1, "two", "refunded"))
+    assert second["status"] == "needs_clarification"
+    assert second["question"] == first["question"]
+    assert [e["request_id"] for e in events_named(s, "clarification_sent")] == ["one", "two"]
+    assert all(
+        e["disclosure"] == {"set": True, "domain": False}
+        for e in events_named(s, "clarification_sent")
+    )
+
+
+def test_each_part_of_the_question_is_decided_on_its_own_kind(service, monkeypatch):
+    forbid_checks = (
+        'forbid(principal, action == Service::Action::"receive_answer", resource) '
+        'when { resource.kind == "answer.evidence.checks" };'
+    )
+    s = service(profile="adhoc", policy=forbid_checks)
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    text = s.execute(r)["question"]
+    assert "規則預設" not in text and "cancelled" in text
+    forbid_observed = forbid_checks.replace("checks", "observed")
+    s2 = service(profile="adhoc", policy=forbid_observed)
+    worker_sees(monkeypatch, s2, clarifying(PAID, []))
+    text = s2.execute(asking(s2, s2.open()["session_id"], 0, "one"))["question"]
+    assert "規則預設只納入" in text and "cancelled" not in text
+
+
+def test_a_denied_clarification_check_does_not_end_the_task(service, monkeypatch):
+    s = service(profile="adhoc", example_presets=True, preset="hidden")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    response = s.execute(asking(s, s.open()["session_id"], 0, "one"))
+    assert response["status"] == "needs_clarification"
+
+
+def test_the_analysis_definition_question_is_fixed_text_and_needs_no_disclosure(
+    service, monkeypatch
+):
+    s = service(profile="adhoc", example_presets=True, preset="hidden")
+    worker_sees(
+        monkeypatch, s, lambda cb: cb("clarify", {"missing": "analysis_definition"})
+    )
+    response = s.execute(asking(s, s.open()["session_id"], 0, "one"))
+    assert response["question"] == "請補充您要分析的指標、日期範圍或業務定義。"
+    assert not events_named(s, "clarification_sent")
+
+
+def test_the_clarify_tool_names_both_things_a_worker_may_ask_for(service):
+    s = service(runtime_path=FAKE_RUNTIME)
+    clarify = next(t for t in s.ipc.call("echo_init")["tools"] if t["name"] == "clarify")
+    assert clarify["parameters"]["properties"]["missing"]["enum"] == [
+        "analysis_definition",
+        "status_scope",
+    ]
+
+
+# -- describe_data answers "what data is there" in the hidden mode and the ad-hoc profile ------------
+
+
+@pytest.mark.parametrize(("profile", "capability"), [("analysis", "orders"), ("adhoc", "analytics")])
+def test_describe_data_answers_what_data_exists_with_no_column_names(
+    service, monkeypatch, profile, capability
+):
+    s = service(profile=profile, example_presets=True, preset="hidden")
+    install_invoker(
+        monkeypatch, s, lambda cb: {"evidence": cb("describe_data", {})["evidence"]}
+    )
+    done = s.execute(ask_request(s, capability))
+    assert done["status"] == "completed" and done["result"]["kind"] == "text"
+    for column in ("is_test", "email", "customer_id", "order_date", "rate_to_usd", "invoice_date"):
+        assert column not in done["result"]["text"]
+    assert done["evidence"] == {
+        "mandatory_scope": {},
+        "checks_summary": "none_applicable",
+        "has_unverified_semantics": False,
+    }
+
+
+# -- the usage of every model call, from the runtime's `calls` ------------------------------------
+
+CALL = {
+    "turn": 1,
+    "elapsedMs": 12,
+    "input": 100,
+    "output": 20,
+    "reasoning": 3,
+    "cacheRead": 50,
+    "stopReason": "tooluse",
+    "rawStopReason": "tool_calls",
+    "toolCalls": 1,
+    "status": "ok",
+}
+SECOND_CALL = {**CALL, "turn": 2, "output": 7, "stopReason": "stop", "rawStopReason": "stop", "toolCalls": 0}
+RETRIED = {
+    "turn": 1,
+    "elapsedMs": 4,
+    "input": 0,
+    "output": 0,
+    "reasoning": 0,
+    "cacheRead": 0,
+    "stopReason": "",
+    "rawStopReason": "",
+    "toolCalls": 0,
+    "status": "http_429",
+}
+MODEL_CALL_FIELDS = {
+    "t",
+    "event",
+    "request_id",
+    "turn",
+    "elapsed_ms",
+    "input",
+    "output",
+    "reasoning",
+    "cache_read",
+    "stop_reason",
+    "raw_stop_reason",
+    "tool_calls",
+    "status",
+}
+
+
+def scripted(steps, **extra):
+    return json.dumps({"behavior": "script", "steps": steps, "sql": 1, **extra})
+
+
+def run_count_step():
+    return {"tool": "run_sql", "args": {"sql": COUNTS["orders"]}}
+
+
+def scripted_ask(s, question, request_id="ask-1"):
+    return Ask(
+        session_id=s.open()["session_id"],
+        request_id=request_id,
+        expected_revision=0,
+        capability="orders",
+        question=question,
+    )
+
+
+def audit_names(s):
+    return [e["event"] for e in s.audit if "event" in e]
+
+
+def test_each_provider_attempt_the_runtime_reports_is_one_model_call_event(service):
+    s = service(runtime_path=FAKE_RUNTIME)
+    done = s.execute(
+        scripted_ask(s, scripted([run_count_step()], calls=[RETRIED, CALL, SECOND_CALL]))
+    )
+    assert done["status"] == "completed"
+    events = events_named(s, "model_call")
+    assert [e["turn"] for e in events] == [1, 1, 2]
+    assert [e["status"] for e in events] == ["http_429", "ok", "ok"]
+    for event in events:
+        assert set(event) == MODEL_CALL_FIELDS and event["request_id"] == "ask-1"
+    assert events[1] == {
+        "t": events[1]["t"],
+        "event": "model_call",
+        "request_id": "ask-1",
+        "turn": 1,
+        "elapsed_ms": 12,
+        "input": 100,
+        "output": 20,
+        "reasoning": 3,
+        "cache_read": 50,
+        "stop_reason": "tooluse",
+        "raw_stop_reason": "tool_calls",
+        "tool_calls": 1,
+        "status": "ok",
+    }
+    names = audit_names(s)
+    assert names.index("private_sql") < names.index("model_call")
+    assert max(i for i, n in enumerate(names) if n == "model_call") < names.index("task_completed")
+    assert not events_named(s, "model_calls_dropped")
+
+
+def test_the_usage_never_reaches_the_planner_the_evidence_or_a_later_prompt(service, monkeypatch):
+    s = service(runtime_path=FAKE_RUNTIME)
+    r = scripted_ask(s, scripted([run_count_step()], calls=[CALL, SECOND_CALL]))
+    done = s.execute(r)
+    assert "model_call" in audit_names(s)
+    public = json.dumps(
+        [done, s.evidence(Ref(session_id=r.session_id, evidence_ref=done["evidence_ref"]))]
+    )
+    for word in ("tooluse", "tool_calls", "elapsed", "cacheRead", "cache_read", "stop_reason"):
+        assert word not in public, word
+    # The question carries the scripted payload, so look at what the host keeps apart from it.
+    saved = dict(s.sessions[r.session_id]["results"][done["result_ref"]])
+    del saved["question"]
+    assert "tooluse" not in json.dumps(saved) and "elapsed" not in json.dumps(saved)
+    seen = []
+    worker_sees(monkeypatch, s, finishing(COUNTS["orders"]), seen)
+    follow_up = Ask(
+        session_id=r.session_id,
+        request_id="ask-2",
+        expected_revision=done["revision"],
+        capability="orders",
+        question="again",
+        reply_to=done["result_ref"],
+    )
+    s.execute(follow_up)
+    assert set(seen[0]["previous"]) == {
+        "kind",
+        "columns",
+        "rows",
+        "mandatory_scope",
+        "timezone",
+        "original_question",
+    }
+
+
+def test_an_entry_the_host_cannot_vouch_for_is_dropped_and_counted(service):
+    bad = [
+        {**CALL, "extra": 1},
+        {**CALL, "turn": True},
+        {**CALL, "status": "x" * 33},
+        {**CALL, "stopReason": "Tool Use"},
+        {**CALL, "output": -1},
+        {**CALL, "elapsedMs": 1.5},
+        {k: v for k, v in CALL.items() if k != "reasoning"},
+        "ok",
+        None,
+    ]
+    s = service(runtime_path=FAKE_RUNTIME)
+    done = s.execute(scripted_ask(s, scripted([run_count_step()], calls=[CALL, *bad])))
+    assert done["status"] == "completed"
+    assert [e["turn"] for e in events_named(s, "model_call")] == [1]
+    assert events_named(s, "model_calls_dropped")[0]["count"] == len(bad)
+    garbled = service(runtime_path=FAKE_RUNTIME)
+    garbled.execute(scripted_ask(garbled, scripted([run_count_step()], calls={"a": 1})))
+    assert not events_named(garbled, "model_call")
+    assert events_named(garbled, "model_calls_dropped")[0]["count"] == 1
+
+
+def test_a_runtime_that_reports_no_usage_is_not_an_error(service):
+    s = service(runtime_path=FAKE_RUNTIME)
+    done = s.execute(scripted_ask(s, scripted([run_count_step()])))
+    assert done["status"] == "completed"
+    assert not events_named(s, "model_call") and not events_named(s, "model_calls_dropped")
+
+
+def test_a_failed_task_logs_its_calls_first_then_the_counters_and_the_runtime_code(service):
+    s = service(runtime_path=FAKE_RUNTIME)
+    fail = {
+        "diagnostic": "turn_limit",
+        "calls": [CALL, SECOND_CALL],
+        "turns": 12,
+        "toolCalls": 7,
+    }
+    r = scripted_ask(s, scripted([run_count_step()], fail=fail))
+    out = asyncio.run(safe(s.execute, r))
+    assert out == {"status": "unavailable", "reason": "worker"}
+    names = audit_names(s)
+    assert [e["turn"] for e in events_named(s, "model_call")] == [1, 2]
+    assert names.index("model_call") < names.index("task_failed")
+    failed = events_named(s, "task_failed")[-1]
+    assert failed["reason"] == "runtime_unavailable"
+    assert failed["detail"] == "service_unavailable:turn_limit"
+    assert (failed["turns"], failed["tool_calls"], failed["sql_attempts"]) == (12, 7, 1)
+
+
+def test_counters_that_are_not_plain_integers_are_recorded_as_unknown(service):
+    s = service(runtime_path=FAKE_RUNTIME)
+    fail = {"diagnostic": "deadline", "calls": [], "turns": "12", "toolCalls": True}
+    asyncio.run(safe(s.execute, scripted_ask(s, scripted([], fail=fail))))
+    failed = events_named(s, "task_failed")[-1]
+    assert (failed["turns"], failed["tool_calls"], failed["sql_attempts"]) == (None, None, 0)
+    assert failed["detail"] == "service_unavailable:deadline"
+
+
+def test_a_task_the_host_ends_reports_its_attempts_but_no_runtime_counters(service, monkeypatch):
+    s = service(profile="adhoc", example_presets=True, preset="hidden")
+
+    def invoke(callback):
+        for _ in range(3):
+            callback("run_sql", {"sql": "SELECT COUNT(*) FROM orders"})
+
+    worker_sees(monkeypatch, s, invoke)
+    with pytest.raises(BudgetExhausted):
+        s.execute(asking(s, s.open()["session_id"], 0, "one"))
+    failed = events_named(s, "task_failed")[-1]
+    assert failed["detail"] == "budget_exhausted:rejected"
+    assert (failed["turns"], failed["tool_calls"], failed["sql_attempts"]) == (None, None, 3)
+
+
+def test_a_denied_task_still_says_how_many_statements_it_tried(service, monkeypatch):
+    s = service(profile="adhoc")
+
+    def invoke(callback):
+        callback("run_sql", {"sql": "SELECT COUNT(*) FROM orders"})
+        callback("run_sql", {"sql": "SELECT email FROM customers"})
+
+    worker_sees(monkeypatch, s, invoke)
+    with pytest.raises(PermissionError):
+        s.execute(asking(s, s.open()["session_id"], 0, "one"))
+    failed = events_named(s, "task_failed")[-1]
+    assert failed["reason"] == "denied" and failed["sql_attempts"] == 2
+
+
+def test_an_invalid_evidence_failure_carries_the_same_counters(service, monkeypatch):
+    s = service()
+    install_invoker(monkeypatch, s, lambda callback: {"value": 1})
+    with pytest.raises(ValueError, match="invalid_evidence"):
+        s.execute(ask_request(s))
+    failed = events_named(s, "task_failed")[-1]
+    assert (failed["turns"], failed["tool_calls"], failed["sql_attempts"]) == (None, None, 0)
+
+
+# -- the same, against the real runtime and a local stand-in for the model platform ----------------
+
+
+def runtime_reports_calls():
+    """True for a runtime build that sends per-attempt usage (``rawStopReason`` is in its code)."""
+    dist = Path(os.environ["WARBLE_SERVICE"]).parent
+    return any("rawStopReason" in p.read_text() for p in dist.glob("*.js"))
+
+
+class StubProvider:
+    """A local OpenAI-compatible streaming endpoint, standing in for the model platform."""
+
+    def __init__(self, respond):
+        outer = self
+        self.requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                outer.requests.append(body)
+                respond(len(outer.requests) - 1, body, self)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @property
+    def base_url(self):
+        return f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def stream(handler, events, usage=None):
+    handler.send_response(200)
+    handler.send_header("content-type", "text/event-stream")
+    handler.send_header("connection", "close")
+    handler.end_headers()
+    for index, (delta, finish) in enumerate(events):
+        chunk = {
+            "id": "stub",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "stub",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }
+        if usage and index == len(events) - 1:
+            chunk["usage"] = usage
+        handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+    handler.wfile.write(b"data: [DONE]\n\n")
+
+
+def scripted_model(sql):
+    """The root delegates once; the worker runs ``sql`` and answers with the host's token."""
+
+    def respond(n, body, handler):
+        names = [t["function"]["name"] for t in body.get("tools") or []]
+        tool_results = [m for m in body["messages"] if m.get("role") == "tool"]
+        usage = {"prompt_tokens": 100 + n, "completion_tokens": 10}
+        if tool_results:
+            token = re.findall(r"[0-9a-f]{8}-[0-9a-f-]{27}", str(tool_results[-1]["content"]))[0]
+            return stream(
+                handler,
+                [({"role": "assistant"}, None), ({"content": json.dumps({"evidence": token})}, None), ({}, "stop")],
+                usage,
+            )
+        name, args = ("run_sql", {"sql": sql}) if "run_sql" in names else (names[0], {"request": "go"})
+        call = {"index": 0, "id": f"call-{n}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        stream(handler, [({"role": "assistant"}, None), ({"tool_calls": [call]}, None), ({}, "tool_calls")], usage)
+
+    return respond
+
+
+@pytest.fixture
+def real_runtime_service(service, monkeypatch):
+    monkeypatch.setenv("PRIVATE_MODEL_KEY", "stub")
+    stubs = []
+
+    def make(respond, execution=None, **kwargs):
+        stub = StubProvider(respond)
+        stubs.append(stub)
+        updates = {
+            "private_model": {"id": "stub", "base_url": stub.base_url, "credential_env": "PRIVATE_MODEL_KEY"},
+            "execution": execution or {"deadline_ms": 30000},
+        }
+        return service(mode="agent", updates=updates, **kwargs), stub
+
+    yield make
+    for stub in stubs:
+        stub.close()
+
+
+def test_the_real_runtime_reports_usage_for_a_completed_task(real_runtime_service):
+    s, stub = real_runtime_service(scripted_model(COUNTS["orders"]))
+    r = ask_request(s)
+    done = s.execute(r)
+    assert done["status"] == "completed" and done["result"]["rows"] == [{"c1": 12}]
+    events = events_named(s, "model_call")
+    if not runtime_reports_calls():
+        assert events == []
+        return
+    # one worker call that asked for the tool, one that answered, then the same for the root
+    assert len(events) == len(stub.requests) == 4
+    assert [e["stop_reason"] for e in events] == ["tooluse", "stop", "tooluse", "stop"]
+    assert all(e["status"] == "ok" and e["output"] == 10 for e in events)
+    assert sorted(e["input"] for e in events) == [100, 101, 102, 103]
+    assert not events_named(s, "model_calls_dropped")
+    names = audit_names(s)
+    assert max(i for i, n in enumerate(names) if n == "model_call") < names.index("task_completed")
+    assert "stub" not in json.dumps(done) and "elapsed" not in json.dumps(done)
+
+
+def test_the_real_runtime_reports_each_retried_provider_attempt(real_runtime_service):
+    def refuse(n, body, handler):
+        handler.send_response(429 if n == 0 else 503)
+        handler.send_header("retry-after-ms", "50")
+        handler.send_header("connection", "close")
+        handler.end_headers()
+        handler.wfile.write(b'{"error": {"message": "PROVIDER_TEXT"}}')
+
+    s, stub = real_runtime_service(
+        refuse, {"deadline_ms": 30000, "provider_max_retries": 1, "provider_max_retry_delay_ms": 100}
+    )
+    out = asyncio.run(safe(s.execute, ask_request(s)))
+    assert out == {"status": "unavailable", "reason": "provider"}
+    failed = events_named(s, "task_failed")[-1]
+    assert failed["detail"] == "service_unavailable:provider_http"
+    assert "PROVIDER_TEXT" not in json.dumps(s.audit)
+    if not runtime_reports_calls():
+        assert not events_named(s, "model_call")
+        return
+    assert [e["status"] for e in events_named(s, "model_call")] == ["http_429", "http_503"]
+    assert (failed["turns"], failed["tool_calls"], failed["sql_attempts"]) == (1, 0, 0)
+    names = audit_names(s)
+    assert names.index("model_call") < names.index("task_failed")
+
+
+# -- the coarse reason of an unavailable task, from the runtime's exact code -----------------------
+
+RUNTIME_CODES = {
+    "provider_http": "provider",
+    "provider_stream": "provider",
+    "model_error": "provider",
+    "deadline": "timeout",
+    "cancelled": "timeout",
+    "invalid_json": "worker",
+    "empty_output": "worker",
+    "turn_limit": "worker",
+    "incomplete_child": "worker",
+    "model_length": "worker",
+    "output_limit": "worker",
+    "request_limit": "worker",
+    "response_limit": "worker",
+    "missing_response": "worker",
+    "tool_failure": "worker",
+    "destination_denied": "worker",
+    "child_exit": "worker",
+    "protocol": "worker",
+}
+HOST_CODES = {
+    "ipc_timeout:host": "timeout",
+    "budget_exhausted:rejected": "worker",
+    "budget_exhausted:undetermined": "worker",
+    "budget_exhausted:query_unavailable": "worker",
+    "budget_exhausted:sql_attempts": "worker",
+    "status_scope_unresolved": "worker",
+    "invalid_evidence": "worker",
+}
+
+
+def failure_with(detail):
+    failure = RuntimeError("runtime_unavailable")
+    if detail is not None:
+        failure.detail = detail
+    return failure
+
+
+@pytest.mark.parametrize(("code", "reason"), sorted(RUNTIME_CODES.items()))
+def test_every_runtime_failure_code_has_one_coarse_reason(code, reason):
+    assert unavailable_reason(failure_with(f"service_unavailable:{code}")) == reason
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "service_unavailable",
+        "service_unavailable:something_new",
+        "service_unavailable:unsupported_limit:reasoningBudgetTokens",
+        "runtime_unavailable",
+        "provider_http 429",
+        None,
+    ],
+)
+def test_anything_the_table_does_not_name_is_a_service_failure(detail):
+    assert unavailable_reason(failure_with(detail)) == "service"
+
+
+def test_the_host_ended_tasks_map_to_the_coarse_reasons_the_readme_lists():
+    assert unavailable_reason(failure_with("ipc_timeout:host")) == "timeout"
+    for kind in ("rejected", "undetermined", "query_unavailable", "sql_attempts"):
+        assert unavailable_reason(BudgetExhausted(kind, 3)) == "worker"
+    assert unavailable_reason(StatusScopeUnresolved()) == "worker"
+    assert unavailable_reason(ValueError("invalid_evidence")) == "worker"
+    union = set().union(*UNAVAILABLE_REASONS.values())
+    assert union - {"host"} == set(RUNTIME_CODES)
+
+
+def test_the_readme_table_matches_the_code_to_reason_mapping():
+    text = (EXAMPLES / "README.md").read_text()
+    rows = dict(re.findall(r"^\| `([a-z_:]+)` \| (provider|timeout|worker|service) \|", text, re.M))
+    assert {**RUNTIME_CODES, **HOST_CODES} == rows

@@ -22,6 +22,7 @@ borrowed_actions:
 - list_context
 - select_context
 - read_context
+- describe_data
 - clarify
 effect:
   render_blocks: []

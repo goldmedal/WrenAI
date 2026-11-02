@@ -110,15 +110,21 @@ silently turn enforcement off.
   `column = exclude`. The covered models are the `reaching` model plus every model that
   reaches it through a chain of `MANY_TO_ONE` relationships in the MDL (`except_models`
   removes a model and what is reachable only through it). The check is satisfied by a
-  filter or join condition that excludes the flag in one of these forms, anywhere in the
-  statement and through CTEs, derived tables and subqueries: `NOT c`, `c = FALSE`,
+  `WHERE`, `HAVING` or `QUALIFY` filter, or the ON condition of an INNER or comma join,
+  that excludes the flag in one of these forms, anywhere in the statement and through
+  CTEs, derived tables and subqueries: `NOT c`, `c = FALSE`,
   `c IS FALSE`, `c IS NOT TRUE`, `c IS DISTINCT FROM TRUE`, `c <> TRUE`,
   `COALESCE(c, FALSE) = FALSE`, `c = FALSE OR c IS NULL`, and
   `NOT EXISTS` / `NOT IN` over a subquery that selects `c = TRUE`. `exclude` must be a
   boolean. In the `OR` form the null check may be on any column of the flag's own model,
   so a `LEFT JOIN` that keeps rows without a match can write
   `k.id IS NULL OR k.c = FALSE`; a null check on another model's column, or any other
-  extra disjunct, does not qualify.
+  extra disjunct, does not qualify. No outer-join ON predicate is accepted as an
+  exclusion, because it does not remove rows of the preserved side: put the exclusion in
+  `WHERE` or in an INNER or comma join's ON. The check is not scope-aware: an exclusion
+  inside a nested inner-join group, a subquery or a CTE that the statement outer-joins is
+  accepted although it does not reach the preserved side's rows, so write it in the outer
+  `WHERE`.
 - **`require_rate_join`**: statements that aggregate a listed amount column must read the
   rate model joined on one of the declared currency columns and bounded
   `rate.date <= <expression over a declared transaction-date column>` (an inner
@@ -134,7 +140,12 @@ silently turn enforcement off.
   `AND` / `OR` / `NOT` and `LOWER`, `UPPER` or `TRIM` around the column; case is ignored)
   rather than looking for a filter, so `NOT IN ('cancelled')` keeps every other value in
   the domain. `overridable_by_caller: true` lets a host that supports it take a confirmed
-  set from the user instead.
+  set from the user instead. Each read of the model is judged on its own: a nullable-side
+  ON predicate of an outer join restricts that read (`customers c LEFT JOIN orders o ON
+  c.id = o.customer_id AND o.status IN ('paid', 'shipped')` with `SUM(o.amount)` is
+  satisfied), while a preserved-side, FULL, SEMI/ANTI or unnamed join-group ON predicate
+  never counts. A confirmed set cannot clear a statement that keeps NULL statuses
+  (`... OR status IS NULL` is always a superset); the statement has to be rewritten.
 
 A `semantics:` list in the same front-matter (`{id, models, note}`) names meanings no check
 reads, such as a fiscal calendar; a host reports the id as unverified whenever a query touches
