@@ -34,7 +34,7 @@ mod project;
 pub use catalog::{
     capability_catalog, catalog_document, CapabilityCatalog, CatalogColumn, CatalogCube,
     CatalogCubeMember, CatalogDiagnostic, CatalogEnumValue, CatalogKnowledgeRule, CatalogModel,
-    CatalogProject, CatalogRelationship, CatalogView, CATALOG_VERSION,
+    CatalogProject, CatalogRelationship, CatalogSemantic, CatalogView, CATALOG_VERSION,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use digest::project_digest;

@@ -185,6 +185,16 @@ pub struct CatalogView {
     pub guarantees: Vec<String>,
 }
 
+/// One business meaning no host check covers (`semantics:` in a rule file's front-matter), bound to
+/// the models or views whose queries it concerns. A host that runs a query touching one of them
+/// reports the id as unverified. Carried as authored.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct CatalogSemantic {
+    pub id: String,
+    pub models: Vec<String>,
+    pub note: String,
+}
+
 /// One business-rule file (`knowledge/rules/*.md`, or the legacy root `instructions.md`), carried
 /// whole: rules are authored prose a host may disclose like schema. `knowledge/sql/` is not a
 /// rule file and never appears here.
@@ -214,6 +224,12 @@ pub enum CatalogDiagnostic {
         path: String,
         entry: String,
     },
+    SemanticsInvalid {
+        /// Always `semantics_invalid`.
+        kind: &'static str,
+        path: String,
+        entry: String,
+    },
 }
 
 impl std::fmt::Display for CatalogDiagnostic {
@@ -221,6 +237,9 @@ impl std::fmt::Display for CatalogDiagnostic {
         match self {
             CatalogDiagnostic::Message(message) => f.write_str(message),
             CatalogDiagnostic::DeniedColumnsInvalid { kind, path, entry } => {
+                write!(f, "{path}: {kind}: {entry}")
+            }
+            CatalogDiagnostic::SemanticsInvalid { kind, path, entry } => {
                 write!(f, "{path}: {kind}: {entry}")
             }
         }
@@ -231,6 +250,14 @@ impl CatalogDiagnostic {
     fn denied_columns_invalid(path: &str, entry: impl Into<String>) -> Self {
         CatalogDiagnostic::DeniedColumnsInvalid {
             kind: "denied_columns_invalid",
+            path: path.to_string(),
+            entry: entry.into(),
+        }
+    }
+
+    fn semantics_invalid(path: &str, entry: impl Into<String>) -> Self {
+        CatalogDiagnostic::SemanticsInvalid {
+            kind: "semantics_invalid",
             path: path.to_string(),
             entry: entry.into(),
         }
@@ -277,6 +304,15 @@ pub struct CapabilityCatalog {
     /// a denylist that was only partly read is not a denylist.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub denied_columns_invalid: bool,
+    /// Business meanings no host check covers, from the top-level `semantics` key of the rule files'
+    /// front-matter, in declaration order. Omitted when there are none. All or nothing: when any
+    /// entry is malformed the list is empty and `semantics_invalid` is set.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub semantics: Vec<CatalogSemantic>,
+    /// True when a `semantics` declaration could not be read in full. A host must refuse to run:
+    /// it could not tell its caller which meanings a result leaves unchecked.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub semantics_invalid: bool,
     /// Files that did not parse, by kind; the catalog is still emitted without them.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub diagnostics: Vec<CatalogDiagnostic>,
@@ -314,6 +350,20 @@ impl CapabilityCatalog {
             }
         }
         self.denied_columns = denied.into_iter().collect();
+        let (semantics, problems) = crate::project::semantic_declarations(&rules.files);
+        for (path, entry) in problems {
+            self.semantics_invalid = true;
+            self.diagnostics
+                .push(CatalogDiagnostic::semantics_invalid(&path, entry));
+        }
+        self.semantics = semantics
+            .into_iter()
+            .map(|entry| CatalogSemantic {
+                id: entry.id,
+                models: entry.models,
+                note: entry.note,
+            })
+            .collect();
         self.knowledge_rules = rules
             .files
             .into_iter()
@@ -530,6 +580,8 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
         declared_defaults: Vec::new(),
         denied_columns: Vec::new(),
         denied_columns_invalid: false,
+        semantics: Vec::new(),
+        semantics_invalid: false,
         diagnostics,
     }
 }

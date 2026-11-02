@@ -263,3 +263,27 @@ fn malformed_front_matter_voids_the_set_and_never_panics() {
     assert!(ids.is_empty());
     assert_eq!(warnings.len(), 3, "{warnings:?}");
 }
+
+#[test]
+fn a_sale_statuses_declaration_keeps_its_id_and_does_not_void_the_set() {
+    let text = "---\ndefaults:\n  - {id: z, kind: require_rate_join}\n  - id: paid-and-shipped\n    kind: sale_statuses\n    column: orders.status\n    values: [paid, shipped]\n    domain: [paid, shipped, cancelled, pending]\n    overridable_by_caller: true\n    when: aggregated\n---\n";
+    let (ids, warnings) = declared_default_ids(&[rule_file("knowledge/rules/a.md", text)]);
+    assert_eq!(ids, ["z", "paid-and-shipped"]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let project = tempfile::tempdir().unwrap();
+    copy_dir(&fixture("declared-wren"), project.path());
+    fs::write(project.path().join("knowledge/rules/conventions.md"), text).unwrap();
+    assert_eq!(
+        catalog_json(project.path())["declared_defaults"],
+        serde_json::json!(["usd-at-transaction-date", "z", "paid-and-shipped"])
+    );
+}
+
+#[test]
+fn a_misspelt_sale_statuses_kind_still_voids_the_set() {
+    let text = "---\ndefaults:\n  - {id: ok, kind: exclude_rows}\n  - {id: typo, kind: sale_status}\n---\n";
+    let (ids, warnings) = declared_default_ids(&[rule_file("knowledge/rules/a.md", text)]);
+    assert!(ids.is_empty(), "{ids:?}");
+    assert!(warnings[0].contains("unknown kind"), "{warnings:?}");
+}

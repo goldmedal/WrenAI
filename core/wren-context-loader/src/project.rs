@@ -359,7 +359,7 @@ pub fn read_knowledge_rules(dir: &std::path::Path) -> std::io::Result<KnowledgeR
 }
 
 const FRONT_MATTER_FENCE: &str = "---";
-const DECLARED_DEFAULT_KINDS: [&str; 2] = ["exclude_rows", "require_rate_join"];
+const DECLARED_DEFAULT_KINDS: [&str; 3] = ["exclude_rows", "require_rate_join", "sale_statuses"];
 
 /// The declared default rule ids in `files`, in declaration order, plus warnings for anything
 /// that could not be read.
@@ -434,6 +434,121 @@ pub fn declared_default_ids(files: &[KnowledgeRuleFile]) -> (Vec<String>, Vec<St
         (ids, warnings)
     } else {
         (Vec::new(), warnings)
+    }
+}
+
+const SEMANTICS_KEY: &str = "semantics";
+const SEMANTICS_LIMIT: usize = 32;
+const SEMANTIC_NOTE_LIMIT: usize = 400;
+const SEMANTIC_MODELS_LIMIT: usize = 8;
+
+/// One entry of a rule file's `semantics:` list: a business meaning no host check covers, bound to
+/// the models (or views) whose queries it concerns. Carried to the catalog as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SemanticEntry {
+    pub id: String,
+    pub models: Vec<String>,
+    pub note: String,
+}
+
+/// The `semantics:` declarations of `files` and what could not be read.
+///
+/// All or nothing, like the declared defaults: any problem (not a list, an entry that is not a
+/// mapping with exactly `id`, `models` and `note`, a malformed or repeated id, an empty or
+/// oversized `models` / `note`, more than the entry cap) is reported as `(path, description)` and
+/// the caller drops every entry, because a host that enforces a part of a list cannot tell the
+/// caller which meanings it left unchecked. A file whose front-matter cannot be read declares
+/// nothing here; the declared-default reading already voids that case.
+pub(crate) fn semantic_declarations(
+    files: &[KnowledgeRuleFile],
+) -> (Vec<SemanticEntry>, Vec<(String, String)>) {
+    let mut entries: Vec<SemanticEntry> = Vec::new();
+    let mut problems: Vec<(String, String)> = Vec::new();
+    for file in files {
+        let Ok(Some(front)) = front_matter(&file.content) else {
+            continue;
+        };
+        let Ok(data) = serde_yaml::from_str::<serde_yaml::Value>(&front) else {
+            continue;
+        };
+        let Some(value) = data.get(SEMANTICS_KEY) else {
+            continue;
+        };
+        let Some(items) = value.as_sequence() else {
+            problems.push((file.path.clone(), "semantics is not a list".to_string()));
+            continue;
+        };
+        for (position, item) in items.iter().enumerate() {
+            let label = format!("semantics[{position}]");
+            let mut bad = |why: &str| {
+                problems.push((file.path.clone(), format!("{label}: {why}")));
+            };
+            let Some(mapping) = item.as_mapping() else {
+                bad("entry is not a mapping");
+                continue;
+            };
+            if mapping
+                .keys()
+                .any(|key| !matches!(key.as_str(), Some("id" | "models" | "note")))
+            {
+                bad("unknown field");
+                continue;
+            }
+            let id = item
+                .get("id")
+                .and_then(serde_yaml::Value::as_str)
+                .filter(|id| is_declared_default_id(id));
+            let Some(id) = id else {
+                bad("missing or malformed id");
+                continue;
+            };
+            let models: Option<Vec<String>> = item
+                .get("models")
+                .and_then(serde_yaml::Value::as_sequence)
+                .filter(|list| !list.is_empty() && list.len() <= SEMANTIC_MODELS_LIMIT)
+                .and_then(|list| {
+                    list.iter()
+                        .map(|name| {
+                            name.as_str()
+                                .filter(|name| !name.trim().is_empty())
+                                .map(str::to_owned)
+                        })
+                        .collect()
+                });
+            let Some(models) = models else {
+                bad("models must be a short non-empty list of names");
+                continue;
+            };
+            let note = item
+                .get("note")
+                .and_then(serde_yaml::Value::as_str)
+                .map(str::trim)
+                .filter(|note| !note.is_empty() && note.chars().count() <= SEMANTIC_NOTE_LIMIT);
+            let Some(note) = note else {
+                bad("note must be a non-empty string of at most 400 characters");
+                continue;
+            };
+            if entries.iter().any(|seen| seen.id == id) {
+                bad(&format!("duplicate id '{id}'"));
+                continue;
+            }
+            entries.push(SemanticEntry {
+                id: id.to_string(),
+                models,
+                note: note.to_string(),
+            });
+        }
+    }
+    if entries.len() > SEMANTICS_LIMIT {
+        problems.push((
+            "knowledge/rules".to_string(),
+            format!("at most {SEMANTICS_LIMIT} semantics entries are supported"),
+        ));
+    }
+    if problems.is_empty() {
+        (entries, problems)
+    } else {
+        (Vec::new(), problems)
     }
 }
 
