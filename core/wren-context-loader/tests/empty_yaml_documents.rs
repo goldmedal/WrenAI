@@ -105,7 +105,7 @@ fn malformed_relationships_still_fail_with_a_reason() {
             catalog
                 .diagnostics
                 .iter()
-                .any(|d| d.starts_with("relationships.yml: ")),
+                .any(|d| d.to_string().starts_with("relationships.yml: ")),
             "{yml:?}: {:?}",
             catalog.diagnostics
         );

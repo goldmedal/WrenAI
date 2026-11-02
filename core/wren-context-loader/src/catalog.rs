@@ -100,6 +100,9 @@ struct CubeFile {
 #[derive(Debug, Deserialize)]
 struct ViewMetaFile {
     name: String,
+    /// Ids of declared default rules the view's definition guarantees (carried, not interpreted).
+    #[serde(default)]
+    guarantees: Option<Vec<serde_yaml::Value>>,
     #[serde(default)]
     properties: Properties,
 }
@@ -176,6 +179,10 @@ pub struct CatalogView {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Declared default rule ids the view's definition guarantees, from `guarantees:` in
+    /// `views/<name>/metadata.yml`. Carried as authored; omitted when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub guarantees: Vec<String>,
 }
 
 /// One business-rule file (`knowledge/rules/*.md`, or the legacy root `instructions.md`), carried
@@ -195,11 +202,52 @@ pub struct CatalogProject {
     pub data_source: Option<String>,
 }
 
+/// One catalog diagnostic: a free-text message for a file that did not parse, or a structured
+/// entry for a `denied_columns` declaration the host must refuse to run with.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum CatalogDiagnostic {
+    Message(String),
+    DeniedColumnsInvalid {
+        /// Always `denied_columns_invalid`.
+        kind: &'static str,
+        path: String,
+        entry: String,
+    },
+}
+
+impl std::fmt::Display for CatalogDiagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CatalogDiagnostic::Message(message) => f.write_str(message),
+            CatalogDiagnostic::DeniedColumnsInvalid { kind, path, entry } => {
+                write!(f, "{path}: {kind}: {entry}")
+            }
+        }
+    }
+}
+
+impl CatalogDiagnostic {
+    fn denied_columns_invalid(path: &str, entry: impl Into<String>) -> Self {
+        CatalogDiagnostic::DeniedColumnsInvalid {
+            kind: "denied_columns_invalid",
+            path: path.to_string(),
+            entry: entry.into(),
+        }
+    }
+}
+
 /// The whole catalog. Field order is the serialization order; arrays keep the sorted file order
 /// [`crate::read_project_dir`] produces, so the same project always yields the same bytes.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct CapabilityCatalog {
     pub catalog_version: u32,
+    /// Version of the loader that wrote this catalog (`CARGO_PKG_VERSION`).
+    pub loader_version: String,
+    /// SHA-256 over the project source files (see `project_digest`); set by the host that read
+    /// the directory, omitted by the pure builder.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub digest: Option<String>,
     pub project: CatalogProject,
     pub models: Vec<CatalogModel>,
     pub relationships: Vec<CatalogRelationship>,
@@ -219,15 +267,56 @@ pub struct CapabilityCatalog {
     /// declarations serializes exactly as before.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub declared_defaults: Vec<String>,
+    /// `model.column` entries the project denies, from the top-level `denied_columns` key of the
+    /// rule files' front-matter: merged, de-duplicated, sorted. Only entries naming a column the
+    /// project has are listed; a bad entry is a diagnostic and sets `denied_columns_invalid`.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub denied_columns: Vec<String>,
+    /// True when any `denied_columns` declaration could not be honoured (malformed entry, unknown
+    /// model or column, unreadable front-matter that mentions the key). A host must refuse to run:
+    /// a denylist that was only partly read is not a denylist.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub denied_columns_invalid: bool,
     /// Files that did not parse, by kind; the catalog is still emitted without them.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub diagnostics: Vec<String>,
+    pub diagnostics: Vec<CatalogDiagnostic>,
 }
 
 impl CapabilityCatalog {
-    /// Attach the project's business rules, read by the host (`read_knowledge_rules`). Kept apart
-    /// from [`capability_catalog`], which is pure over the MDL sources.
+    /// Attach the content digest of the project directory (see `project_digest`).
+    pub fn with_digest(mut self, digest: String) -> Self {
+        self.digest = Some(digest);
+        self
+    }
+
+    /// Attach the project's business rules, read by the host (`read_knowledge_rules`), and the
+    /// `denied_columns` their front-matter declares, validated against this catalog's models. Kept
+    /// apart from [`capability_catalog`], which is pure over the MDL sources.
     pub fn with_knowledge_rules(mut self, rules: crate::project::KnowledgeRules) -> Self {
+        let declarations = crate::project::denied_column_declarations(&rules.files);
+        let mut denied = std::collections::BTreeSet::new();
+        for declaration in declarations {
+            match declaration {
+                crate::project::DeniedDeclaration::Unreadable { path } => {
+                    self.denied_columns_invalid = true;
+                    self.diagnostics
+                        .push(CatalogDiagnostic::denied_columns_invalid(
+                            &path,
+                            "front-matter is unreadable",
+                        ));
+                }
+                crate::project::DeniedDeclaration::Entry { path, entry } => {
+                    if self.has_column(&entry) {
+                        denied.insert(entry);
+                    } else {
+                        self.denied_columns_invalid = true;
+                        self.diagnostics
+                            .push(CatalogDiagnostic::denied_columns_invalid(&path, entry));
+                    }
+                }
+            }
+        }
+        self.denied_columns = denied.into_iter().collect();
         self.knowledge_rules = rules
             .files
             .into_iter()
@@ -239,6 +328,28 @@ impl CapabilityCatalog {
         self.knowledge_rules_used_legacy = rules.used_legacy;
         self.declared_defaults = rules.declared_defaults;
         self
+    }
+}
+
+impl CapabilityCatalog {
+    /// Whether `entry` is `<model>.<column>` in the lower-case form a denylist accepts and names a
+    /// column of a model in this catalog.
+    fn has_column(&self, entry: &str) -> bool {
+        let valid = |part: &str| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        };
+        let Some((model, column)) = entry.split_once('.') else {
+            return false;
+        };
+        valid(model)
+            && valid(column)
+            && self
+                .models
+                .iter()
+                .any(|m| m.name == model && m.columns.iter().any(|c| c.name == column))
     }
 }
 
@@ -323,7 +434,7 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
             data_source: p.data_source,
         },
         Err(e) => {
-            diagnostics.push(format!("wren_project.yml: {e}"));
+            diagnostics.push(CatalogDiagnostic::Message(format!("wren_project.yml: {e}")));
             CatalogProject {
                 name: None,
                 data_source: None,
@@ -353,7 +464,7 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
                     })
                     .collect(),
             }),
-            Err(e) => diagnostics.push(format!("model[{index}]: {e}")),
+            Err(e) => diagnostics.push(CatalogDiagnostic::Message(format!("model[{index}]: {e}"))),
         }
     }
 
@@ -366,7 +477,9 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
                 join_type: r.join_type,
                 condition: r.condition,
             })),
-            Err(e) => diagnostics.push(format!("relationships.yml: {e}")),
+            Err(e) => diagnostics.push(CatalogDiagnostic::Message(format!(
+                "relationships.yml: {e}"
+            ))),
         }
     }
 
@@ -374,14 +487,16 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
     match &sources.cubes_yml {
         Some(yml) => match parse_doc_or_default::<Vec<CubeFile>>(yml) {
             Ok(list) => cubes.extend(list.into_iter().map(cube)),
-            Err(e) => diagnostics.push(format!("cubes.yml: {e}")),
+            Err(e) => diagnostics.push(CatalogDiagnostic::Message(format!("cubes.yml: {e}"))),
         },
         None => {
             for (index, yml) in sources.cube_ymls.iter().enumerate() {
                 match parse_mapping_doc::<CubeFile>(yml) {
                     Ok(Some(c)) => cubes.push(cube(c)),
                     Ok(None) => {}
-                    Err(e) => diagnostics.push(format!("cube[{index}]: {e}")),
+                    Err(e) => {
+                        diagnostics.push(CatalogDiagnostic::Message(format!("cube[{index}]: {e}")))
+                    }
                 }
             }
         }
@@ -393,13 +508,21 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
             Ok(v) => views.push(CatalogView {
                 name: v.name,
                 description: v.properties.description,
+                guarantees: v
+                    .guarantees
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|id| id.as_str().map(str::to_owned))
+                    .collect(),
             }),
-            Err(e) => diagnostics.push(format!("view[{index}]: {e}")),
+            Err(e) => diagnostics.push(CatalogDiagnostic::Message(format!("view[{index}]: {e}"))),
         }
     }
 
     CapabilityCatalog {
         catalog_version: CATALOG_VERSION,
+        loader_version: env!("CARGO_PKG_VERSION").to_string(),
+        digest: None,
         project,
         models,
         relationships,
@@ -408,6 +531,8 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
         knowledge_rules: Vec::new(),
         knowledge_rules_used_legacy: false,
         declared_defaults: Vec::new(),
+        denied_columns: Vec::new(),
+        denied_columns_invalid: false,
         diagnostics,
     }
 }

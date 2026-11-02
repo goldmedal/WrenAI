@@ -24,6 +24,8 @@
 
 mod catalog;
 mod consumers;
+#[cfg(not(target_arch = "wasm32"))]
+mod digest;
 mod impact;
 mod introspect;
 mod lineage;
@@ -31,9 +33,11 @@ mod project;
 
 pub use catalog::{
     capability_catalog, catalog_document, CapabilityCatalog, CatalogColumn, CatalogCube,
-    CatalogCubeMember, CatalogEnumValue, CatalogKnowledgeRule, CatalogModel, CatalogProject,
-    CatalogRelationship, CatalogView, CATALOG_VERSION,
+    CatalogCubeMember, CatalogDiagnostic, CatalogEnumValue, CatalogKnowledgeRule, CatalogModel,
+    CatalogProject, CatalogRelationship, CatalogView, CATALOG_VERSION,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use digest::project_digest;
 pub use introspect::{infer_additivity, MdlContext};
 pub use lineage::{cube_id, dashboard_id, dim_id, metric_id, model_id, query_id, rel_id, view_id};
 pub use project::{

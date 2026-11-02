@@ -125,7 +125,9 @@ fn write_catalog(project_dir: &Path, catalog_path: &Path) -> Result<(), String> 
             dashboards_yml: None,
         }),
     };
-    let catalog = catalog.with_knowledge_rules(rules);
+    let digest = wren_context_loader::project_digest(project_dir)
+        .map_err(|e| format!("failed to digest {}: {e}", project_dir.display()))?;
+    let catalog = catalog.with_knowledge_rules(rules).with_digest(digest);
     let document = catalog_document(&catalog)
         .map_err(|e| format!("failed to serialize the capability catalog: {e}"))?;
     std::fs::write(catalog_path, document)

@@ -437,6 +437,74 @@ pub fn declared_default_ids(files: &[KnowledgeRuleFile]) -> (Vec<String>, Vec<St
     }
 }
 
+/// One `denied_columns` declaration read from a rule file's front-matter.
+pub(crate) enum DeniedDeclaration {
+    /// An entry as written (not yet checked against the project's models).
+    Entry { path: String, entry: String },
+    /// The file's front-matter could not be read, and the file mentions `denied_columns`, so a
+    /// declaration may have been lost.
+    Unreadable { path: String },
+}
+
+const DENIED_COLUMNS_KEY: &str = "denied_columns";
+
+/// The `denied_columns` entries declared in the front-matter of `files`, in file order.
+///
+/// Fail closed: a file whose front-matter cannot be read (unclosed fence, invalid YAML) but whose
+/// text mentions `denied_columns` yields [`DeniedDeclaration::Unreadable`], because the author
+/// plainly meant to declare something and a denylist that was only partly read must not be used.
+/// A value that is not a list of strings, or a bare key, is reported entry by entry.
+pub(crate) fn denied_column_declarations(files: &[KnowledgeRuleFile]) -> Vec<DeniedDeclaration> {
+    let mut out = Vec::new();
+    for file in files {
+        let mentions_key = file.content.contains(DENIED_COLUMNS_KEY);
+        let front = match front_matter(&file.content) {
+            Ok(Some(front)) => front,
+            Ok(None) => continue,
+            Err(_) => {
+                if mentions_key {
+                    out.push(DeniedDeclaration::Unreadable {
+                        path: file.path.clone(),
+                    });
+                }
+                continue;
+            }
+        };
+        let data: serde_yaml::Value = match serde_yaml::from_str(&front) {
+            Ok(data) => data,
+            Err(_) => {
+                if mentions_key {
+                    out.push(DeniedDeclaration::Unreadable {
+                        path: file.path.clone(),
+                    });
+                }
+                continue;
+            }
+        };
+        let Some(value) = data.get(DENIED_COLUMNS_KEY) else {
+            continue;
+        };
+        let entries: Vec<&serde_yaml::Value> = match value {
+            serde_yaml::Value::Sequence(items) => items.iter().collect(),
+            other => vec![other],
+        };
+        for item in entries {
+            let entry = match item {
+                serde_yaml::Value::String(s) => s.clone(),
+                other => serde_yaml::to_string(other)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            };
+            out.push(DeniedDeclaration::Entry {
+                path: file.path.clone(),
+                entry,
+            });
+        }
+    }
+    out
+}
+
 /// Split a leading `---` fenced block off `text`: `Ok(None)` when the text does not open with
 /// one, an error when the fence never closes.
 fn front_matter(text: &str) -> Result<Option<String>, &'static str> {

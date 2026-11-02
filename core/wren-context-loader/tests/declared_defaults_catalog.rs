@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 use wren_context_loader::{
-    capability_catalog, catalog_document, declared_default_ids, prepared_document,
+    capability_catalog, catalog_document, declared_default_ids, prepared_document, project_digest,
     read_knowledge_rules, read_project_dir, KnowledgeRuleFile, MdlContext,
 };
 
@@ -22,7 +22,8 @@ fn fixture(name: &str) -> std::path::PathBuf {
 fn catalog_json(dir: &Path) -> serde_json::Value {
     let sources = read_project_dir(dir).unwrap().expect("a wren project");
     let catalog = capability_catalog(&sources)
-        .with_knowledge_rules(read_knowledge_rules(dir).expect("read rules"));
+        .with_knowledge_rules(read_knowledge_rules(dir).expect("read rules"))
+        .with_digest(project_digest(dir).expect("digest"));
     serde_json::from_str(&catalog_document(&catalog).unwrap()).unwrap()
 }
 
