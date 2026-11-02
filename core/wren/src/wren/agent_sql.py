@@ -26,6 +26,25 @@ class QueryShapeError(PermissionError):
     """Rejected output shape; the private worker may try a different safe query."""
 
 
+class QueryFormError(ValueError):
+    """SQL that cannot be planned against the bound models (unknown alias, too many
+    joins, correlated reference, parse error); the private worker may rewrite it.
+    Authorization failures never take this path."""
+
+
+FORM_CODES = frozenset(
+    {
+        "complexity_limit",
+        "recursive_query",
+        "join_limit",
+        "unsupported_source",
+        "unresolved_column",
+        "no_source",
+        "column_limit",
+    }
+)
+
+
 class PrivateSQL(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     sql: str = Field(min_length=1, max_length=16384)
@@ -57,8 +76,14 @@ class AdHocSQL:
 
     def prepare(self, sql):
         try:
-            validate_read_only_query(sql, "duckdb")
             tree = sqlglot.parse_one(sql, read="duckdb")
+        except sqlglot.errors.SqlglotError:
+            raise QueryFormError("invalid_sql") from None
+        try:
+            validate_read_only_query(sql, "duckdb")
+        except Exception:
+            raise PermissionError("unsupported_query") from None
+        try:
             if sum(1 for _ in tree.walk()) > 1000:
                 raise ValueError("complexity_limit")
             if any(w.args.get("recursive") for w in tree.find_all(exp.With)):
@@ -147,6 +172,14 @@ class AdHocSQL:
             )
         except QueryShapeError:
             raise
+        except ValueError as exc:
+            if str(exc) in FORM_CODES:
+                raise QueryFormError(str(exc)) from None
+            raise PermissionError("unsupported_query") from None
+        except sqlglot.errors.OptimizeError:
+            raise QueryFormError("unresolved_column") from None
+        except sqlglot.errors.SqlglotError:
+            raise QueryFormError("invalid_sql") from None
         except Exception:
             raise PermissionError("unsupported_query") from None
 

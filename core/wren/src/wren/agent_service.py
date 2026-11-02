@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from wren.agent_ipc import RuntimeIPC
 from wren.agent_project import Project, Query, contained, discover
-from wren.agent_sql import AdHocSQL, PrivateSQL, QueryShapeError
+from wren.agent_sql import AdHocSQL, PrivateSQL, QueryFormError, QueryShapeError
 
 
 def uid():
@@ -463,6 +463,21 @@ class Service:
                 )
                 try:
                     prepared = self.sql.prepare(value.sql)
+                except QueryFormError as exc:
+                    # Nothing ran and nothing was authorized; the code names the
+                    # worker's own mistake, never a model, column or rule.
+                    self.record(
+                        {
+                            "event": "private_sql_rejected",
+                            "request_id": request.request_id,
+                            "code": str(exc),
+                        }
+                    )
+                    return {
+                        "error": "unsupported_query",
+                        "code": str(exc),
+                        "hint": "This SQL was NOT executed: it could not be planned against the bound models. Reference only bound models and columns and aliases you defined, keep at most four joins, and use no correlated subqueries, LATERAL joins or recursive CTEs. Rewrite the query within the same permissions.",
+                    }
                 except QueryShapeError:
                     return {
                         "error": "unsupported_result_shape",

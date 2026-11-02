@@ -257,6 +257,64 @@ def test_private_can_repair_shape_without_executing_or_disclosing_literal(adhoc)
     assert "PRIVATE_SQL" not in json.dumps(result)
 
 
+@pytest.mark.parametrize(
+    "sql,code",
+    [
+        ("SELECT SUM(amt) FROM orders", "unresolved_column"),
+        (
+            "WITH x AS (SELECT SUM(amount) AS total FROM orders) SELECT grand_total FROM x",
+            "unresolved_column",
+        ),
+        (
+            "SELECT SUM(o.amount * (SELECT COUNT(*) FROM customers c WHERE c.id = o.customer_id)) FROM orders o",
+            "unresolved_column",
+        ),
+        ("SELECT SUM(amount) FROM orders WHERE", "invalid_sql"),
+    ],
+)
+def test_private_can_repair_planning_failure_without_authorization_change(
+    adhoc, sql, code
+):
+    s = adhoc()
+    original = s.ipc.call
+
+    def call(op, **kwargs):
+        if op == "invoke":
+            cb = kwargs["callback"]
+            rejected = cb("run_sql", {"sql": sql})
+            assert rejected["error"] == "unsupported_query"
+            assert rejected["code"] == code
+            assert set(rejected) == {"error", "code", "hint"}
+            result = cb("run_sql", {"sql": "SELECT SUM(amount) FROM orders"})
+            return {"evidence": result["evidence"]}
+        return original(op, **kwargs)
+
+    s.ipc.call = call
+    result = ask(s, "ignored")
+    assert result["result"]["rows"] == [{"c1": 780.0}]
+    events = [a.get("event") for a in s.audit]
+    assert events.count("private_sql_rejected") == 1
+    assert events.count("private_sql") == 1
+    assert not any(a.get("reason") == "denied" for a in s.audit)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT email FROM customers",
+        "SELECT * FROM orders o JOIN missing m ON o.id=m.id",
+        "SELECT * FROM read_csv('/etc/passwd')",
+        "UPDATE orders SET amount=0",
+    ],
+)
+def test_authorization_failures_still_end_the_task(adhoc, sql):
+    s = adhoc()
+    s.test_sql = sql
+    with pytest.raises(PermissionError):
+        ask(s, "ignored")
+    assert not any(a.get("event") == "private_sql_rejected" for a in s.audit)
+
+
 def test_weekly_native_dates_and_target_expression(adhoc):
     s = adhoc()
     result = ask(
