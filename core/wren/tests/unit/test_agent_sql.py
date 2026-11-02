@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("mcp")
 from wren.agent_service import Ask, Ref, build_mcp, create_service  # noqa: E402
-from wren.agent_sql import QueryFormError  # noqa: E402
+from wren.agent_sql import QueryFormError, QueryShapeError  # noqa: E402
 
 
 @pytest.fixture
@@ -787,3 +787,143 @@ def test_only_declared_values_of_an_enumerated_column_are_recorded_as_literals()
     ]
     assert "PRIVATE" not in json.dumps(observed)
     assert prepared.checks == {}
+
+
+SET_OPERATIONS = {
+    "union all": "SELECT id, region FROM customers UNION ALL SELECT id, region FROM customers",
+    "union": "SELECT id, region FROM customers UNION SELECT id, region FROM customers",
+    "except": "SELECT id, region FROM customers EXCEPT SELECT id, region FROM customers",
+    "intersect": "SELECT id, region FROM customers INTERSECT SELECT id, region FROM customers",
+}
+
+
+@pytest.mark.parametrize("sql", SET_OPERATIONS.values(), ids=SET_OPERATIONS.keys())
+def test_a_multi_column_set_operation_keeps_the_catalog_column_names(adhoc, sql):
+    s = adhoc()
+    assert s.sql.prepare(sql).labels == ["id", "region"]
+    _, result = run(s, sql)
+    assert result["status"] == "completed"
+    assert result["result"]["columns"] == [
+        {"key": "c1", "label": "id"},
+        {"key": "c2", "label": "region"},
+    ]
+
+
+def test_duplicate_labels_are_judged_in_each_select_of_a_set_operation(adhoc):
+    s = adhoc()
+    for sql in (
+        "SELECT id, id FROM customers UNION ALL SELECT id, id FROM customers",
+        "SELECT id, region FROM customers UNION ALL SELECT id, id FROM customers",
+        PIVOT,
+    ):
+        with pytest.raises(QueryShapeError, match="duplicate_label"):
+            s.sql.prepare(sql)
+
+
+FUNCTION_MISSES = {
+    "now": "SELECT now() FROM orders WHERE NOT is_test",
+    "random": "SELECT random() FROM orders WHERE NOT is_test",
+    "arg_max": "SELECT arg_max(id, amount) FROM orders WHERE NOT is_test",
+    "string_agg": "SELECT string_agg(region, ',') FROM customers",
+    "mode": "SELECT mode(region) FROM customers",
+    "first": "SELECT first(region) FROM customers",
+    "corr": "SELECT corr(id, id) FROM customers",
+    "epoch": "SELECT epoch(order_date) FROM orders WHERE NOT is_test",
+    "list_value": "SELECT list_value(id, id) FROM customers",
+    "unnest": "SELECT unnest(list_value(id, id)) FROM customers",
+    "any array": "SELECT COUNT(*) FROM orders WHERE NOT is_test AND id = ANY([1, 2])",
+    "parenthesised select": "(SELECT COUNT(*) FROM orders WHERE NOT is_test)",
+}
+
+
+@pytest.mark.parametrize("sql", FUNCTION_MISSES.values(), ids=FUNCTION_MISSES.keys())
+def test_a_function_outside_the_allowlist_is_a_rewritable_form_error(adhoc, sql):
+    s = adhoc()
+    with pytest.raises(QueryFormError) as caught:
+        s.sql.prepare(sql)
+    assert (caught.value.error, caught.value.code) == (
+        "unsupported_query",
+        "unsupported_function",
+    )
+
+
+def test_a_function_miss_is_rewritten_inside_the_same_task(adhoc):
+    s = adhoc()
+    answers, result = run(
+        s,
+        "SELECT COUNT(*) FROM orders WHERE NOT is_test AND order_date < now()",
+        "SELECT COUNT(*) FROM orders WHERE NOT is_test",
+    )
+    assert (answers[0]["error"], answers[0]["code"]) == (
+        "unsupported_query",
+        "unsupported_function",
+    )
+    assert result["status"] == "completed" and result["result"]["rows"] == [{"c1": 12}]
+    assert [(e["code"], e["sub_code"]) for e in events(s, "private_sql_rejected")] == [
+        ("unsupported_query", "unsupported_function")
+    ]
+    assert not events(s, "task_failed")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT email, now() FROM customers",
+        "SELECT COUNT(*) FROM read_csv('x') WHERE now() > 1",
+        "WITH x AS (DELETE FROM orders RETURNING *) SELECT now() FROM orders",
+    ],
+)
+def test_a_function_miss_does_not_hide_a_denial(adhoc, sql):
+    with pytest.raises(PermissionError, match="query_denied"):
+        adhoc().sql.prepare(sql)
+
+
+def test_an_unexpected_planner_error_is_rewritable_never_terminal(adhoc, monkeypatch):
+    s = adhoc()
+    for error in (RuntimeError("boom"), KeyError("x"), ValueError("anything")):
+
+        def fail(expr, error=error):
+            raise error
+
+        monkeypatch.setattr(s.sql, "_projection", fail)
+        with pytest.raises(QueryFormError) as caught:
+            s.sql.prepare("SELECT COUNT(*) FROM orders WHERE NOT is_test")
+        assert (caught.value.error, caught.value.code) == (
+            "unsupported_query",
+            "unsupported",
+        )
+    monkeypatch.undo()
+    _, result = run(s, "SELECT COUNT(*) FROM orders ANTI JOIN customers c USING (id) WHERE NOT is_test")
+    assert result["status"] == "completed"
+
+
+def test_a_semi_or_anti_join_target_no_column_names_is_still_a_source(adhoc):
+    s = adhoc()
+    for kind in ("SEMI", "ANTI"):
+        prepared = s.sql.prepare(
+            f"SELECT COUNT(*) FROM orders o {kind} JOIN customers c ON 1 = 1 WHERE NOT o.is_test"
+        )
+        assert prepared.sources == {"orders": ["is_test"], "customers": []}
+        assert prepared.observed["models"] == ["customers", "orders"]
+
+
+def test_a_cedar_forbid_on_a_model_only_a_semi_join_reads_ends_the_task(adhoc):
+    s = adhoc(
+        '\nforbid(principal, action == Service::Action::"execute_query", resource) '
+        'when { resource.name == "customers" };'
+    )
+    ok, _ = run(s, "SELECT COUNT(*) FROM orders WHERE NOT is_test")
+    assert ok[0]["evidence"]
+    s = adhoc(
+        '\nforbid(principal, action == Service::Action::"execute_query", resource) '
+        'when { resource.name == "customers" };'
+    )
+    answers, caught = run(
+        s,
+        "SELECT COUNT(*) FROM orders o SEMI JOIN customers c ON 1 = 1 WHERE NOT o.is_test",
+    )
+    assert answers == []
+    assert isinstance(caught, PermissionError) and str(caught) == "denied"
+    assert not events(s, "private_sql")
+    failed = events(s, "task_failed")
+    assert [(e["reason"], e["detail"]) for e in failed] == [("denied", "denied")]

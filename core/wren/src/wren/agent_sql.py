@@ -12,7 +12,10 @@ own exception family:
   ``DeclaredDefaultMissing``, ``DeclaredDefaultUndetermined``): all carry ``error``, ``code``
   and ``rules`` for the worker-visible answer;
 * refused by authorization (``QueryDenied``, a ``PermissionError`` named
-  ``query_denied:<sub>``): the task ends, a rewrite cannot help;
+  ``query_denied:<sub>``, only ``not_read_only``, ``denied_column``, ``external_source`` or
+  ``unknown_model``): the task ends, a rewrite cannot help. A function outside the allowlist
+  (``unsupported_function``) and an unexpected planner error (``unsupported``) are form
+  errors, not authorization failures;
 * failed in the engine (raised by ``execute``): the service counts it separately.
 """
 
@@ -32,7 +35,7 @@ from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from wren.declared_default_check import DefaultsChecker
 from wren.declared_default_fx import evaluate
-from wren.read_only import validate_read_only_query
+from wren.read_only import UnsupportedFunctionError, check_read_only_query
 
 
 class QueryShapeError(PermissionError):
@@ -91,6 +94,8 @@ FORM_CODES = frozenset(
         "column_list_alias",
         "natural_join",
         "positional_reference",
+        "unsupported_function",
+        "unsupported",
     }
 )
 RULE_VIOLATION = "rule_violation"
@@ -188,8 +193,14 @@ class AdHocSQL:
             tree = sqlglot.parse_one(sql, read="duckdb")
         except sqlglot.errors.SqlglotError:
             raise QueryFormError("invalid_sql") from None
+        pending = None
         try:
-            validate_read_only_query(sql, "duckdb")
+            check_read_only_query(sql, "duckdb")
+        except UnsupportedFunctionError:
+            # A form limit, not an authorization failure; but a denied column or an
+            # external source in the same statement still ends the task, so planning
+            # goes on and this is raised once the denylist has been applied.
+            pending = QueryFormError("unsupported_function")
         except Exception:
             raise denied("not_read_only") from None
         try:
@@ -226,13 +237,17 @@ class AdHocSQL:
                         in self.denied
                     ):
                         raise denied("denied_column")
+            if pending is not None:
+                raise pending
             sources, physical = {}, []
             for scope in scopes:
                 if not isinstance(
                     scope.expression, (exp.Select, exp.Union, exp.Intersect, exp.Except)
                 ):
                     raise ValueError("unsupported_source")
-                for alias, (_, src) in scope.selected_sources.items():
+                # ``scope.sources``, not ``selected_sources``: a SEMI/ANTI join target that no
+                # column references is still a model the statement reads.
+                for src in scope.sources.values():
                     if isinstance(src, exp.Table):
                         if src.name not in self.schema:
                             raise ValueError("unknown_model")
@@ -256,11 +271,16 @@ class AdHocSQL:
                 raise DeclaredDefaultMissing(RULE_VIOLATION, verdict.violations)
             # COUNT(*) has no Column nodes; its table still receives authorization.
             conditions = {}
-            labels = [self._label(x, scopes[-1]) for x in scopes[-1].expression.selects]
+            leaves = self._leaves(scopes[-1])
+            labels = [self._label(x, leaves[0]) for x in leaves[0].expression.selects]
             if not labels or len(labels) > 20:
                 raise ValueError("column_limit")
-            if len(set(labels)) != len(labels):
-                raise QueryShapeError("duplicate_label")
+            # Uniqueness is per select: the branches of a set operation are separate
+            # selects, and a column both of them project is not a duplicate.
+            for leaf in leaves:
+                names = [self._label(x, leaf) for x in leaf.expression.selects]
+                if len(set(names)) != len(names):
+                    raise QueryShapeError("duplicate_label")
             observed = self._observed(tree, scopes, sources)
             if verdict.fx_missing_rate_handling:
                 observed["fx_missing_rate_handling"] = verdict.fx_missing_rate_handling
@@ -285,13 +305,13 @@ class AdHocSQL:
                 raise QueryFormError(str(exc)) from None
             if str(exc) in ("unknown_model", "external_source"):
                 raise denied(str(exc)) from None
-            raise denied("unsupported") from None
+            raise QueryFormError("unsupported") from None
         except sqlglot.errors.OptimizeError:
             raise QueryFormError("unresolved_column") from None
         except sqlglot.errors.SqlglotError:
             raise QueryFormError("invalid_sql") from None
         except Exception:
-            raise denied("unsupported") from None
+            raise QueryFormError("unsupported") from None
 
     def _observed(self, tree, scopes, sources):
         """Facts read from the qualified statement: what it touched, never what it says."""
@@ -447,6 +467,13 @@ class AdHocSQL:
                 exp.DataType.Type.CHAR,
             }:
                 raise QueryShapeError("text_cast")
+
+    @staticmethod
+    def _leaves(scope):
+        """The plain selects behind a statement, first branch first."""
+        if scope.union_scopes:
+            return [leaf for u in scope.union_scopes for leaf in AdHocSQL._leaves(u)]
+        return [scope]
 
     def _label(self, expr, scope, depth=0):
         if depth > 8:

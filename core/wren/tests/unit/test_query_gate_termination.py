@@ -290,3 +290,63 @@ def test_a_continued_task_keeps_its_budget(scripted):
     assert out == {"status": "unavailable", "reason": "worker"}
     assert exhausted(s) == [{"kind": "rejected", "attempts": 3}]
     assert len(events(s, "private_sql_rejected")) == 3
+
+
+def test_a_function_miss_is_rewritten_inside_the_same_task_and_is_not_terminal(scripted):
+    s = scripted()
+    out = s.execute(ask(s, "SELECT COUNT(*) FROM orders WHERE NOT is_test AND order_date < now()", ORDERS))
+    assert out["status"] == "completed" and out["result"]["rows"] == [{"c1": 12}]
+    assert [(e["code"], e["sub_code"]) for e in events(s, "private_sql_rejected")] == [
+        ("unsupported_query", "unsupported_function")
+    ]
+    assert not events(s, "task_failed")
+    assert not any(o.get("op") == "cancel" for o in runtime_ops(s))
+
+
+def test_function_misses_consume_the_rejection_budget(scripted):
+    s = scripted()
+    miss = "SELECT now() FROM orders WHERE NOT is_test"
+    out = finished(s, ask(s, miss, miss, miss, GOOD))
+    assert out == {"status": "unavailable", "reason": "worker"}
+    assert exhausted(s) == [{"kind": "rejected", "attempts": 3}]
+    assert not events(s, "private_sql")
+
+
+def test_an_unexpected_planner_error_is_not_terminal(scripted, monkeypatch):
+    s = scripted()
+
+    def fail(expr):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(s.sql, "_projection", fail)
+    out = finished(s, ask(s, ORDERS, ORDERS, ORDERS))
+    assert out == {"status": "unavailable", "reason": "worker"}
+    assert [(e["code"], e["sub_code"]) for e in events(s, "private_sql_rejected")] == [
+        ("unsupported_query", "unsupported")
+    ] * 3
+    assert [e["detail"] for e in events(s, "task_failed")] == [
+        "budget_exhausted:rejected"
+    ]
+
+
+def test_an_undetermined_statement_counts_toward_the_rejection_total(scripted, monkeypatch):
+    import wren.agent_sql as agent_sql  # noqa: PLC0415
+
+    real = agent_sql.evaluate
+    calls = []
+
+    def first_undetermined(checker, ast):
+        calls.append(1)
+        return None if len(calls) == 1 else real(checker, ast)
+
+    monkeypatch.setattr(agent_sql, "evaluate", first_undetermined)
+    s = scripted()
+    out = finished(s, ask(s, ORDERS, REJECTED, REJECTED, GOOD))
+    assert out == {"status": "unavailable", "reason": "worker"}
+    assert [e["code"] for e in events(s, "private_sql_rejected")] == [
+        "declared_default_undetermined",
+        "unsupported_query",
+        "unsupported_query",
+    ]
+    assert exhausted(s) == [{"kind": "rejected", "attempts": 3}]
+    assert not events(s, "private_sql")

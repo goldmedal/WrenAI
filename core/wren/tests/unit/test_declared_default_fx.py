@@ -104,6 +104,12 @@ DEFAULTS = {
     "nvl-style swap": "COALESCE(1, f.rate_to_usd)",
     "case on null": "CASE WHEN f.rate_to_usd IS NULL THEN 1 ELSE f.rate_to_usd END",
     "decimal literal": "COALESCE(f.rate_to_usd, 1.0)",
+    "case on not null": "CASE WHEN f.rate_to_usd IS NOT NULL THEN f.rate_to_usd ELSE 1 END",
+    "if on not null": "IF(f.rate_to_usd IS NOT NULL, f.rate_to_usd, 1)",
+    "cast function literal": "COALESCE(f.rate_to_usd, CAST(1 AS DOUBLE))",
+    "cast operator literal": "COALESCE(f.rate_to_usd, 1::DOUBLE)",
+    "cast in case": "CASE WHEN f.rate_to_usd IS NULL THEN CAST(1 AS DOUBLE) ELSE f.rate_to_usd END",
+    "cast in inverse case": "CASE WHEN f.rate_to_usd IS NOT NULL THEN f.rate_to_usd ELSE 1::DOUBLE END",
 }
 
 
@@ -117,6 +123,10 @@ GUARDED = {
     "default inside the base branch": "CASE WHEN p.currency = 'USD' THEN p.amount * COALESCE(f.rate_to_usd, 1) ELSE p.amount * f.rate_to_usd END",
     "default in the else of a not-base test": "CASE WHEN p.currency <> 'USD' THEN p.amount * f.rate_to_usd ELSE p.amount * COALESCE(f.rate_to_usd, 1) END",
     "lower-case literal": "CASE WHEN p.currency = 'usd' THEN p.amount ELSE p.amount * f.rate_to_usd END",
+    "inverse case inside the base branch": "CASE WHEN p.currency = 'USD' THEN p.amount * (CASE WHEN f.rate_to_usd IS NOT NULL THEN f.rate_to_usd ELSE 1 END) ELSE p.amount * f.rate_to_usd END",
+    "inverse case in the else of a not-base test": "CASE WHEN p.currency <> 'USD' THEN p.amount * f.rate_to_usd ELSE p.amount * (CASE WHEN f.rate_to_usd IS NOT NULL THEN f.rate_to_usd ELSE 1 END) END",
+    "cast default inside the base branch": "CASE WHEN p.currency = 'USD' THEN p.amount * COALESCE(f.rate_to_usd, CAST(1 AS DOUBLE)) ELSE p.amount * f.rate_to_usd END",
+    "cast operator default in the else of a not-base test": "CASE WHEN p.currency <> 'USD' THEN p.amount * f.rate_to_usd ELSE p.amount * COALESCE(f.rate_to_usd, 1::DOUBLE) END",
 }
 
 
@@ -129,6 +139,8 @@ def test_a_default_only_the_base_currency_can_reach_is_accepted(strict, amount):
 UNGUARDED_BRANCHES = {
     "default in the non-base branch": "CASE WHEN p.currency = 'USD' THEN p.amount ELSE p.amount * COALESCE(f.rate_to_usd, 1) END",
     "default in the then of a not-base test": "CASE WHEN p.currency <> 'USD' THEN p.amount * COALESCE(f.rate_to_usd, 1) ELSE p.amount END",
+    "inverse case in the non-base branch": "CASE WHEN p.currency = 'USD' THEN p.amount ELSE p.amount * (CASE WHEN f.rate_to_usd IS NOT NULL THEN f.rate_to_usd ELSE 1 END) END",
+    "cast default in the non-base branch": "CASE WHEN p.currency = 'USD' THEN p.amount ELSE p.amount * COALESCE(f.rate_to_usd, CAST(1 AS DOUBLE)) END",
     "guard on another literal": "CASE WHEN p.currency = 'EUR' THEN p.amount * COALESCE(f.rate_to_usd, 1) ELSE p.amount END",
 }
 

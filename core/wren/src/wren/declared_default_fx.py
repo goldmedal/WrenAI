@@ -18,7 +18,7 @@ Violations come back as ``<rule id>`` (an existing decision) or ``<rule id>:<sub
     vanish from the result.
 ``rate_default_literal``
     a rate column is defaulted to a literal (``COALESCE(rate, 1)``, ``CASE WHEN rate IS NULL
-    THEN 1``) outside a branch that is known to be the base currency, which would turn a
+    THEN 1``, ``CASE WHEN rate IS NOT NULL THEN rate ELSE 1 END``, also under a cast) outside a branch that is known to be the base currency, which would turn a
     missing foreign rate into 1.
 
 Like the rest of the checker this reads only the qualified syntax tree: no prose, aliases or
@@ -120,10 +120,13 @@ def _evaluate(checker: DefaultsChecker, statement: _Statement) -> Evaluation:
 
 
 def _numeric_literal(node: exp.Expression) -> bool:
-    node = _unparen(node)
+    """A bare number, or one under a cast (``CAST(1 AS DOUBLE)``, ``1::DOUBLE``)."""
+    node, cast = _unparen(node), False
+    while isinstance(node, (exp.Cast, exp.TryCast)):
+        node, cast = _unparen(node.this), True
     if isinstance(node, exp.Neg):
         node = _unparen(node.this)
-    return isinstance(node, exp.Literal) and not node.is_string
+    return isinstance(node, exp.Literal) and (cast or not node.is_string)
 
 
 class _Rate:
@@ -341,6 +344,24 @@ class _Rate:
                 and _numeric_literal(taken)
             ):
                 yield node
+                continue
+            # The inverse spelling: ``CASE WHEN rate IS NOT NULL THEN rate ELSE 1 END``.
+            if isinstance(condition, exp.Not):
+                present = _unparen(condition.this)
+                if (
+                    isinstance(present, exp.Is)
+                    and isinstance(present.expression, exp.Null)
+                    and self._is_rate(present.this)
+                ):
+                    owner = node.parent
+                    branch = isinstance(owner, exp.Case) and any(
+                        node is i for i in owner.args.get("ifs") or []
+                    )
+                    other = (
+                        owner.args.get("default") if branch else node.args.get("false")
+                    )
+                    if other is not None and _numeric_literal(other):
+                        yield other
 
     def _guarded(self, node: exp.Expression) -> bool:
         """The node sits in a branch that only the base currency can reach."""

@@ -184,11 +184,16 @@ def test_governed_run_sql_runs_the_shared_gate(service):
         "SELECT email FROM customers",
         "SELECT COUNT(*) FROM missing",
         "DROP TABLE orders",
-        "SELECT read_csv('/etc/passwd')",
         "SELECT COUNT(*) FROM orders; SELECT 1",
+        "SELECT COUNT(*) FROM read_csv('/etc/passwd')",
     ):
         with pytest.raises(PermissionError, match="denied"):
             execute(s, request(s).model_copy(update={"sql": sql}))
+    scalar = execute(
+        s, request(s).model_copy(update={"sql": "SELECT read_csv('/etc/passwd')"})
+    )
+    assert scalar["error"] == "unsupported_query"
+    assert scalar["code"] == "unsupported_function"
 
 
 def test_governed_run_sql_answers_a_rejected_statement_without_running_it(service):

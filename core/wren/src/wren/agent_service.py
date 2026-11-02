@@ -201,6 +201,8 @@ HINTS = {
     "declared_default_undetermined": "This SQL was NOT executed: the host could not check it against the project's declared default rules. Use plain references to bound models and columns and rewrite it; you get one such retry.",
 }
 SHAPE_HINTS = {
+    "unsupported_function": "This SQL was NOT executed: it uses a function or form the host does not allow (for example now(), random(), list or string aggregates, UNNEST, ANY over a list, a parenthesised query). Use standard SQL aggregates, CASE, CAST and date functions over bound columns and rewrite it.",
+    "unsupported": "This SQL was NOT executed: the host could not plan it. Rewrite it with plain SELECT, JOIN, WHERE, GROUP BY and standard aggregates over bound models.",
     "duplicate_label": "This SQL was NOT executed: two result columns would carry the same label. Use GROUP BY so the key is a data column instead of one column per literal.",
 }
 UNAVAILABLE_HINT = "Check the bound schema and DuckDB SQL syntax. Return at most 100 rows and 20 columns. Do not infer data from an error."

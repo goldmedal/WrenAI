@@ -30,25 +30,54 @@ _FUNCTIONS = frozenset(
 )
 
 
+class NotReadOnlyError(ValueError):
+    """Not a single read-only query: writes, DDL, commands, locks, several statements."""
+
+
+class UnsupportedFunctionError(ValueError):
+    """A read-only query that uses a function or form outside the allowlist."""
+
+
+def check_read_only_query(sql: str, dialect: str | None) -> None:
+    """Raise ``NotReadOnlyError`` or ``UnsupportedFunctionError`` for a refused query.
+
+    Side effects are looked for in the whole tree before any function is judged, so a
+    write nested under an unsupported function is still reported as a write.
+    """
+    statements = parse(sql, dialect=dialect)
+    if len(statements) != 1:
+        raise NotReadOnlyError("Expected one analytical query")
+    statement = statements[0]
+    nodes = list(statement.walk())
+    if any(
+        isinstance(n, (exp.DML, exp.DDL, exp.Command, exp.Into, exp.Lock))
+        for n in nodes
+    ):
+        raise NotReadOnlyError("Query contains an operation with side effects")
+    if not isinstance(statement, (exp.Select, exp.Union, exp.Intersect, exp.Except)):
+        inner = statement
+        while isinstance(inner, exp.Subquery):
+            inner = inner.this
+        if inner is not statement and isinstance(
+            inner, (exp.Select, exp.Union, exp.Intersect, exp.Except)
+        ):
+            raise UnsupportedFunctionError("A parenthesised query is not supported")
+        raise NotReadOnlyError("Expected one analytical query")
+    for node in nodes:
+        if isinstance(node, exp.Func) and (
+            isinstance(node, exp.Anonymous) or node.key not in _FUNCTIONS
+        ):
+            raise UnsupportedFunctionError("Query uses an unsupported function")
+        # Qualified calls can resolve to a user-defined function even when
+        # their unqualified spelling looks like a built-in aggregate.
+        if isinstance(node, exp.Dot) and isinstance(node.expression, exp.Func):
+            raise UnsupportedFunctionError("Qualified functions are not supported")
+
+
 def validate_read_only_query(sql: str, dialect: str | None) -> None:
     """Raise before planning or connector creation for unsupported SQL."""
     try:
-        statements = parse(sql, dialect=dialect)
-        if len(statements) != 1 or not isinstance(
-            statements[0], (exp.Select, exp.Union, exp.Intersect, exp.Except)
-        ):
-            raise ValueError("Expected one analytical query")
-        for node in statements[0].walk():
-            if isinstance(node, (exp.DML, exp.DDL, exp.Command, exp.Into, exp.Lock)):
-                raise ValueError("Query contains an operation with side effects")
-            if isinstance(node, exp.Func) and (
-                isinstance(node, exp.Anonymous) or node.key not in _FUNCTIONS
-            ):
-                raise ValueError("Query uses an unsupported function")
-            # Qualified calls can resolve to a user-defined function even when
-            # their unqualified spelling looks like a built-in aggregate.
-            if isinstance(node, exp.Dot) and isinstance(node.expression, exp.Func):
-                raise ValueError("Qualified functions are not supported")
+        check_read_only_query(sql, dialect)
     except Exception as error:
         raise WrenError(
             ErrorCode.INVALID_SQL,
