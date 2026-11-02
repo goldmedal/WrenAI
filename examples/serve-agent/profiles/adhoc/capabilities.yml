@@ -1,5 +1,6 @@
 version: wren-agent-capabilities/1
 entry: analyze_data
+context_budget_bytes: 4096
 capabilities:
 - id: analytics
   description: 'Ad-hoc read-only analysis of orders and customers: revenue, average

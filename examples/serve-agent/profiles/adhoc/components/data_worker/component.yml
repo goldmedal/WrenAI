@@ -19,6 +19,8 @@ required_capabilities:
 - context_read
 borrowed_actions:
 - run_sql
+- list_context
+- select_context
 - read_context
 - clarify
 effect:

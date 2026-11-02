@@ -13,10 +13,20 @@ from pathlib import Path
 PROTOCOL = "warble-private-service/1"
 
 
+DEFAULT_CALL_TIMEOUT_S = 100.0
+ABANDONED_LIMIT = 1024
+
+
 class RuntimeIPC:
-    def __init__(self, runtime: Path, init: dict):
+    def __init__(self, runtime: Path, init: dict, call_timeout_s: float | None = None):
         self.pending = {}
         self.callbacks = {}
+        # Ids the host gave up waiting for. A late reply or tool call for one of them is
+        # answered or dropped; it is not a protocol violation and must not kill the runtime.
+        self.abandoned = {}
+        self.call_timeout_s = (
+            DEFAULT_CALL_TIMEOUT_S if call_timeout_s is None else call_timeout_s
+        )
         self.lock = threading.Lock()
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
         self.process = subprocess.Popen(
@@ -76,11 +86,16 @@ class RuntimeIPC:
                     raise ValueError("ipc_size")
                 m = json.loads(line)
                 if m.get("type") == "tool_call":
-                    if m.get("owner") not in self.callbacks:
+                    owner = m.get("owner")
+                    if owner not in self.callbacks and owner not in self.abandoned:
                         raise ValueError("ipc_order")
                     self.pool.submit(self._tool, m)
                 else:
-                    future = self.pending.pop(m["id"])
+                    future = self.pending.pop(m["id"], None)
+                    if future is None:
+                        if m["id"] in self.abandoned:
+                            continue
+                        raise ValueError("ipc_order")
                     if m.get("error"):
                         failure = RuntimeError("runtime_unavailable")
                         # Operator diagnostics only: never forwarded to a caller.
@@ -107,10 +122,37 @@ class RuntimeIPC:
             self.callbacks[ident] = callback
         try:
             self._send({"id": ident, "op": op, **values})
-            # Operator-set cap on one runtime call (default 100 s); the runtime's own deadlines sit below it.
-            return future.result(timeout=float(os.environ.get("WREN_IPC_CALL_TIMEOUT_S", "100")))
+            # The runtime's own deadlines sit below this cap. The operator can override it.
+            return future.result(timeout=self._timeout())
+        except concurrent.futures.TimeoutError:
+            self._abandon(ident, cancel=op == "invoke")
+            failure = RuntimeError("runtime_unavailable")
+            failure.detail = "ipc_timeout:host"
+            raise failure from None
         finally:
             self.callbacks.pop(ident, None)
+
+    def _timeout(self) -> float:
+        raw = os.environ.get("WREN_IPC_CALL_TIMEOUT_S")
+        return float(raw) if raw else self.call_timeout_s
+
+    def _abandon(self, ident, *, cancel: bool):
+        """Stop waiting for ``ident``: clear it and ask the runtime to cancel its work."""
+        self._remember(ident)
+        self.pending.pop(ident, None)
+        if not cancel:
+            return
+        cancel_id = str(uuid.uuid4())
+        self._remember(cancel_id)
+        try:
+            self._send({"id": cancel_id, "op": "cancel", "owner": ident})
+        except Exception:
+            pass
+
+    def _remember(self, ident):
+        self.abandoned[ident] = True
+        while len(self.abandoned) > ABANDONED_LIMIT:
+            del self.abandoned[next(iter(self.abandoned))]
 
     def cancel(self, owner):
         return self.call("cancel", **{"owner": owner})

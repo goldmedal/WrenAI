@@ -19,8 +19,9 @@ required_capabilities:
 - context_read
 borrowed_actions:
 - query
+- list_context
+- select_context
 - read_context
-- clarify
 effect:
   render_blocks: []
   outcome:

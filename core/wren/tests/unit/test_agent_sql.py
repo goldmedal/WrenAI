@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 
 import pytest
-import yaml
 
 pytest.importorskip("mcp")
 from wren.agent_service import Ask, Ref, build_mcp, create_service  # noqa: E402
@@ -24,14 +23,10 @@ def adhoc(tmp_path):
     spec.loader.exec_module(module)
     services = []
 
-    def make(policy="", scope=None):
+    def make(policy=""):
         dest = tmp_path / f"fixture{len(services)}"
         module.prepare_adhoc(dest)
         root = dest / "project"
-        cfg = yaml.safe_load((root / "service.yml").read_text())
-        if scope:
-            cfg["query_scope"] = scope
-        (root / "service.yml").write_text(yaml.safe_dump(cfg))
         with (root / "policy.cedar").open("a") as f:
             f.write(policy)
         s = create_service(
@@ -49,7 +44,8 @@ def adhoc(tmp_path):
             if op == "invoke":
                 cb = kwargs["callback"]
                 cb("__delegate", {"component": "data_worker"})
-                cb("read_context", {"documents": ["structure", "rules"]})
+                cb("list_context", {})
+                cb("read_context", {"ids": ["orders", "customers"]})
                 result = cb("run_sql", {"sql": s.test_sql})
                 return (
                     {"evidence": result["evidence"]} if "evidence" in result else result
@@ -179,21 +175,89 @@ def test_cedar_column_boundary_before_execution(adhoc, action, kind):
     assert not any(a.get("event") == "private_sql" for a in s.audit)
 
 
+DENIED_REFERENCES = [
+    "SELECT email FROM customers",
+    "SELECT c.email FROM customers c",
+    'SELECT "email" FROM customers',
+    "SELECT customers.email FROM customers",
+    "SELECT * FROM customers",
+    "SELECT c.* FROM customers c",
+    "SELECT COUNT(*) FROM customers WHERE email LIKE '%@%'",
+    "SELECT COUNT(*) FROM customers ORDER BY MIN(email)",
+    "SELECT region, COUNT(*) FROM customers GROUP BY region HAVING MAX(email) > ''",
+    "WITH a AS (SELECT email FROM customers) SELECT COUNT(*) FROM a",
+    "WITH a AS (SELECT email AS e FROM customers) SELECT COUNT(e) FROM a",
+    "WITH a AS (SELECT * FROM customers) SELECT COUNT(*) FROM a",
+    "SELECT COUNT(*) FROM (SELECT email FROM customers) t",
+    "SELECT COUNT(*) FROM (SELECT * FROM customers) t",
+    "SELECT COUNT(*) FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE email IS NOT NULL)",
+    "SELECT COUNT(*) FROM orders o WHERE EXISTS (SELECT 1 FROM customers c WHERE c.id = o.customer_id AND c.email LIKE 'p%')",
+    "SELECT COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id AND c.email IS NOT NULL",
+    "SELECT COUNT(*) FROM customers c1 JOIN customers c2 ON c1.email = c2.email",
+    "SELECT COUNT(DISTINCT email) FROM customers",
+    "SELECT COUNT(*) FROM customers UNION ALL SELECT COUNT(email) FROM customers",
+    "SELECT MIN(LENGTH(email)) FROM customers",
+]
+
+
+@pytest.mark.parametrize("sql", DENIED_REFERENCES)
+def test_a_denied_column_is_refused_in_every_reference_form(adhoc, sql):
+    s = adhoc()
+    with pytest.raises(PermissionError, match="denied_column"):
+        s.sql.prepare(sql)
+    with pytest.raises(PermissionError):
+        ask(s, sql)
+    assert not any(a.get("event") == "private_sql" for a in s.audit)
+    assert not any(a.get("event") == "private_sql_rejected" for a in s.audit)
+
+
 @pytest.mark.parametrize(
     "sql",
     [
-        "SELECT SUM(amount) FROM orders WHERE order_date < TIMESTAMP '2030-01-01' OR 1=1",
-        "WITH x AS (SELECT * FROM orders) SELECT SUM(amount) FROM x",
-        "SELECT SUM(o.amount) FROM orders o JOIN customers c ON o.customer_id=c.id",
+        "SELECT customers FROM customers",
+        "SELECT c FROM customers c",
+        "SELECT COLUMNS('.*') FROM customers",
+        "SELECT COLUMNS(c -> c LIKE '%mail') FROM customers",
+        "SELECT TO_JSON(c) FROM customers c",
+        "SELECT STRUCT_PACK(a := email) FROM customers",
+        "SELECT * EXCLUDE (region) FROM customers",
     ],
 )
-def test_mandatory_scope_cannot_escape_with_or_cte_or_join(adhoc, sql):
-    s = adhoc(scope={"start": "2026-01-05", "end": "2026-01-12"})
-    result = ask(s, sql)
-    assert result["result"]["rows"] == [{"c1": 220.0}]
-    assert result["result"]["mandatory_scope"] == {
-        "orders": {"start": "2026-01-05", "end": "2026-01-12"}
-    }
+def test_row_valued_and_pattern_forms_do_not_reach_a_denied_column(adhoc, sql):
+    s = adhoc()
+    with pytest.raises((PermissionError, ValueError)):
+        ask(s, sql)
+    assert not any(a.get("event") == "private_sql" for a in s.audit)
+
+
+def test_a_non_denied_column_of_the_same_model_stays_queryable(adhoc):
+    result = ask(adhoc(), "SELECT COUNT(*) FROM customers WHERE region = 'North'")
+    assert result["result"]["rows"] == [{"c1": 1}]
+    result = ask(adhoc(), "SELECT * EXCLUDE (email) FROM customers ORDER BY id LIMIT 2")
+    assert [c["label"] for c in result["result"]["columns"]] == ["id", "region"]
+
+
+def test_a_denied_column_is_in_no_worker_visible_projection(adhoc):
+    s = adhoc()
+    seen = []
+    original = s.ipc.call
+
+    def call(op, **kwargs):
+        if op == "invoke":
+            cb = kwargs["callback"]
+            seen.append(json.loads(kwargs["request"])["context_index"])
+            seen.append(cb("list_context", {}))
+            seen.append(cb("select_context", {"ids": ["customers"]}))
+            seen.append(cb("read_context", {"ids": ["customers", "orders"]}))
+            seen.append(cb("read_context", {"ids": ["rule:knowledge/rules/conventions.md"]}))
+            out = cb("run_sql", {"sql": "SELECT COUNT(*) FROM customers"})
+            return {"evidence": out["evidence"]}
+        return original(op, **kwargs)
+
+    s.ipc.call = call
+    ask(s, "ignored")
+    assert "email" not in json.dumps(seen).lower()
+    assert "private-" not in json.dumps(seen)
 
 
 def test_followup_cache_and_evidence_reauthorize_lineage(adhoc):

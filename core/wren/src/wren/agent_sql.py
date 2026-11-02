@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -51,28 +50,27 @@ class PrivateSQL(BaseModel):
 
 
 class AdHocSQL:
+    """Plans and runs private SQL over the models of the bound Wren project.
+
+    The schema is the loader catalog's (non-hidden columns of every model); the project's
+    denied columns resolve like any other column and are refused after qualification, so
+    a CTE, a subquery or a ``SELECT *`` expansion cannot carry one through.
+    """
+
     def __init__(self, project):
         self.project = project
-        self.models = project.config["adhoc"]["models"]
-        manifest = json.loads((project.root / "target/mdl.json").read_text())
+        snapshot = project.snapshot
         self.schema = {
-            m["name"]: {c["name"]: c["type"] for c in m["columns"]}
-            for m in manifest["models"]
+            m["name"]: {
+                c["name"]: c["type"]
+                for c in m.get("columns") or []
+                if not c.get("is_hidden")
+            }
+            for m in snapshot.catalog.get("models") or []
         }
-        if not self.models or not set(self.models) <= set(self.schema):
+        if not self.schema:
             raise ValueError("invalid_sql_models")
-        for name, model in self.models.items():
-            cols = model["columns"]
-            if (
-                not cols
-                or len(cols) != len(set(cols))
-                or not set(cols) <= set(self.schema[name])
-                or any(not re.fullmatch(r"[a-z][a-z0-9_]*", c) for c in [name, *cols])
-            ):
-                raise ValueError("invalid_sql_columns")
-            if model.get("date_column") not in [None, *cols]:
-                raise ValueError("invalid_scope_column")
-        self.schema = {k: self.schema[k] for k in self.models}
+        self.denied = frozenset((m.lower(), c.lower()) for m, c in snapshot.denied)
 
     def prepare(self, sql):
         try:
@@ -101,6 +99,20 @@ class AdHocSQL:
                 identify=True,
             )
             scopes = list(traverse_scope(tree))
+            # Denial outranks every planning failure: a query that names a denied column is
+            # an authorization failure even when it is also malformed.
+            for scope in scopes:
+                for col in scope.columns:
+                    src = scope.sources.get(col.table)
+                    if (
+                        isinstance(src, exp.Table)
+                        and (
+                            src.name.lower(),
+                            col.name.lower(),
+                        )
+                        in self.denied
+                    ):
+                        raise PermissionError("denied_column")
             sources, physical = {}, []
             for scope in scopes:
                 if not isinstance(
@@ -109,15 +121,13 @@ class AdHocSQL:
                     raise ValueError("unsupported_source")
                 for alias, (_, src) in scope.selected_sources.items():
                     if isinstance(src, exp.Table):
-                        if src.name not in self.models:
+                        if src.name not in self.schema:
                             raise ValueError("unknown_model")
                         sources.setdefault(src.name, set())
                         physical.append(src)
                 for col in scope.columns:
                     src = scope.sources.get(col.table)
                     if isinstance(src, exp.Table):
-                        if col.name not in self.models[src.name]["columns"]:
-                            raise ValueError("column_denied")
                         sources[src.name].add(col.name)
                     elif not isinstance(src, Scope):
                         # Correlated references and ambiguous scope are not inferred.
@@ -128,37 +138,6 @@ class AdHocSQL:
                 raise ValueError("no_source")
             # COUNT(*) has no Column nodes; its table still receives authorization.
             conditions = {}
-            deployment = self.project.config.get("query_scope", {})
-            for table in physical:
-                cfg = self.models[table.name]
-                column = cfg.get("date_column")
-                if column and deployment:
-                    terms = []
-                    for bound, op in (("start", exp.GTE), ("end", exp.LT)):
-                        if deployment.get(bound):
-                            value = date.fromisoformat(deployment[bound]).isoformat()
-                            terms.append(
-                                op(
-                                    this=exp.column(column),
-                                    expression=exp.Cast(
-                                        this=exp.Literal.string(value),
-                                        to=exp.DataType.build("TIMESTAMP"),
-                                    ),
-                                )
-                            )
-                    if terms:
-                        sources[table.name].add(column)
-                        conditions[table.name] = {
-                            k: deployment.get(k) for k in ("start", "end")
-                        }
-                        # Replace each physical occurrence, not the outer WHERE: OR,
-                        # subqueries and joins cannot escape the mandatory scope.
-                        scoped = (
-                            exp.select("*")
-                            .from_(exp.to_table(table.name))
-                            .where(*terms)
-                        )
-                        table.replace(scoped.subquery(alias=table.alias_or_name))
             labels = [self._label(x, scopes[-1]) for x in scopes[-1].expression.selects]
             if not labels or len(labels) > 20:
                 raise ValueError("column_limit")
@@ -170,7 +149,8 @@ class AdHocSQL:
                 conditions,
                 labels,
             )
-        except QueryShapeError:
+        except PermissionError:
+            # Shape errors and denied columns keep their own class; neither is rewritten.
             raise
         except ValueError as exc:
             if str(exc) in FORM_CODES:
