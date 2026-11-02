@@ -228,6 +228,65 @@ fn a_rule_file_without_front_matter_that_mentions_the_key_fails_closed() {
 }
 
 #[test]
+fn a_mention_without_a_top_level_key_fails_closed() {
+    for (placement, text) in [
+        (
+            "merge key",
+            "---\nbase: &b {denied_columns: [customers.email]}\n<<: *b\n---\nbody\n",
+        ),
+        (
+            "nested under another key",
+            "---\nconfig:\n  denied_columns: [customers.email]\n---\nbody\n",
+        ),
+        (
+            "inside a top-level sequence",
+            "---\n- denied_columns: [customers.email]\n---\nbody\n",
+        ),
+        (
+            "comment only",
+            "---\n# denied_columns: [customers.email]\ntitle: Conventions\n---\nbody\n",
+        ),
+        (
+            "a typo beyond the near-miss spelling",
+            "---\ndenied_colums: [customers.email]\n---\nList them under denied_columns.\n",
+        ),
+        (
+            "empty front-matter",
+            "---\n---\nPut customers.email under denied_columns.\n",
+        ),
+    ] {
+        let project = project_with_rule(text);
+        let doc = catalog_json(project.path());
+        assert_eq!(doc["denied_columns_invalid"], true, "{placement}");
+        assert!(doc.get("denied_columns").is_none(), "{placement}");
+        assert_eq!(
+            doc["diagnostics"][0]["entry"],
+            "denied_columns mentioned but not declared at top level",
+            "{placement}"
+        );
+        assert_eq!(
+            doc["diagnostics"][0]["path"], "knowledge/rules/a-pii.md",
+            "{placement}"
+        );
+    }
+    // A declaration at the top level is still read, wherever else the word appears.
+    let project = project_with_rule(
+        "---\ndenied_columns: [customers.email]\nnote:\n  denied_columns: [orders.amount]\n---\nThe denied_columns key.\n",
+    );
+    let doc = catalog_json(project.path());
+    assert!(doc.get("denied_columns_invalid").is_none());
+    assert_eq!(
+        doc["denied_columns"],
+        serde_json::json!(["customers.email"])
+    );
+    // No mention, no diagnostic: front-matter without the key is not a declaration.
+    let project = project_with_rule("---\ntitle: Conventions\n---\nbody\n");
+    assert!(catalog_json(project.path())
+        .get("denied_columns_invalid")
+        .is_none());
+}
+
+#[test]
 fn a_denylist_is_independent_of_declared_default_ids() {
     let project = project_with_rule(
         "---\ndenied_columns: [customers.email]\ndefaults:\n  - {id: Bad Id, kind: exclude_rows}\n---\nbody\n",

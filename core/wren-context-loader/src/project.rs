@@ -455,8 +455,11 @@ const DENIED_COLUMNS_KEY: &str = "denied_columns";
 /// plainly meant to declare something and a denylist that was only partly read must not be used.
 /// The same holds for a file with no front-matter at all that mentions the key. A front-matter
 /// key that only nearly spells `denied_columns` (other case, `-` for `_`, singular) is reported as
-/// an invalid entry rather than ignored. A scalar value is read as a one-entry list; a value that
-/// is not a name, or a bare key, is reported entry by entry.
+/// an invalid entry rather than ignored. So is a file whose text mentions `denied_columns` but
+/// whose front-matter has no top-level key of exactly that name (a merge key, a nested mapping, a
+/// top-level sequence, a comment, a typo): the declaration, if any, was not read. A scalar value
+/// is read as a one-entry list; a value that is not a name, or a bare key, is reported entry by
+/// entry.
 pub(crate) fn denied_column_declarations(files: &[KnowledgeRuleFile]) -> Vec<DeniedDeclaration> {
     let mut out = Vec::new();
     for file in files {
@@ -505,6 +508,12 @@ pub(crate) fn denied_column_declarations(files: &[KnowledgeRuleFile]) -> Vec<Den
             }
         }
         let Some(value) = data.get(DENIED_COLUMNS_KEY) else {
+            if mentions_key_as_a_word(&file.content) {
+                out.push(DeniedDeclaration::Unreadable {
+                    path: file.path.clone(),
+                    reason: "denied_columns mentioned but not declared at top level",
+                });
+            }
             continue;
         };
         let entries: Vec<&serde_yaml::Value> = match value {
@@ -526,6 +535,17 @@ pub(crate) fn denied_column_declarations(files: &[KnowledgeRuleFile]) -> Vec<Den
         }
     }
     out
+}
+
+/// Whether `text` contains `denied_columns` as a whole word: not as part of a longer name such as
+/// `denied_columns_note` or `undenied_columns`, which are other keys, not a mention of this one.
+fn mentions_key_as_a_word(text: &str) -> bool {
+    let part_of_a_name = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    text.match_indices(DENIED_COLUMNS_KEY).any(|(at, found)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + found.len()..].chars().next();
+        !before.is_some_and(part_of_a_name) && !after.is_some_and(part_of_a_name)
+    })
 }
 
 /// A key that case-insensitively matches `denied[_-]?columns?` without being `denied_columns`.

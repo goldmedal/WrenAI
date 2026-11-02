@@ -702,6 +702,25 @@ def test_a_denied_column_that_survives_stripping_refuses_startup():
         assert label
 
 
+def test_an_escaped_spelling_of_a_denied_column_in_a_non_declaring_file_refuses_startup():
+    # No denied_columns key here, so nothing is stripped; the file is served as written, and
+    # the double-quoted escape hides the name from a search of the raw text.
+    content = '---\ndefaults:\n  - {id: x, note: "customers\\x2eemail"}\n---\nbody\n'
+    assert "customers.email" not in content
+    with pytest.raises(DeniedColumnsInvalid, match="pii.md: customers.email remains"):
+        reader(
+            {
+                "models": [model("customers", "Customers.", ("id", "email"))],
+                "knowledge_rules": [{"path": "knowledge/rules/pii.md", "content": content}],
+            },
+            denied=[("customers", "email")],
+        )
+    with pytest.raises(DeniedColumnsInvalid):
+        strip_denied_declaration(content, frozenset({("customers", "email")}))
+    # The same file is fine when the denied column is not the one it names.
+    assert strip_denied_declaration(content, frozenset({("customers", "id")})) == content
+
+
 def test_front_matter_yaml_cannot_read_but_that_mentions_the_key_refuses_startup():
     broken = "---\ndenied_columns: [customers.email\n---\nbody\n"
     with pytest.raises(DeniedColumnsInvalid):

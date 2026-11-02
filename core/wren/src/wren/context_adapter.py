@@ -436,7 +436,8 @@ def strip_denied_declaration(text: str, denied: frozenset = frozenset()) -> str:
         remaining = front
         stripped = text
         if isinstance(data, dict) and DENIED_KEY in data:
-            rest = {k: v for k, v in data.items() if k != DENIED_KEY}
+            data = {k: v for k, v in data.items() if k != DENIED_KEY}
+            rest = data
             if rest:
                 remaining = yaml.safe_dump(
                     rest, sort_keys=False, allow_unicode=True, default_flow_style=None
@@ -447,7 +448,12 @@ def strip_denied_declaration(text: str, denied: frozenset = frozenset()) -> str:
                 stripped = body.lstrip("\n")
             if text.endswith("\n") and not stripped.endswith("\n"):
                 stripped += "\n"
-    lowered = remaining.lower()
+    # The raw text catches a name in a comment; the parsed data, dumped again, catches a spelling
+    # the raw text hides (``"customers\x2eemail"``). Both run on every rule file, declaring or not.
+    served = [remaining]
+    if data is not None:
+        served.append(yaml.safe_dump(data, allow_unicode=True, default_flow_style=None))
+    lowered = "\n".join(served).lower()
     for owner, column in denied:
         if f"{owner}.{column}".lower() in lowered:
             raise DeniedColumnsInvalid(f"{owner}.{column} remains in the front-matter")
