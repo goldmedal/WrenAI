@@ -24,6 +24,7 @@ from wren.declared_defaults import (
     Declaration,
     ExcludeRows,
     RequireRateJoin,
+    SaleStatuses,
     models_of,
 )
 
@@ -95,6 +96,7 @@ class _Statement:
         self.ast = ast
         self.checker = checker
         scopes = traverse_scope(ast)
+        self.scopes = scopes
         self._scope_of = {id(scope.expression): scope for scope in scopes}
         self._origins: dict[int, _Origin] = {}
         roots: list[exp.Expression] = [w.this for w in ast.find_all(exp.Where)]
@@ -405,10 +407,18 @@ class DefaultsChecker:
     """Declared rules bound to one manifest and SQL dialect."""
 
     def __init__(
-        self, declarations: Iterable[Declaration], manifest: dict, dialect: str | None
+        self,
+        declarations: Iterable[Declaration],
+        manifest: dict,
+        dialect: str | None,
+        guarantees: dict[str, Iterable[str]] | None = None,
     ) -> None:
         self.rules = tuple(declarations)
         self.dialect = dialect
+        # Rule ids each view's definition guarantees, by view name (see ``wren_view`` marks).
+        self.guarantees = {
+            name: frozenset(ids) for name, ids in (guarantees or {}).items()
+        }
         self.schema = {
             model: {column: "TEXT" for column in columns}
             for model, columns in models_of(manifest).items()
@@ -438,6 +448,14 @@ class DefaultsChecker:
     def atoms_of(self, rule: ExcludeRows) -> tuple[str, ...]:
         return self._atoms[rule.id]
 
+    def relevant_models(self, rule: Declaration) -> set[str]:
+        """The models whose reads make ``rule`` apply to a statement."""
+        if isinstance(rule, ExcludeRows):
+            return self.covered_of(rule)
+        if isinstance(rule, SaleStatuses):
+            return {self.norm(rule.column.model)}
+        return {self.norm(ref.model) for group in rule.amounts for ref in group.columns}
+
     def _atom(self, text: str) -> str:
         node = parse_one(text, dialect=self.dialect)
         wrapper = exp.Paren(this=node)
@@ -466,15 +484,25 @@ class DefaultsChecker:
             statement = _Statement(qualified, self)
         except Exception:  # noqa: BLE001 - any parse/qualify failure is "no verdict"
             return None
+        from wren.declared_default_status import StatusUndetermined, judge  # noqa: PLC0415
+
         try:
-            return [
-                rule.id
-                for rule in self.rules
-                if (
-                    statement.fires_exclude(rule)
-                    if isinstance(rule, ExcludeRows)
-                    else statement.fires_rate(rule)
-                )
-            ]
+            fired = []
+            for rule in self.rules:
+                if isinstance(rule, ExcludeRows):
+                    broken = statement.fires_exclude(rule)
+                elif isinstance(rule, SaleStatuses):
+                    broken = judge(statement, self, rule).outcome in {
+                        "missing",
+                        "subset",
+                        "superset",
+                    }
+                else:
+                    broken = statement.fires_rate(rule)
+                if broken:
+                    fired.append(rule.id)
+            return fired
+        except StatusUndetermined:
+            return None
         except Exception:  # noqa: BLE001 - a checker fault is "no verdict", never a refusal
             return None

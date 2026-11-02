@@ -19,13 +19,14 @@ import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from wren.declared_defaults import (
     DeclarationError,
     ExcludeRows,
     RequireRateJoin,
+    SaleStatuses,
     read_declared_defaults,
     split_front_matter,
 )
@@ -95,6 +96,10 @@ class DeniedColumnsInvalid(ContextError):
 
 class DeclaredDefaultsInvalid(ContextError):
     code = "declared_defaults_invalid"
+
+
+class SemanticsInvalid(ContextError):
+    code = "semantics_invalid"
 
 
 class ContextChanged(ContextError):
@@ -210,6 +215,7 @@ class Snapshot:
     loader_identity: str
     denied: frozenset
     declarations: tuple
+    manifest: dict = field(default_factory=dict)
 
 
 def load_snapshot(project_root: Path, loader: Path | None = None) -> Snapshot:
@@ -264,6 +270,8 @@ def load_snapshot(project_root: Path, loader: Path | None = None) -> Snapshot:
         raise ContextLoaderIncompatible("the loader reports no content digest")
     if catalog.get("denied_columns_invalid") is True:
         raise DeniedColumnsInvalid(_denied_problems(catalog))
+    if catalog.get("semantics_invalid") is True:
+        raise SemanticsInvalid(_semantics_problems(catalog))
     after = project_digest(root)
     if before != after:
         raise ContextChanged("the project changed while it was being read")
@@ -273,8 +281,11 @@ def load_snapshot(project_root: Path, loader: Path | None = None) -> Snapshot:
     manifest = _read_manifest(root)
     _check_consistent(catalog, manifest)
     _check_denied_exist(denied, catalog)
+    _check_semantics(catalog, denied)
     try:
-        declarations = tuple(read_declared_defaults(root, manifest))
+        declarations = tuple(
+            read_declared_defaults(root, manifest, _catalog_enums(catalog))
+        )
     except DeclarationError as exc:
         problems = "; ".join(f"{path}: {message}" for path, message in exc.errors)
         raise DeclaredDefaultsInvalid(problems[:400]) from None
@@ -286,7 +297,46 @@ def load_snapshot(project_root: Path, loader: Path | None = None) -> Snapshot:
         loader_identity=loader_identity(loader),
         denied=denied,
         declarations=declarations,
+        manifest=manifest,
     )
+
+
+def _catalog_enums(catalog: dict) -> dict:
+    """``(model, column) -> values`` for every catalog column that lists ``enum_values``."""
+    return {
+        (m["name"], c["name"]): tuple(str(v["value"]) for v in c["enum_values"])
+        for m in catalog.get("models") or []
+        for c in m.get("columns") or []
+        if c.get("enum_values")
+    }
+
+
+def _semantics_problems(catalog: dict) -> str:
+    entries = [
+        f"{d.get('path')}: {d.get('entry')}"
+        for d in catalog.get("diagnostics") or []
+        if isinstance(d, dict) and d.get("kind") == "semantics_invalid"
+    ]
+    return "; ".join(entries)[:400] or "unreadable semantics declaration"
+
+
+def _check_semantics(catalog: dict, denied: frozenset) -> None:
+    """Every semantics entry must name something the project has and no denied column.
+
+    An entry that names an unknown model or view never fires, which would read as "nothing is
+    unverified here"; an entry whose text names a denied column would carry it into the
+    ``unverified`` list. Neither is served.
+    """
+    known = {m["name"] for m in catalog.get("models") or []} | {
+        v["name"] for v in catalog.get("views") or []
+    }
+    anywhere = frozenset(owner for owner, _ in denied)
+    for entry in catalog.get("semantics") or []:
+        unknown = sorted(set(entry["models"]) - known)
+        if unknown:
+            raise SemanticsInvalid(f"{entry['id']}: unknown model or view {unknown[0]}")
+        if _mentions_denied(f"{entry['id']} {entry['note']}", anywhere, denied):
+            raise SemanticsInvalid(f"{entry['id']}: names a denied column")
 
 
 def _denied_problems(catalog: dict) -> str:
@@ -323,6 +373,18 @@ def _read_manifest(root: Path) -> dict:
 
 def _check_consistent(catalog: dict, manifest: dict) -> None:
     """The engine runs ``target/mdl.json``; the agent reads the catalog. They must agree."""
+    manifest_views = {
+        v["name"]
+        for v in manifest.get("views") or []
+        if isinstance(v, dict) and "name" in v
+    }
+    catalog_views = {v["name"] for v in catalog.get("views") or []}
+    if manifest_views != catalog_views:
+        raise ContextInconsistent(
+            "target/mdl.json differs from the project sources in its views; run "
+            f"`wren context build` (only built: {sorted(manifest_views - catalog_views)}; "
+            f"only in sources: {sorted(catalog_views - manifest_views)})"
+        )
     built = {
         m["name"]: {c["name"] for c in m.get("columns") or []}
         for m in manifest.get("models") or []
@@ -477,7 +539,7 @@ def _front_ids(content: str) -> list[str]:
 
 
 def _declaration_columns(declaration) -> set:
-    if isinstance(declaration, ExcludeRows):
+    if isinstance(declaration, (ExcludeRows, SaleStatuses)):
         return {(declaration.column.model, declaration.column.column)}
     if isinstance(declaration, RequireRateJoin):
         refs = [declaration.rate_currency, declaration.rate_date]
@@ -490,6 +552,8 @@ def _declaration_columns(declaration) -> set:
 def _declaration_models(declaration) -> set:
     if isinstance(declaration, ExcludeRows):
         return set(declaration.covered)
+    if isinstance(declaration, SaleStatuses):
+        return {declaration.column.model}
     models = {m for m, _ in _declaration_columns(declaration)}
     if isinstance(declaration, RequireRateJoin):
         models.add(declaration.rate_model)

@@ -20,13 +20,14 @@ from wren.context_adapter import (
     ContextReader,
     ContextUnparseable,
     DeniedColumnsInvalid,
+    SemanticsInvalid,
     Snapshot,
     load_snapshot,
     project_digest,
     resolve_loader,
     strip_denied_declaration,
 )
-from wren.declared_defaults import ColumnRef, ExcludeRows
+from wren.declared_defaults import ColumnRef, ExcludeRows, SaleStatuses
 
 
 # --- helpers ------------------------------------------------------------------------------------
@@ -236,6 +237,35 @@ def test_an_invalid_denylist_refuses_to_start(tmp_path):
         load_snapshot(root, loader)
 
 
+def test_an_unreadable_semantics_declaration_refuses_to_start(tmp_path):
+    root = project_dir(tmp_path)
+    catalog = good_catalog(
+        root,
+        semantics_invalid=True,
+        diagnostics=[
+            {
+                "kind": "semantics_invalid",
+                "path": "knowledge/rules/notes.md",
+                "entry": "semantics[1]: unknown field",
+            }
+        ],
+    )
+    loader = fake_loader(tmp_path, GOOD_PREPARED, catalog)
+    with pytest.raises(
+        SemanticsInvalid, match="knowledge/rules/notes.md: semantics.1.: unknown field"
+    ):
+        load_snapshot(root, loader)
+
+
+def test_a_semantics_flag_without_a_diagnostic_still_refuses(tmp_path):
+    root = project_dir(tmp_path)
+    loader = fake_loader(
+        tmp_path, GOOD_PREPARED, good_catalog(root, semantics_invalid=True)
+    )
+    with pytest.raises(SemanticsInvalid, match="unreadable semantics"):
+        load_snapshot(root, loader)
+
+
 # --- the real loader against a real project -----------------------------------------------------
 
 
@@ -263,6 +293,7 @@ def test_the_real_loader_snapshot_matches_the_python_digest(real_project):
     assert [d.id for d in snap.declarations] == [
         "exclude-test-orders",
         "convert-invoices-to-usd",
+        "count-paid-and-shipped",
     ]
     assert [m["name"] for m in snap.catalog["models"]] == [
         "customers",
@@ -754,3 +785,80 @@ def test_the_loaded_event_reports_budget_and_paging():
         "budget_bytes": 2048,
         "first_page_bytes": r.first_page_bytes(),
     }
+
+
+def semantics_front(entries: str) -> str:
+    return f"---\ndenied_columns: [customers.email]\nsemantics:\n{entries}---\nbody\n"
+
+
+def test_the_real_loader_carries_the_semantics_and_the_manifest(real_project):
+    snap = load_snapshot(real_project)
+    assert [e["id"] for e in snap.catalog["semantics"]] == [
+        "fiscal_calendar_bounds",
+        "revenue_definition_match",
+    ]
+    assert snap.catalog["semantics"][1]["models"] == ["usd_line_value"]
+    assert [v["name"] for v in snap.manifest["views"]] == ["usd_line_value"]
+    assert snap.catalog["views"][0]["guarantees"] == ["convert-invoices-to-usd"]
+    assert snap.declarations[2].domain == ("paid", "shipped", "cancelled", "pending")
+
+
+@pytest.mark.parametrize(
+    ("entries", "message"),
+    [
+        ("  - {id: a, models: [orders], note: x, extra: 1}\n", "semantics_invalid"),
+        ("  - {id: a, models: [ghosts], note: fine}\n", "a: unknown model or view ghosts"),
+        ("  - {id: a, models: [orders], note: 'Ranks by email domain.'}\n", "a: names a denied column"),
+        ("  - {id: a, models: [orders], note: 'Skips customers.email.'}\n", "denied"),
+        ("  - {id: customers-email, models: [orders], note: fine}\n", "names a denied column"),
+    ],
+)
+def test_a_semantics_entry_that_cannot_be_served_refuses_to_start(real_project, entries, message):
+    (real_project / "knowledge/rules/conventions.md").write_text(semantics_front(entries))
+    with pytest.raises((SemanticsInvalid, DeniedColumnsInvalid), match=message):
+        load_snapshot(real_project)
+
+
+def test_a_semantics_entry_may_name_a_view(real_project):
+    (real_project / "knowledge/rules/conventions.md").write_text(
+        semantics_front("  - {id: a, models: [usd_line_value, orders], note: fine}\n")
+    )
+    assert load_snapshot(real_project).catalog["semantics"][0]["models"] == [
+        "usd_line_value",
+        "orders",
+    ]
+
+
+def test_a_manifest_and_a_catalog_that_disagree_about_views_are_inconsistent(real_project):
+    manifest = real_project / "target/mdl.json"
+    built = json.loads(manifest.read_text())
+    built["views"] = []
+    manifest.write_text(json.dumps(built))
+    with pytest.raises(ContextInconsistent, match="views"):
+        load_snapshot(real_project)
+
+
+def test_a_sale_statuses_rule_is_listed_on_its_model_and_in_the_rules_summary():
+    rule = SaleStatuses(
+        id="paid-and-shipped",
+        column=ColumnRef("orders", "status"),
+        values=("paid",),
+        domain=("paid", "void"),
+        overridable_by_caller=True,
+        aggregated_only=False,
+    )
+    r = reader(
+        {
+            "models": [model("orders", "One row per order.", ("id", "status"))],
+            "knowledge_rules": [
+                {
+                    "path": "knowledge/rules/a.md",
+                    "content": "---\ndefaults:\n  - {id: paid-and-shipped, kind: sale_statuses}\n---\nbody\n",
+                }
+            ],
+        },
+        declarations=(rule,),
+    )
+    text = r.list()["text"]
+    assert "model orders: One row per order. [defaults: paid-and-shipped]" in text
+    assert "rule knowledge/rules/a.md: defaults: paid-and-shipped; columns: orders.status" in text

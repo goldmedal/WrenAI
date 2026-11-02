@@ -17,6 +17,11 @@ own exception family:
   (``unsupported_function``) and an unexpected planner error (``unsupported``) are form
   errors, not authorization failures;
 * failed in the engine (raised by ``execute``): the service counts it separately.
+
+Views are expanded in place before anything else looks at the statement: a view the statement
+reads becomes a marked subquery over the models behind it, so the denylist, source tracking
+(and with it authorization) and the declared rules see the models the view reads, and the view
+itself is exempt only from the rules its definition guarantees.
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from wren.declared_default_check import DefaultsChecker
-from wren.declared_default_fx import evaluate
+from wren.declared_default_fx import VIEW_MARK, evaluate
 from wren.read_only import UnsupportedFunctionError, check_read_only_query
 
 
@@ -96,8 +101,10 @@ FORM_CODES = frozenset(
         "positional_reference",
         "unsupported_function",
         "unsupported",
+        "cube_not_a_table",
     }
 )
+DUPLICATE_AGGREGATION = "duplicate_aggregation"
 RULE_VIOLATION = "rule_violation"
 NO_VERDICT = "no_verdict"
 OPERATORS = {
@@ -127,6 +134,7 @@ class Prepared(NamedTuple):
     labels: list
     checks: dict
     observed: dict
+    unverified: list
 
 
 class PrivateSQL(BaseModel):
@@ -158,8 +166,30 @@ class AdHocSQL:
         if not self.schema:
             raise ValueError("invalid_sql_models")
         self.denied = frozenset((m.lower(), c.lower()) for m, c in snapshot.denied)
+        catalog = snapshot.catalog
+        self.primary_keys = {
+            m["name"]: frozenset(m.get("primary_key") or []) for m in models
+        }
+        self.cube_names = {c["name"].lower() for c in catalog.get("cubes") or []}
+        self.cube_measures = {
+            member["name"].lower()
+            for cube in catalog.get("cubes") or []
+            for member in cube.get("measures") or []
+        }
+        self.model_columns = {
+            c.lower() for columns in self.schema.values() for c in columns
+        }
+        self.semantics = list(catalog.get("semantics") or [])
+        self.views, self.broken_views = self._read_views(snapshot, catalog)
         self.checker = DefaultsChecker(
-            snapshot.declarations, {"models": models}, "duckdb"
+            snapshot.declarations,
+            {"models": models},
+            "duckdb",
+            guarantees={
+                v["name"].lower(): v.get("guarantees") or []
+                for v in catalog.get("views") or []
+                if v.get("guarantees")
+            },
         )
         # Literals worth recording are the ones the project itself declares for a column.
         self.enums = {
@@ -170,6 +200,159 @@ class AdHocSQL:
             for c in m.get("columns") or []
             if c.get("enum_values")
         }
+
+    def _read_views(self, snapshot, catalog):
+        """The views the catalog lists, as parsed bodies over models: ``(usable, broken)``.
+
+        A body that does not parse as one query, or that reads anything but a bound model, is
+        broken: a statement that reads it is refused as ``unsupported_source`` rather than run
+        through a definition the host could not check.
+        """
+        statements = {
+            v["name"].lower(): v.get("statement")
+            for v in ((getattr(snapshot, "manifest", None) or {}).get("views") or [])
+            if isinstance(v, dict) and isinstance(v.get("name"), str)
+        }
+        usable, broken = {}, set()
+        for view in catalog.get("views") or []:
+            name = view["name"].lower()
+            statement = statements.get(name)
+            try:
+                if not isinstance(statement, str):
+                    raise ValueError("no statement")
+                body = sqlglot.parse_one(statement, read="duckdb")
+                if not isinstance(body, exp.Query):
+                    raise ValueError("not a query")
+                qualify(
+                    body.copy(),
+                    dialect="duckdb",
+                    schema=self.schema,
+                    validate_qualify_columns=True,
+                    identify=False,
+                )
+                if any(
+                    t.db or t.catalog or t.name not in self.schema
+                    for t in body.find_all(exp.Table)
+                ):
+                    raise ValueError("reads more than models")
+            except Exception:  # noqa: BLE001 - any unreadable view is unusable, never trusted
+                broken.add(name)
+                continue
+            usable[name] = body
+        return usable, broken
+
+    def _expand_views(self, tree):
+        """Replace every reference to a view by its marked body; return the names read."""
+        shadowed = {cte.alias.lower() for cte in tree.find_all(exp.CTE)}
+        read = []
+        for table in list(tree.find_all(exp.Table)):
+            name = table.name.lower()
+            if (
+                table.db
+                or table.catalog
+                or not isinstance(table.this, exp.Identifier)
+                or table.name in self.schema
+                or name in shadowed
+                or (name not in self.views and name not in self.broken_views)
+            ):
+                continue
+            if name in self.broken_views or any(
+                table.args.get(k) for k in ("pivots", "sample", "version", "hints")
+            ):
+                raise QueryFormError("unsupported_source")
+            alias = table.alias or table.name
+            body = exp.Subquery(
+                this=self.views[name].copy(),
+                alias=exp.TableAlias(this=exp.to_identifier(alias)),
+            )
+            body.meta[VIEW_MARK] = name
+            table.replace(body)
+            if name not in read:
+                read.append(name)
+        return tree, read
+
+    def _reject_cubes(self, tree):
+        """A cube is not a table and a measure is not a column: neither can be read by name.
+
+        Cubes answer through the engine's cube query, not through ``FROM <cube>`` or a measure
+        summed as if some model held it.
+        """
+        shadowed = {cte.alias.lower() for cte in tree.find_all(exp.CTE)}
+        for table in tree.find_all(exp.Table):
+            name = table.name.lower()
+            if (
+                name in self.cube_names
+                and table.name not in self.schema
+                and name not in shadowed
+            ):
+                raise QueryFormError("cube_not_a_table")
+        if not self.cube_measures:
+            return
+        defined = {a.alias.lower() for a in tree.find_all(exp.Alias)}
+        for aggregate in tree.find_all(exp.AggFunc):
+            for column in aggregate.find_all(exp.Column):
+                name = column.name.lower()
+                if (
+                    name in self.cube_measures
+                    and name not in self.model_columns
+                    and name not in defined
+                ):
+                    raise QueryFormError("cube_not_a_table")
+
+    @staticmethod
+    def _view_of(expression):
+        """The view whose body ``expression`` is (or sits inside), by name."""
+        node = expression
+        while node is not None:
+            name = node.meta.get(VIEW_MARK)
+            if name:
+                return name
+            node = node.parent
+        return None
+
+    def _duplicate_aggregation(self, scopes):
+        """An aggregate over a view's value in a select that joins the view to a model on a
+        column that is not the model's key: each view row can repeat once per matching model
+        row, and the aggregate counts it every time."""
+        for scope in scopes:
+            select = scope.expression
+            if not isinstance(select, exp.Select):
+                continue
+            views = {
+                alias
+                for alias, source in scope.sources.items()
+                if isinstance(source, Scope)
+                and isinstance(source.expression.parent, exp.Subquery)
+                and source.expression.parent.meta.get(VIEW_MARK)
+            }
+            if not views:
+                continue
+            aggregated = {
+                column.table
+                for aggregate in select.find_all(exp.AggFunc)
+                if aggregate.find_ancestor(exp.Select) is select
+                for column in aggregate.find_all(exp.Column)
+                if column.table in views
+            }
+            if not aggregated:
+                continue
+            conditions = [j.args.get("on") for j in select.args.get("joins") or []] + [
+                w.this for w in [select.args.get("where")] if w is not None
+            ]
+            for condition in conditions:
+                for node in condition.find_all(exp.EQ) if condition is not None else ():
+                    sides = (node.this, node.expression)
+                    if not all(isinstance(side, exp.Column) for side in sides):
+                        continue
+                    for mine, other in (sides, sides[::-1]):
+                        source = scope.sources.get(other.table)
+                        if (
+                            mine.table in aggregated
+                            and isinstance(source, exp.Table)
+                            and other.name not in self.primary_keys.get(source.name, ())
+                        ):
+                            return True
+        return False
 
     @staticmethod
     def _reject_unsupported_forms(tree):
@@ -188,7 +371,9 @@ class AdHocSQL:
         if tree.find(exp.PositionalColumn) is not None:
             raise QueryFormError("positional_reference")
 
-    def prepare(self, sql):
+    def prepare(self, sql, status_scopes=None):
+        """Plan ``sql``. ``status_scopes`` maps a ``sale_statuses`` rule id to the folded status
+        set the caller confirmed for it."""
         try:
             tree = sqlglot.parse_one(sql, read="duckdb")
         except sqlglot.errors.SqlglotError:
@@ -214,6 +399,10 @@ class AdHocSQL:
                 if t.db or t.catalog or not isinstance(t.this, exp.Identifier):
                     raise ValueError("external_source")
             self._reject_unsupported_forms(tree)
+            tree, views_read = self._expand_views(tree)
+            self._reject_cubes(tree)
+            if sum(1 for _ in tree.walk()) > 1000:
+                raise ValueError("complexity_limit")
             unqualified = tree.copy()
             tree = qualify(
                 tree,
@@ -260,15 +449,18 @@ class AdHocSQL:
                     elif not isinstance(src, Scope):
                         # Correlated references and ambiguous scope are not inferred.
                         raise ValueError("unresolved_column")
-                for projection in scope.expression.selects:
-                    self._projection(projection)
+                if self._view_of(scope.expression) is None:
+                    for projection in scope.expression.selects:
+                        self._projection(projection)
             if not physical:
                 raise ValueError("no_source")
-            verdict = evaluate(self.checker, unqualified)
+            verdict = evaluate(self.checker, unqualified, status_scopes)
             if verdict is None:
                 raise DeclaredDefaultUndetermined(NO_VERDICT)
             if verdict.violations:
                 raise DeclaredDefaultMissing(RULE_VIOLATION, verdict.violations)
+            if verdict.undetermined:
+                raise DeclaredDefaultUndetermined(NO_VERDICT, verdict.undetermined)
             # COUNT(*) has no Column nodes; its table still receives authorization.
             conditions = {}
             leaves = self._leaves(scopes[-1])
@@ -284,6 +476,16 @@ class AdHocSQL:
             observed = self._observed(tree, scopes, sources)
             if verdict.fx_missing_rate_handling:
                 observed["fx_missing_rate_handling"] = verdict.fx_missing_rate_handling
+            unverified = list(verdict.unverified)
+            if self._duplicate_aggregation(scopes):
+                observed["duplicate_aggregation"] = True
+                unverified.append(DUPLICATE_AGGREGATION)
+            touched = {name.lower() for name in sources} | set(views_read)
+            unverified += [
+                entry["id"]
+                for entry in self.semantics
+                if touched & {m.lower() for m in entry["models"]}
+            ]
             # Strip every user/model alias from the public schema. Even a quoted
             # alias containing a private SQL statement must not leave this host.
             return Prepared(
@@ -291,11 +493,9 @@ class AdHocSQL:
                 {k: sorted(v) for k, v in sources.items()},
                 conditions,
                 labels,
-                {
-                    rule: {"applicable": c["applicable"], "result": c["result"]}
-                    for rule, c in verdict.checks.items()
-                },
+                {rule: dict(c) for rule, c in verdict.checks.items()},
                 observed,
+                list(dict.fromkeys(unverified)),
             )
         except (QueryFormError, PermissionError):
             # Rewritable rejections, shape errors and denials keep their own class.
@@ -501,7 +701,7 @@ class AdHocSQL:
         return "_".join([operation, *dict.fromkeys(cols)])[:96]
 
     def execute(self, prepared):
-        sql, sources, conditions, labels, checks, observed = prepared
+        sql, sources, conditions, labels, checks, observed, unverified = prepared
         table = self.project.engine.query(sql, 101, read_only=True)
         self.project.current()
         if table.num_rows > 100 or len(table.columns) != len(labels):
@@ -538,4 +738,5 @@ class AdHocSQL:
             "sources": sources,
             "checks": checks,
             "observed": observed,
+            "unverified": unverified,
         }

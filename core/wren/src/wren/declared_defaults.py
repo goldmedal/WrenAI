@@ -6,7 +6,7 @@ closed: nothing is inferred from the rule prose, and an invalid declaration is
 an error, never a silent skip. The front-matter itself stays in the rule text a
 model reads; this module only reads it.
 
-Two kinds exist:
+Three kinds exist:
 
 ``exclude_rows``
     Statements that read a covered model must exclude rows where
@@ -18,6 +18,12 @@ Two kinds exist:
     keys tighten it (both checked by ``declared_default_fx``): ``match: single``
     requires the rate source to yield one row per amount row, and ``base_currency``
     names the currency whose amounts need no rate and must survive the join.
+``sale_statuses``
+    Statements that read the status column's model must keep exactly the declared set of
+    status values (``values``) out of the column's full ``domain`` (or, when the declaration
+    gives none, the ``enum_values`` the project lists for the column). What counts is the set
+    the filter actually retains, computed by ``declared_default_status``; the caller may confirm
+    a different set only when ``overridable_by_caller`` is true.
 
 This module parses and validates declarations; ``declared_default_check`` applies
 them to a parsed query.
@@ -39,7 +45,8 @@ LEGACY_RULES_FILE = "instructions.md"
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 CURRENCY_PATTERN = re.compile(r"^[A-Za-z0-9]{1,16}$")
 MAX_DECLARATIONS = 8
-KINDS = ("exclude_rows", "require_rate_join")
+KINDS = ("exclude_rows", "require_rate_join", "sale_statuses")
+MAX_STATUS_VALUES = 64
 _FENCE = "---"
 
 
@@ -90,7 +97,25 @@ class RequireRateJoin:
     match: Literal["single"] | None = None
 
 
-Declaration = ExcludeRows | RequireRateJoin
+@dataclass(frozen=True)
+class SaleStatuses:
+    """Status values a statement must keep. ``values`` and ``domain`` keep the declared case;
+    comparisons fold it (``fold``)."""
+
+    id: str
+    column: ColumnRef
+    values: tuple[str, ...]
+    domain: tuple[str, ...]
+    overridable_by_caller: bool
+    aggregated_only: bool
+
+
+Declaration = ExcludeRows | RequireRateJoin | SaleStatuses
+
+
+def fold(value: str) -> str:
+    """The comparison form of a status value."""
+    return value.casefold()
 
 
 def split_front_matter(text: str) -> tuple[str | None, str]:
@@ -134,6 +159,36 @@ def models_of(manifest: dict) -> dict[str, set[str]]:
     return models
 
 
+def enums_of(manifest: dict) -> dict[tuple[str, str], tuple[str, ...]]:
+    """``(model, column) -> values`` for every column that lists ``enum_values``.
+
+    Reads the column ``properties`` of a manifest in either key spelling; a mapping lists its
+    keys, a list lists each item's ``value``. Values are text.
+    """
+    found: dict[tuple[str, str], tuple[str, ...]] = {}
+    for item in manifest.get("models") or []:
+        if not (isinstance(item, dict) and isinstance(item.get("name"), str)):
+            continue
+        for column in item.get("columns") or []:
+            if not (isinstance(column, dict) and isinstance(column.get("name"), str)):
+                continue
+            properties = column.get("properties")
+            if not isinstance(properties, dict):
+                continue
+            raw = properties.get("enum_values", properties.get("enumValues"))
+            values: list[str] = []
+            if isinstance(raw, dict):
+                values = [str(key) for key in raw]
+            elif isinstance(raw, list):
+                for entry in raw:
+                    value = entry.get("value") if isinstance(entry, dict) else entry
+                    if value is not None and not isinstance(value, (dict, list)):
+                        values.append(str(value))
+            if values:
+                found[(item["name"], column["name"])] = tuple(values)
+    return found
+
+
 def many_to_one_edges(manifest: dict) -> list[tuple[str, str]]:
     """``(many, one)`` model pairs of every MANY_TO_ONE relationship."""
     edges: list[tuple[str, str]] = []
@@ -175,8 +230,13 @@ def covered_models(
 
 
 class _Parser:
-    def __init__(self, manifest: dict) -> None:
+    def __init__(
+        self,
+        manifest: dict,
+        enums: dict[tuple[str, str], tuple[str, ...]] | None = None,
+    ) -> None:
         self.models = models_of(manifest)
+        self.enums = {**enums_of(manifest), **(enums or {})}
         self.edges = many_to_one_edges(manifest)
         self.errors: list[tuple[str, str]] = []
         self.ids: set[str] = set()
@@ -422,6 +482,77 @@ class _Parser:
             )
         )
 
+    def status_values(self, path: str, value: object, label: str) -> tuple[str, ...]:
+        if (
+            not isinstance(value, list)
+            or not value
+            or len(value) > MAX_STATUS_VALUES
+            or not all(isinstance(v, str) and v.strip() and len(v) <= 64 for v in value)
+        ):
+            self.error(
+                path,
+                f"{label} must be a non-empty list of at most {MAX_STATUS_VALUES} "
+                "non-empty strings",
+            )
+            return ()
+        if len({fold(v) for v in value}) != len(value):
+            self.error(path, f"{label} lists a value twice (case is ignored)")
+            return ()
+        return tuple(value)
+
+    def sale_statuses(self, path: str, item: dict, rule_id: str) -> None:
+        self.check_keys(
+            path,
+            item,
+            {
+                "id",
+                "kind",
+                "column",
+                "values",
+                "domain",
+                "overridable_by_caller",
+                "when",
+            },
+        )
+        column = self.column(path, item.get("column"), "column")
+        values = self.status_values(path, item.get("values"), "values")
+        overridable = item.get("overridable_by_caller", False)
+        if type(overridable) is not bool:
+            self.error(path, "'overridable_by_caller' must be true or false")
+            overridable = False
+        aggregated_only = self.when(path, item)
+        domain: tuple[str, ...] = ()
+        if column is not None:
+            if item.get("domain") is not None:
+                domain = self.status_values(path, item.get("domain"), "domain")
+            else:
+                listed = self.enums.get((column.model, column.column), ())
+                domain = tuple(listed)
+                if not domain:
+                    self.error(
+                        path,
+                        "no 'domain' and the column lists no enum_values: the full "
+                        "value domain is unknown",
+                    )
+                elif len({fold(v) for v in domain}) != len(domain):
+                    self.error(path, "enum_values list a value twice (case is ignored)")
+                    domain = ()
+        if column is None or not values or not domain:
+            return
+        if not {fold(v) for v in values} <= {fold(v) for v in domain}:
+            self.error(path, "values must all belong to the domain")
+            return
+        self.declarations.append(
+            SaleStatuses(
+                id=rule_id,
+                column=column,
+                values=values,
+                domain=domain,
+                overridable_by_caller=overridable,
+                aggregated_only=aggregated_only,
+            )
+        )
+
     def file(self, project_path: Path, file: Path) -> None:
         label = file.relative_to(project_path).as_posix()
         text = file.read_text(encoding="utf-8")
@@ -461,20 +592,25 @@ class _Parser:
                 self.exclude_rows(path, item, rule_id)
             elif kind == "require_rate_join":
                 self.require_rate_join(path, item, rule_id)
+            elif kind == "sale_statuses":
+                self.sale_statuses(path, item, rule_id)
             else:
                 self.error(path, f"unknown kind; expected one of {', '.join(KINDS)}")
 
 
 def load_declarations(
-    project_path: Path, manifest: dict
+    project_path: Path,
+    manifest: dict,
+    enums: dict[tuple[str, str], tuple[str, ...]] | None = None,
 ) -> tuple[list[Declaration], list[tuple[str, str]]]:
     """Parse and validate every declaration against the manifest.
 
     Returns the declarations and the ``(path, message)`` errors; any error voids
     the declarations (a partial rule set must never be enforced), and a project
-    with no front-matter yields ``([], [])``.
+    with no front-matter yields ``([], [])``. ``enums`` overrides what the manifest lists
+    for a column's values (the catalog's ``enum_values``, when the caller has the catalog).
     """
-    parser = _Parser(manifest)
+    parser = _Parser(manifest, enums)
     for file in _rules_files(project_path):
         parser.file(project_path, file)
     if len(parser.ids) > MAX_DECLARATIONS:
@@ -485,9 +621,13 @@ def load_declarations(
     return ([] if parser.errors else parser.declarations), parser.errors
 
 
-def read_declared_defaults(project_path: Path, manifest: dict) -> list[Declaration]:
+def read_declared_defaults(
+    project_path: Path,
+    manifest: dict,
+    enums: dict[tuple[str, str], tuple[str, ...]] | None = None,
+) -> list[Declaration]:
     """The project's declarations; any invalid one raises ``DeclarationError``."""
-    declarations, errors = load_declarations(project_path, manifest)
+    declarations, errors = load_declarations(project_path, manifest, enums)
     if errors:
         raise DeclarationError(errors)
     return declarations

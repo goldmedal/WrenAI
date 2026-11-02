@@ -20,10 +20,10 @@ EXAMPLES = Path(__file__).resolve().parents[4] / "examples/serve-agent"
 FAKE_RUNTIME = Path(__file__).parent / "fixtures/fake_runtime.js"
 
 GOOD = "SELECT COUNT(*) FROM customers"
-ORDERS = "SELECT COUNT(*) FROM orders WHERE NOT is_test"
-REJECTED = "SELECT SUM(amt) FROM orders WHERE NOT is_test"
+ORDERS = "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
+REJECTED = "SELECT SUM(amt) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
 ENGINE_FAILS = (
-    "SELECT COUNT(*) FROM orders WHERE NOT is_test AND CAST('abc' AS INTEGER) = 1"
+    "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped') AND CAST('abc' AS INTEGER) = 1"
 )
 
 
@@ -235,7 +235,7 @@ def test_the_total_follows_max_sql_attempts(scripted):
 def test_a_statement_the_checker_cannot_judge_is_returned_once(scripted, monkeypatch):
     import wren.agent_sql as agent_sql  # noqa: PLC0415
 
-    monkeypatch.setattr(agent_sql, "evaluate", lambda checker, ast: None)
+    monkeypatch.setattr(agent_sql, "evaluate", lambda checker, ast, scopes=None: None)
     s = scripted()
     out = finished(s, ask(s, ORDERS, ORDERS, GOOD))
     assert out == {"status": "unavailable", "reason": "worker"}
@@ -294,7 +294,7 @@ def test_a_continued_task_keeps_its_budget(scripted):
 
 def test_a_function_miss_is_rewritten_inside_the_same_task_and_is_not_terminal(scripted):
     s = scripted()
-    out = s.execute(ask(s, "SELECT COUNT(*) FROM orders WHERE NOT is_test AND order_date < now()", ORDERS))
+    out = s.execute(ask(s, "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped') AND order_date < now()", ORDERS))
     assert out["status"] == "completed" and out["result"]["rows"] == [{"c1": 12}]
     assert [(e["code"], e["sub_code"]) for e in events(s, "private_sql_rejected")] == [
         ("unsupported_query", "unsupported_function")
@@ -305,7 +305,7 @@ def test_a_function_miss_is_rewritten_inside_the_same_task_and_is_not_terminal(s
 
 def test_function_misses_consume_the_rejection_budget(scripted):
     s = scripted()
-    miss = "SELECT now() FROM orders WHERE NOT is_test"
+    miss = "SELECT now() FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
     out = finished(s, ask(s, miss, miss, miss, GOOD))
     assert out == {"status": "unavailable", "reason": "worker"}
     assert exhausted(s) == [{"kind": "rejected", "attempts": 3}]
@@ -335,9 +335,9 @@ def test_an_undetermined_statement_counts_toward_the_rejection_total(scripted, m
     real = agent_sql.evaluate
     calls = []
 
-    def first_undetermined(checker, ast):
+    def first_undetermined(checker, ast, scopes=None):
         calls.append(1)
-        return None if len(calls) == 1 else real(checker, ast)
+        return None if len(calls) == 1 else real(checker, ast, scopes)
 
     monkeypatch.setattr(agent_sql, "evaluate", first_undetermined)
     s = scripted()

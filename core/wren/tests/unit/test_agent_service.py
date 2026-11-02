@@ -20,11 +20,16 @@ from wren.agent_service import (  # noqa: E402
     Ask,
     Continue,
     Ref,
+    StatusScopeUnresolved,
     build_mcp,
     create_service,
     execution_from_config,
+    parse_status_answer,
     read_policy_presets,
+    safe,
     stage_bundle,
+    status_clarifications,
+    unavailable_reason,
 )
 from wren.context import build_json  # noqa: E402
 from wren.context_adapter import ContextLoaderUnavailable, resolve_loader  # noqa: E402
@@ -88,7 +93,7 @@ def service(tmp_path):
 
 
 COUNTS = {
-    "orders": "SELECT COUNT(*) FROM orders WHERE NOT is_test",
+    "orders": "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')",
     "customers": "SELECT COUNT(*) FROM customers",
 }
 
@@ -204,7 +209,7 @@ def test_governed_run_sql_answers_a_rejected_statement_without_running_it(servic
     assert missing == {
         "error": "declared_default_missing",
         "code": "rule_violation",
-        "rules": ["exclude-test-orders"],
+        "rules": ["exclude-test-orders", "count-paid-and-shipped:missing"],
         "hint": missing["hint"],
     }
     broken = execute(s, request(s).model_copy(update={"sql": "SELECT COUNT(*) FROM"}))
@@ -1228,3 +1233,404 @@ def test_describe_data_has_its_own_disclosure_gate(service, monkeypatch):
     install_invoker(monkeypatch, s2, lambda cb: {"evidence": cb("describe_data", {})["evidence"]})
     with pytest.raises(PermissionError):
         s2.execute(ask_request(s2))
+
+
+# -- the status-scope clarification chain ---------------------------------------------------------
+
+RULE = "count-paid-and-shipped"
+PAID = "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status = 'paid'"
+DEFAULT_SET = "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
+NO_TEST_FILTER = "SELECT COUNT(*) FROM orders WHERE status = 'paid'"
+NO_TEST_FILTER_DEFAULT_SET = "SELECT COUNT(*) FROM orders WHERE status IN ('paid', 'shipped')"
+
+
+def sequence(s):
+    return [
+        e["event"]
+        for e in s.audit
+        if e.get("event", "").startswith(("private_sql", "task_", "caller_scope"))
+    ]
+
+
+def events_named(s, name):
+    return [e for e in s.audit if e.get("event") == name]
+
+
+def worker_sees(monkeypatch, s, invoke, seen=None):
+    """Install ``invoke`` as the private runtime, keeping each request it was given."""
+    real = s.ipc.call
+
+    def call(op, **kwargs):
+        if op == "invoke":
+            if seen is not None:
+                seen.append(json.loads(kwargs["request"]))
+            return invoke(kwargs["callback"])
+        return real(op, **kwargs)
+
+    monkeypatch.setattr(s.ipc, "call", call)
+
+
+def asking(s, session, revision, request_id, reply_to=None):
+    return Ask(
+        session_id=session,
+        request_id=request_id,
+        expected_revision=revision,
+        capability="analytics",
+        question="How many paid orders",
+        reply_to=reply_to,
+    )
+
+
+def answering(response, session, revision, request_id, answer):
+    return Continue(
+        session_id=session,
+        request_id=request_id,
+        expected_revision=revision,
+        continuation_ref=response["continuation_ref"],
+        answer=answer,
+    )
+
+
+def internal_of(s, response):
+    return s.sessions[response["session_id"]]["evidence"][response["evidence_ref"]][
+        "internal"
+    ]
+
+
+def clarifying(sql, out):
+    def invoke(callback):
+        out.append(callback("run_sql", {"sql": sql}))
+        return callback("clarify", {"missing": "status_scope"})
+
+    return invoke
+
+
+def finishing(sql, out=None):
+    def invoke(callback):
+        answer = callback("run_sql", {"sql": sql})
+        if out is not None:
+            out.append(answer)
+        return {"evidence": answer["evidence"]} if "evidence" in answer else answer
+
+    return invoke
+
+
+def test_the_status_scope_chain_from_violation_to_confirmed_scope(service, monkeypatch):
+    s = service(profile="adhoc")
+    rejected = []
+    worker_sees(monkeypatch, s, clarifying(PAID, rejected))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    response = s.execute(r)
+    assert rejected[0]["error"] == "declared_default_missing"
+    assert rejected[0]["rules"] == [f"{RULE}:subset"]
+    assert "clarify with missing=status_scope" in rejected[0]["hint"]
+    assert response["status"] == "needs_clarification"
+    assert response["question"] == "請指定要分析的訂單狀態"
+    assert not events_named(s, "private_sql")
+
+    seen, completed_sql = [], []
+    worker_sees(monkeypatch, s, finishing(PAID, completed_sql), seen)
+    done = s.continue_task(answering(response, r.session_id, 1, "two", "Paid"))
+    assert done["status"] == "completed"
+    assert done["result"]["rows"] == [{"c1": 6}]
+    assert seen[0]["previous"] == {
+        "original_question": "How many paid orders",
+        "user_answer": "Paid",
+        "status_scope": ["paid"],
+    }
+    internal = internal_of(s, done)
+    assert internal["checks"][RULE] == {
+        "applicable": True,
+        "result": "satisfied_by_caller_scope",
+        "scope": ["paid"],
+    }
+    assert internal["caller_scope"] == {"rule": RULE, "values": ["paid"]}
+    assert internal["checks"]["exclude-test-orders"]["result"] == "satisfied"
+    confirmed = events_named(s, "caller_scope_confirmed")
+    assert [(e["request_id"], e["rule"], e["scope"]) for e in confirmed] == [
+        ("two", RULE, ["paid"])
+    ]
+    assert sequence(s) == [
+        "private_sql_attempt",
+        "private_sql_rejected",
+        "task_completed",
+        "caller_scope_confirmed",
+        "private_sql_attempt",
+        "private_sql",
+        "task_completed",
+    ]
+    attempts = events_named(s, "private_sql_rejected")
+    assert [e["attempt"] for e in attempts] == [1]
+    assert "caller_scope" not in json.dumps(s.evidence(Ref(session_id=r.session_id, evidence_ref=done["evidence_ref"])))
+
+
+def test_the_clarification_is_kept_in_both_wordings_and_only_the_plain_one_is_sent(
+    service, monkeypatch
+):
+    s = service(profile="adhoc")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    response = s.execute(r)
+    pending = s.sessions[r.session_id]["pending"][response["continuation_ref"]]
+    messages = pending["clarification_messages"]
+    assert pending["status_rule"] == RULE
+    assert response["question"] == messages["without_disclosure"]
+    assert "paid" in messages["with_disclosure"] and "shipped" in messages["with_disclosure"]
+    assert "cancelled" not in messages["with_disclosure"]
+    assert "pending" not in messages["with_disclosure"]
+    for text in messages.values():
+        assert "email" not in text and "status" not in text
+    assert not any(v in messages["without_disclosure"] for v in ("paid", "shipped", "cancelled"))
+    assert response["question"] == status_clarifications(s.status_rules[RULE])["without_disclosure"]
+
+
+def test_a_confirmed_scope_changes_only_the_status_comparison(service, monkeypatch):
+    s = service(profile="adhoc")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    response = s.execute(r)
+    # the test-row rule is untouched: the same statement without it is still refused for it
+    answers = []
+    worker_sees(monkeypatch, s, finishing(NO_TEST_FILTER, answers))
+    with pytest.raises(ValueError, match="invalid_evidence"):
+        s.continue_task(answering(response, r.session_id, 1, "two", "paid"))
+    assert answers[0]["rules"] == ["exclude-test-orders"]
+    # the confirmed set replaces the declared one as the target, so the declared set is a superset
+    s = service(profile="adhoc")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    response = s.execute(r)
+    answers = []
+    worker_sees(monkeypatch, s, finishing(DEFAULT_SET, answers))
+    with pytest.raises(ValueError, match="invalid_evidence"):
+        s.continue_task(answering(response, r.session_id, 1, "two", "paid"))
+    assert answers[0]["rules"] == [f"{RULE}:superset"]
+    s = service(profile="adhoc")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    response = s.execute(r)
+    worker_sees(monkeypatch, s, finishing(PAID))
+    assert s.continue_task(answering(response, r.session_id, 1, "two", "paid"))["status"] == "completed"
+
+
+def test_a_follow_up_to_the_result_inherits_the_scope_and_a_new_task_does_not(
+    service, monkeypatch
+):
+    s = service(profile="adhoc")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    session = s.open()["session_id"]
+    response = s.execute(asking(s, session, 0, "one"))
+    worker_sees(monkeypatch, s, finishing(PAID))
+    done = s.continue_task(answering(response, session, 1, "two", "paid"))
+
+    seen, answers = [], []
+    worker_sees(monkeypatch, s, finishing(PAID, answers), seen)
+    follow = s.execute(asking(s, session, 2, "three", done["result_ref"]))
+    assert follow["status"] == "completed"
+    assert seen[0]["previous"]["status_scope"] == ["paid"]
+    assert internal_of(s, follow)["checks"][RULE]["result"] == "satisfied_by_caller_scope"
+    inherited = events_named(s, "caller_scope_inherited")
+    assert [(e["request_id"], e["rule"], e["scope"]) for e in inherited] == [
+        ("three", RULE, ["paid"])
+    ]
+
+    # a follow-up that moves the scope is a violation again, and asks again
+    widened = []
+    worker_sees(monkeypatch, s, clarifying(DEFAULT_SET, widened))
+    again = s.execute(asking(s, session, 3, "four", done["result_ref"]))
+    assert widened[0]["rules"] == [f"{RULE}:superset"]
+    assert again["status"] == "needs_clarification"
+
+    # a task that is not a follow-up starts with no scope
+    fresh = []
+    worker_sees(monkeypatch, s, clarifying(PAID, fresh))
+    s.execute(asking(s, session, 4, "five"))
+    assert fresh[0]["rules"] == [f"{RULE}:subset"]
+    assert len(events_named(s, "caller_scope_inherited")) == 2
+
+
+def test_the_budget_runs_on_through_a_clarification(service, monkeypatch):
+    s = service(profile="adhoc")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    response = s.execute(r)
+    budget = s.sessions[r.session_id]["pending"][response["continuation_ref"]]["budget"]
+    assert (budget.attempts, budget.rejected) == (1, 1)
+    answers = []
+
+    def invoke(callback):
+        answers.append(callback("run_sql", {"sql": NO_TEST_FILTER}))
+        answers.append(callback("run_sql", {"sql": NO_TEST_FILTER}))
+        answers.append(callback("run_sql", {"sql": NO_TEST_FILTER}))
+        return {"value": None}
+
+    worker_sees(monkeypatch, s, invoke)
+    with pytest.raises(Exception) as caught:
+        s.continue_task(answering(response, r.session_id, 1, "two", "paid"))
+    assert unavailable_reason(caught.value) == "worker"
+    # one rejection before the clarification, two after it, then the third ends the task
+    assert [e["attempt"] for e in events_named(s, "private_sql_rejected")] == [1, 2, 3]
+    assert events_named(s, "private_sql_budget_exhausted")[0]["kind"] == "rejected"
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("paid", {"paid"}),
+        (" Paid , SHIPPED ", {"paid", "shipped"}),
+        ("paid、shipped", {"paid", "shipped"}),
+        ("paid，shipped", {"paid", "shipped"}),
+        ("paid; shipped", {"paid", "shipped"}),
+        ("'paid', \"shipped\"", {"paid", "shipped"}),
+        ("paid\nshipped\n", {"paid", "shipped"}),
+        ("paid,,paid", {"paid"}),
+        ("", None),
+        (" , ", None),
+        ("paid and shipped", None),
+        ("paid, refunded", None),
+        ("all", None),
+    ],
+)
+def test_the_answer_is_read_as_a_set_of_statuses_inside_the_domain(
+    service, answer, expected
+):
+    rule = service(profile="adhoc").status_rules[RULE]
+    parsed = parse_status_answer(answer, rule) if answer else None
+    assert parsed == (None if expected is None else frozenset(expected))
+
+
+def test_an_answer_outside_the_domain_is_asked_again_once_and_then_fails_the_task(
+    service, monkeypatch
+):
+    s = service(profile="adhoc")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    first = s.execute(r)
+    ran = []
+    worker_sees(monkeypatch, s, finishing(PAID, ran))
+
+    second = s.continue_task(answering(first, r.session_id, 1, "two", "refunded"))
+    assert second["status"] == "needs_clarification"
+    assert second["continuation_ref"] != first["continuation_ref"]
+    assert second["question"] == first["question"]
+    assert not ran and not events_named(s, "caller_scope_confirmed")
+    again = s.sessions[r.session_id]["pending"][second["continuation_ref"]]
+    assert again["retried"] is True and again["status_rule"] == RULE
+    assert again["budget"] is s.sessions[r.session_id]["pending"][first["continuation_ref"]]["budget"]
+
+    with pytest.raises(StatusScopeUnresolved) as caught:
+        s.continue_task(answering(second, r.session_id, 2, "three", "cancelled-ish"))
+    assert unavailable_reason(caught.value) == "worker"
+    failed = events_named(s, "task_failed")
+    assert (failed[-1]["reason"], failed[-1]["detail"]) == (
+        "status_scope_unresolved",
+        "status_scope_unresolved",
+    )
+    assert not ran
+    with pytest.raises(ValueError, match="context_changed"):
+        s.continue_task(answering(second, r.session_id, 2, "four", "paid"))
+
+
+def test_the_second_unusable_answer_reaches_the_planner_as_unavailable_worker(
+    service, monkeypatch
+):
+    import asyncio
+
+    s = service(profile="adhoc")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    first = s.execute(r)
+    second = s.continue_task(answering(first, r.session_id, 1, "two", "nope"))
+    out = asyncio.run(
+        safe(s.continue_task, answering(second, r.session_id, 2, "three", "still nope"))
+    )
+    assert out == {"status": "unavailable", "reason": "worker"}
+
+
+def test_a_usable_answer_after_an_unusable_one_completes_the_task(service, monkeypatch):
+    s = service(profile="adhoc")
+    worker_sees(monkeypatch, s, clarifying(PAID, []))
+    r = asking(s, s.open()["session_id"], 0, "one")
+    first = s.execute(r)
+    second = s.continue_task(answering(first, r.session_id, 1, "two", "nope"))
+    worker_sees(monkeypatch, s, finishing(PAID))
+    done = s.continue_task(answering(second, r.session_id, 2, "three", "paid"))
+    assert done["status"] == "completed"
+    assert internal_of(s, done)["caller_scope"]["values"] == ["paid"]
+
+
+def test_clarify_for_a_status_scope_is_refused_when_the_caller_may_not_override_it(
+    service, monkeypatch
+):
+    rules = service.root / "knowledge/rules/conventions.md"
+    rules.write_text(
+        rules.read_text().replace(
+            "overridable_by_caller: true", "overridable_by_caller: false"
+        )
+    )
+    s = service(profile="adhoc")
+    assert s.status_rules[RULE].overridable_by_caller is False
+    out = []
+
+    def invoke(callback):
+        out.append(callback("run_sql", {"sql": PAID}))
+        out.append(callback("clarify", {"missing": "status_scope"}))
+        out.append(callback("run_sql", {"sql": DEFAULT_SET}))
+        return {"evidence": out[-1]["evidence"]}
+
+    worker_sees(monkeypatch, s, invoke)
+    done = s.execute(asking(s, s.open()["session_id"], 0, "one"))
+    assert out[0]["rules"] == [f"{RULE}:subset"]
+    assert "status_scope" not in out[0]["hint"]
+    assert out[1] == {"error": "clarification_not_applicable"}
+    assert done["status"] == "completed" and done["result"]["rows"] == [{"c1": 12}]
+    assert not s.sessions[done["session_id"]]["pending"]
+
+
+def test_clarify_for_a_status_scope_needs_a_violation_of_this_task(service, monkeypatch):
+    s = service(profile="adhoc")
+    out = []
+
+    def invoke(callback):
+        out.append(callback("clarify", {"missing": "status_scope"}))
+        out.append(callback("run_sql", {"sql": NO_TEST_FILTER_DEFAULT_SET}))
+        out.append(callback("clarify", {"missing": "status_scope"}))
+        out.append(callback("run_sql", {"sql": DEFAULT_SET}))
+        return {"evidence": out[-1]["evidence"]}
+
+    worker_sees(monkeypatch, s, invoke)
+    response = s.execute(asking(s, s.open()["session_id"], 0, "one"))
+    # the exclusion rule was broken, not the status rule: asking about statuses cannot help
+    assert out[0] == {"error": "clarification_not_applicable"}
+    assert out[1]["rules"] == ["exclude-test-orders"]
+    assert out[2] == {"error": "clarification_not_applicable"}
+    assert response["status"] == "completed"
+
+
+def test_other_clarifications_are_unchanged_and_status_scope_needs_sql(service, monkeypatch):
+    s = service(profile="adhoc")
+
+    def invoke(callback):
+        with pytest.raises(ValueError, match="invalid_clarification"):
+            callback("clarify", {"missing": "weekly_target"})
+        with pytest.raises(ValueError, match="invalid_clarification"):
+            callback("clarify", {"missing": "status_scope", "extra": 1})
+        callback("run_sql", {"sql": PAID})
+        s.capabilities["analytics"]["sql"] = False
+        with pytest.raises(ValueError, match="invalid_clarification"):
+            callback("clarify", {"missing": "status_scope"})
+        s.capabilities["analytics"]["sql"] = True
+        return callback("clarify", {"missing": "analysis_definition"})
+
+    worker_sees(monkeypatch, s, invoke)
+    assert s.execute(asking(s, s.open()["session_id"], 0, "one"))["status"] == "needs_clarification"
+
+
+def test_a_direct_caller_is_not_pointed_at_a_clarification_it_cannot_make(service):
+    s = service()
+    out = execute(s, request(s).model_copy(update={"sql": PAID}))
+    assert (out["error"], out["rules"]) == ("declared_default_missing", [f"{RULE}:subset"])
+    assert "clarify" not in out["hint"] and "status_scope" not in out["hint"]
+    assert [e["event"] for e in s.audit if e.get("event", "").startswith("private_sql_rej")] == [
+        "private_sql_rejected"
+    ]

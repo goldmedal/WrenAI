@@ -13,6 +13,7 @@ from wren.declared_defaults import (
     DeclarationError,
     ExcludeRows,
     RequireRateJoin,
+    SaleStatuses,
     covered_models,
     load_declarations,
     many_to_one_edges,
@@ -354,3 +355,118 @@ def test_the_new_rate_keys_are_not_accepted_on_an_exclusion_rule(project):
     declare(project, EXCLUDE + "    base_currency: USD\n")
     _, errors = parse(project)
     assert [m for _, m in errors] == ["unknown field 'base_currency'"]
+
+
+SALE = """\
+  - id: paid-and-shipped
+    kind: sale_statuses
+    column: orders.status
+    values: [paid, shipped]
+    domain: [paid, shipped, cancelled, pending]
+"""
+
+
+def test_a_sale_statuses_rule_keeps_its_declared_case_and_defaults_to_not_overridable(
+    project,
+):
+    declare(project, SALE)
+    declarations, errors = parse(project)
+    assert errors == []
+    (rule,) = declarations
+    assert isinstance(rule, SaleStatuses)
+    assert (rule.column.model, rule.column.column) == ("orders", "status")
+    assert rule.values == ("paid", "shipped")
+    assert rule.domain == ("paid", "shipped", "cancelled", "pending")
+    assert rule.overridable_by_caller is False and rule.aggregated_only is False
+
+
+def test_a_sale_statuses_rule_may_be_overridable_and_aggregated_only(project):
+    declare(project, SALE + "    overridable_by_caller: true\n    when: aggregated\n")
+    (rule,) = parse(project)[0]
+    assert rule.overridable_by_caller is True and rule.aggregated_only is True
+
+
+def test_the_domain_defaults_to_the_enum_values_the_catalog_gives(project):
+    declare(project, mutate(SALE, "    domain: [paid, shipped, cancelled, pending]\n", ""))
+    declarations, errors = parse(project)
+    assert declarations == []
+    assert len(errors) == 1 and "no 'domain'" in errors[0][1]
+    enums = {("orders", "status"): ("Paid", "Shipped", "Cancelled")}
+    declarations, errors = load_declarations(project, build_json(project), enums)
+    assert errors == []
+    assert declarations[0].domain == ("Paid", "Shipped", "Cancelled")
+
+
+def test_the_domain_falls_back_to_the_manifest_enum_values(project):
+    metadata = project / "models" / "orders" / "metadata.yml"
+    metadata.write_text(
+        metadata.read_text().replace(
+            "  - name: status\n    type: VARCHAR\n",
+            "  - name: status\n    type: VARCHAR\n    properties:\n      enum_values: {paid: a, shipped: b, void: c}\n",
+        )
+    )
+    declare(project, mutate(SALE, "    domain: [paid, shipped, cancelled, pending]\n", ""))
+    (rule,) = parse(project)[0]
+    assert rule.domain == ("paid", "shipped", "void")
+
+
+SALE_INVALID = {
+    "value outside the domain": (
+        mutate(SALE, "values: [paid, shipped]", "values: [paid, refunded]"),
+        "values must all belong to the domain",
+    ),
+    "case is ignored when checking the domain": (
+        mutate(SALE, "values: [paid, shipped]", "values: [PAID, Shipped]"),
+        None,
+    ),
+    "value listed twice": (
+        mutate(SALE, "values: [paid, shipped]", "values: [paid, PAID]"),
+        "lists a value twice",
+    ),
+    "domain value listed twice": (
+        mutate(SALE, "[paid, shipped, cancelled, pending]", "[paid, Paid, shipped]"),
+        "lists a value twice",
+    ),
+    "empty values": (mutate(SALE, "values: [paid, shipped]", "values: []"), "values must be a non-empty list"),
+    "number as a value": (
+        mutate(SALE, "values: [paid, shipped]", "values: [1, 2]"),
+        "values must be a non-empty list",
+    ),
+    "values not a list": (mutate(SALE, "values: [paid, shipped]", "values: paid"), "values must be a non-empty list"),
+    "unknown column": (mutate(SALE, "orders.status", "orders.nope"), "unknown column 'orders.nope'"),
+    "unknown model": (mutate(SALE, "orders.status", "ghosts.status"), "unknown model 'ghosts'"),
+    "overridable is not a boolean": (
+        SALE + "    overridable_by_caller: yes please\n",
+        "'overridable_by_caller' must be true or false",
+    ),
+    "unknown field": (SALE + "    unless: []\n", "unknown field 'unless'"),
+    "bad when": (SALE + "    when: always\n", "'when' must be 'aggregated'"),
+}
+
+
+@pytest.mark.parametrize(
+    ("front", "message"), SALE_INVALID.values(), ids=SALE_INVALID.keys()
+)
+def test_an_invalid_sale_statuses_declaration_is_reported(project, front, message):
+    declare(project, front)
+    declarations, errors = parse(project)
+    if message is None:
+        assert errors == [] and len(declarations) == 1
+        return
+    assert declarations == []
+    assert any(message in text for _, text in errors), errors
+    with pytest.raises(DeclarationError):
+        read_declared_defaults(project, build_json(project))
+
+
+def test_a_sale_statuses_error_voids_the_other_declarations_too(project):
+    declare(project, EXCLUDE + mutate(SALE, "orders.status", "orders.nope"))
+    declarations, errors = parse(project)
+    assert declarations == [] and len(errors) == 1
+
+
+def test_validate_project_reports_a_sale_statuses_error(project):
+    declare(project, mutate(SALE, "values: [paid, shipped]", "values: [paid, refunded]"))
+    errors = validate_project(project)
+    assert [error.level for error in errors] == ["error"]
+    assert "values must all belong to the domain" in str(errors[0])

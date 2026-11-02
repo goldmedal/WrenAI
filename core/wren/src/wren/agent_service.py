@@ -41,6 +41,8 @@ from wren.context_adapter import (
     load_snapshot,
     project_digest,
 )
+from wren.declared_default_status import display, fold_all
+from wren.declared_defaults import SaleStatuses
 
 
 def uid():
@@ -91,6 +93,7 @@ IPC_MARGIN_S = 40
 REJECTION_LIMIT = 2
 UNDETERMINED_LIMIT = 1
 UNAVAILABLE_LIMIT = 1
+STATUS_ANSWER_SPLIT = re.compile(r"[,，、;；\n]+")
 
 
 @dataclass(frozen=True)
@@ -157,6 +160,38 @@ class BudgetExhausted(RuntimeError):
         self.detail = f"budget_exhausted:{kind}"
 
 
+class StatusScopeUnresolved(RuntimeError):
+    """The caller's answer to the status-scope question named no usable statuses twice."""
+
+    def __init__(self):
+        super().__init__("status_scope_unresolved")
+        self.detail = "status_scope_unresolved"
+
+
+def parse_status_answer(answer: str, rule: SaleStatuses) -> frozenset[str] | None:
+    """The folded status set an answer names, or ``None`` when it names none or a value that
+    is not in the rule's domain. Values are separated by ``,`` ``、`` ``;`` or line breaks."""
+    tokens = [
+        t.strip().strip("'\"`").strip() for t in STATUS_ANSWER_SPLIT.split(answer)
+    ]
+    tokens = [t for t in tokens if t]
+    if not tokens or len(tokens) > 64:
+        return None
+    folded = fold_all(tokens)
+    return folded if folded <= fold_all(rule.domain) else None
+
+
+def status_clarifications(rule: SaleStatuses) -> dict[str, str]:
+    """The two wordings of the status-scope question; the host sends ``without_disclosure``
+    until the disclosure policy picks one."""
+    return {
+        "with_disclosure": "規則預設只納入這些訂單狀態："
+        + "、".join(rule.values)
+        + "。請問是否只分析其中某些狀態？請以逗號分隔列出要分析的狀態。",
+        "without_disclosure": "請指定要分析的訂單狀態",
+    }
+
+
 class SqlBudget:
     """The worker's SQL attempts in one task, counted by the host.
 
@@ -203,8 +238,10 @@ HINTS = {
 SHAPE_HINTS = {
     "unsupported_function": "This SQL was NOT executed: it uses a function or form the host does not allow (for example now(), random(), list or string aggregates, UNNEST, ANY over a list, a parenthesised query). Use standard SQL aggregates, CASE, CAST and date functions over bound columns and rewrite it.",
     "unsupported": "This SQL was NOT executed: the host could not plan it. Rewrite it with plain SELECT, JOIN, WHERE, GROUP BY and standard aggregates over bound models.",
+    "cube_not_a_table": "This SQL was NOT executed: a cube is not a table and a cube measure is not a column. Compute the figure from the models and views listed in the context index, using their own columns.",
     "duplicate_label": "This SQL was NOT executed: two result columns would carry the same label. Use GROUP BY so the key is a data column instead of one column per literal.",
 }
+STATUS_SCOPE_HINT = " If the user's question itself names which order statuses to analyze, call clarify with missing=status_scope instead of choosing the statuses yourself."
 UNAVAILABLE_HINT = "Check the bound schema and DuckDB SQL syntax. Return at most 100 rows and 20 columns. Do not infer data from an error."
 
 
@@ -376,6 +413,9 @@ class Service:
         self.pid = config["project_id"]
         self.lock = threading.RLock()
         self.sql = AdHocSQL(project)
+        self.status_rules = {
+            r.id: r for r in self.sql.checker.rules if isinstance(r, SaleStatuses)
+        }
 
     def record(self, entry: dict):
         """Keep an audit entry in memory and, when the operator set audit_path,
@@ -598,6 +638,8 @@ class Service:
         if len(s["cache"]) >= 64:
             raise ValueError("session_limit")
         context = {}
+        scopes: dict[str, frozenset[str]] = {}
+        status_hits: list[str] = []
         reply = getattr(request, "reply_to", None)
         if reply:
             previous = s["results"].get(reply)
@@ -612,7 +654,21 @@ class Service:
             context = previous["result"]
             if previous.get("sources"):
                 context = {**context, "original_question": previous["question"]}
+            carried = (previous.get("internal") or {}).get("caller_scope")
+            if carried and carried.get("rule") in self.status_rules:
+                rule = self.status_rules[carried["rule"]]
+                scopes[rule.id] = fold_all(carried["values"])
+                context = {**context, "status_scope": display(rule, scopes[rule.id])}
+                self.record(
+                    {
+                        "event": "caller_scope_inherited",
+                        "request_id": request.request_id,
+                        "rule": rule.id,
+                        "scope": display(rule, scopes[rule.id]),
+                    }
+                )
         budget = SqlBudget(self.execution.max_sql_attempts)
+        resolution = None
         if continuation:
             pending = s["pending"].get(continuation["ref"])
             if not pending or pending.get("consumed"):
@@ -622,6 +678,20 @@ class Service:
                 "original_question": pending["question"],
                 "user_answer": continuation["answer"],
             }
+            if pending.get("status_rule"):
+                resolution = self.resolve_status_scope(pending, continuation["answer"])
+                if isinstance(resolution, frozenset):
+                    rule = self.status_rules[pending["status_rule"]]
+                    scopes[rule.id] = resolution
+                    context["status_scope"] = display(rule, resolution)
+                    self.record(
+                        {
+                            "event": "caller_scope_confirmed",
+                            "request_id": request.request_id,
+                            "rule": rule.id,
+                            "scope": display(rule, resolution),
+                        }
+                    )
         ledger = {}
         policy_denied = False
         ended = None
@@ -753,6 +823,14 @@ class Service:
                 if exc.rules:
                     answer["rules"] = list(exc.rules)
                 answer["hint"] = SHAPE_HINTS.get(exc.code) or HINTS[exc.error]
+                if exc.error == "declared_default_missing":
+                    broken = [e.split(":")[0] for e in exc.rules]
+                    broken = [r for r in broken if r in self.status_rules]
+                    status_hits.extend(r for r in broken if r not in status_hits)
+                    if direct is None and any(
+                        self.status_rules[r].overridable_by_caller for r in broken
+                    ):
+                        answer["hint"] += STATUS_SCOPE_HINT
                 return answer
 
             def run_private(sql, role, with_result):
@@ -767,7 +845,7 @@ class Service:
                     }
                 )
                 try:
-                    prepared = self.sql.prepare(sql)
+                    prepared = self.sql.prepare(sql, scopes)
                 except (QueryFormError, QueryShapeError) as exc:
                     return reject(exc)
                 for model, columns in prepared.sources.items():
@@ -793,6 +871,12 @@ class Service:
                     if over:
                         raise stop(*over) from None
                     return {"error": "query_unavailable", "hint": UNAVAILABLE_HINT}
+                for rule_id, check in prepared.checks.items():
+                    if check["result"] == "satisfied_by_caller_scope":
+                        internal["caller_scope"] = {
+                            "rule": rule_id,
+                            "values": check["scope"],
+                        }
                 token = uid()
                 ledger[token] = {
                     "result": result,
@@ -829,6 +913,24 @@ class Service:
                         "clarification": "請補充您要分析的指標、日期範圍或業務定義。"
                     }
                     return {"evidence": token}
+                if args == {"missing": "status_scope"} and capability.get("sql"):
+                    # Only a rule the caller may override, and only after this task's SQL
+                    # broke it: asking can never widen what a non-overridable rule requires.
+                    open_rules = [
+                        self.status_rules[rule_id]
+                        for rule_id in status_hits
+                        if self.status_rules[rule_id].overridable_by_caller
+                    ]
+                    if not open_rules:
+                        return {"error": "clarification_not_applicable"}
+                    messages = status_clarifications(open_rules[0])
+                    token = uid()
+                    ledger[token] = {
+                        "clarification": messages["without_disclosure"],
+                        "clarification_messages": messages,
+                        "status_rule": open_rules[0].id,
+                    }
+                    return {"evidence": token}
                 raise ValueError("invalid_clarification")
             raise PermissionError("denied")
 
@@ -859,7 +961,21 @@ class Service:
                 raise
 
         try:
-            if direct is not None:
+            if resolution == "failed":
+                s["pending"][continuation["ref"]]["consumed"] = True
+                raise StatusScopeUnresolved()
+            if resolution == "reask":
+                rule = self.status_rules[pending["status_rule"]]
+                messages = status_clarifications(rule)
+                token = uid()
+                ledger[token] = {
+                    "clarification": messages["without_disclosure"],
+                    "clarification_messages": messages,
+                    "status_rule": rule.id,
+                    "retried": True,
+                }
+                raw = {"evidence": token}
+            elif direct is not None:
                 out = guarded_callback("run_sql", direct)
                 if "evidence" not in out:
                     # Rejected or failed: the caller gets the worker-visible error.
@@ -932,6 +1048,15 @@ class Service:
                         "question": request.question,
                         "capability": request.capability,
                         "budget": budget,
+                        **{
+                            key: saved[key]
+                            for key in (
+                                "status_rule",
+                                "clarification_messages",
+                                "retried",
+                            )
+                            if key in saved
+                        },
                     }
                     response.update(
                         status="needs_clarification",
@@ -985,6 +1110,16 @@ class Service:
         finally:
             s["active"] = None
 
+    def resolve_status_scope(self, pending: dict, answer: str):
+        """What a continuation's answer makes of the status-scope question: the folded set, or
+        ``"reask"`` for the first answer that names no usable statuses, ``"failed"`` for the
+        second."""
+        rule = self.status_rules.get(pending["status_rule"])
+        scope = parse_status_answer(answer, rule) if rule else None
+        if scope is not None:
+            return scope
+        return "failed" if pending.get("retried") or rule is None else "reask"
+
     def continue_task(self, r: Continue):
         s = self.session(r.session_id)
         pending = s["pending"].get(r.continuation_ref)
@@ -1031,7 +1166,7 @@ def unavailable_reason(exc: BaseException) -> str:
     if isinstance(exc, ValueError) and str(exc) == "invalid_evidence":
         return "worker"
     detail = str(getattr(exc, "detail", "") or "")
-    if isinstance(exc, BudgetExhausted):
+    if isinstance(exc, (BudgetExhausted, StatusScopeUnresolved)):
         return "worker"
     code = detail.rsplit(":", 1)[-1] if ":" in detail else ""
     for reason, codes in UNAVAILABLE_REASONS.items():

@@ -23,6 +23,13 @@ Violations come back as ``<rule id>`` (an existing decision) or ``<rule id>:<sub
 
 Like the rest of the checker this reads only the qualified syntax tree: no prose, aliases or
 column names as strings.
+
+Beyond fx the module is where a statement meets *every* declared rule. A ``sale_statuses`` rule is
+judged by ``declared_default_status``; a rule the definition of a view the statement reads
+guarantees is ``satisfied_by_definition`` when every read of the models it concerns lies inside
+such a view (the view's body is the marked subquery ``expand_views`` substituted); a rule whose
+status set the caller confirmed is judged against that set and, when met, is
+``satisfied_by_caller_scope``.
 """
 
 from __future__ import annotations
@@ -39,11 +46,24 @@ from wren.declared_default_check import (
     _Statement,
     _unparen,
 )
-from wren.declared_defaults import ExcludeRows, RequireRateJoin
+from wren.declared_default_status import (
+    NOT_APPLICABLE,
+    SATISFIED,
+    VIOLATIONS,
+    StatusUndetermined,
+    display,
+    fold_all,
+    judge,
+)
+from wren.declared_defaults import ExcludeRows, RequireRateJoin, SaleStatuses
+
+VIEW_MARK = "wren_view"
 
 RATE_MULTI_MATCH = "rate_multi_match"
 BASE_CURRENCY_DROPPED = "base_currency_dropped"
 RATE_DEFAULT_LITERAL = "rate_default_literal"
+FX_DEFAULT_SHAPE_UNVERIFIED = "fx_default_shape_unverified"
+FX_MISSING_RATE_HANDLING = "fx_missing_rate_handling"
 UNGUARDED_LEFT_JOIN = "unguarded_left_join"
 GUARDED_BY_BASE_CURRENCY = "guarded_by_base_currency"
 
@@ -54,19 +74,33 @@ _PRESERVING_SIDES = ("LEFT", "FULL")
 class Evaluation:
     """What the declared rules say about one statement.
 
-    ``violations`` are rule ids (``<id>`` or ``<id>:<sub>``); ``checks`` maps every declared rule
-    to ``{"applicable": bool, "result": "satisfied" | "not_applicable" | "violated"}`` and is only
-    meant to be kept for a statement that passed; ``fx_missing_rate_handling`` records how a
-    passing statement treats a missing non-base rate when the rate model is LEFT-joined.
+    ``violations`` are rule ids (``<id>`` or ``<id>:<sub>``); ``undetermined`` are ids of rules
+    the checker cannot judge for this statement. ``checks`` maps every declared rule to
+    ``{"applicable": bool, "result": <result>}`` with ``satisfied``, ``not_applicable``,
+    ``satisfied_by_definition`` or ``satisfied_by_caller_scope`` (which also carries ``scope``,
+    the confirmed values), or ``violated`` / ``undetermined`` for a rule that failed; it is only
+    meant to be kept for a statement that passed. ``fx_missing_rate_handling`` records how a
+    passing statement treats a missing non-base rate when the rate model is LEFT-joined, and
+    ``unverified`` the host-detected shapes the checks above could not vouch for.
     """
 
     violations: tuple[str, ...]
     checks: dict
     fx_missing_rate_handling: str | None = None
+    undetermined: tuple[str, ...] = ()
+    unverified: tuple[str, ...] = ()
 
 
-def evaluate(checker: DefaultsChecker, ast: exp.Expression) -> Evaluation | None:
-    """Evaluate every declared rule on ``ast``; ``None`` means no verdict (as ``check``)."""
+def evaluate(
+    checker: DefaultsChecker,
+    ast: exp.Expression,
+    scopes: dict[str, frozenset[str]] | None = None,
+) -> Evaluation | None:
+    """Evaluate every declared rule on ``ast``; ``None`` means no verdict (as ``check``).
+
+    ``scopes`` maps a ``sale_statuses`` rule id to the folded status set the caller confirmed
+    for it; such a rule is judged against that set instead of its declared values.
+    """
     if not checker.rules:
         return Evaluation((), {})
     if not isinstance(ast, exp.Query):
@@ -83,40 +117,169 @@ def evaluate(checker: DefaultsChecker, ast: exp.Expression) -> Evaluation | None
     except Exception:  # noqa: BLE001 - any parse/qualify failure is "no verdict"
         return None
     try:
-        return _evaluate(checker, statement)
+        return _evaluate(checker, statement, scopes or {})
     except Exception:  # noqa: BLE001 - a checker fault is "no verdict", never a refusal
         return None
 
 
-def _evaluate(checker: DefaultsChecker, statement: _Statement) -> Evaluation:
+def _inside_view(node: exp.Expression, guaranteed: frozenset[str]) -> bool:
+    """The node sits in the body of a view whose name is in ``guaranteed``."""
+    current = node.parent
+    while current is not None:
+        if current.meta.get(VIEW_MARK) in guaranteed:
+            return True
+        current = current.parent
+    return False
+
+
+def _without_views(
+    statement: _Statement, checker: DefaultsChecker, views: frozenset[str]
+) -> _Statement:
+    """The statement with the body of every ``views`` subquery replaced by a stub that has the
+    view's columns and reads nothing.
+
+    A rule is judged this way when the view's guarantee covers only some of the reads it
+    concerns: what is inside the view must not count towards the reads outside it (its rate
+    join, its test-row filter), and a value read from the view must not count as an amount.
+    """
+    tree = statement.ast.copy()
+    for subquery in list(tree.find_all(exp.Subquery)):
+        if subquery.meta.get(VIEW_MARK) in views:
+            columns = list(subquery.this.named_selects)
+            subquery.set(
+                "this",
+                exp.select(*(exp.alias_(exp.Null(), name) for name in columns)),
+            )
+    return _Statement(tree, checker)
+
+
+def _guaranteed_by(checker: DefaultsChecker, rule_id: str) -> frozenset[str]:
+    return frozenset(view for view, ids in checker.guarantees.items() if rule_id in ids)
+
+
+def _evaluate(
+    checker: DefaultsChecker,
+    statement: _Statement,
+    scopes: dict[str, frozenset[str]],
+) -> Evaluation:
     violations: list[str] = []
+    undetermined: list[str] = []
+    unverified: list[str] = []
     checks: dict = {}
     handling: str | None = None
     for rule in checker.rules:
-        if isinstance(rule, ExcludeRows):
-            applicable = bool(checker.covered_of(rule) & statement.tables_read) and (
-                not rule.aggregated_only or statement.aggregated
-            )
-            broken = [rule.id] if statement.fires_exclude(rule) else []
-        else:
-            fx = _Rate(statement, checker, rule)
-            applicable = fx.applicable()
-            broken = [rule.id] if statement.fires_rate(rule) else []
-            if applicable and not broken and not fx.excused():
-                found, rule_handling = fx.judge()
-                broken = [f"{rule.id}:{sub}" for sub in found]
-                if not broken:
-                    handling = handling or rule_handling
-        violations += broken
-        checks[rule.id] = {
-            "applicable": applicable,
-            "result": "violated"
-            if broken
-            else "satisfied"
-            if applicable
-            else "not_applicable",
+        relevant = checker.relevant_models(rule)
+        reads = {
+            id(source): source
+            for scope in statement.scopes
+            for source in scope.sources.values()
+            if isinstance(source, exp.Table) and source.name in relevant
         }
-    return Evaluation(tuple(violations), checks, handling)
+        guaranteed = _guaranteed_by(checker, rule.id)
+        inside = (
+            {key for key, read in reads.items() if _inside_view(read, guaranteed)}
+            if guaranteed
+            else set()
+        )
+        entry: dict | None = None
+        broken: list[str] = []
+        whole = bool(inside) and len(inside) == len(reads)
+        # A guarantee that covers only some of the reads leaves the rest to the plain check,
+        # on a statement that no longer shows the view's own body.
+        seen = (
+            _without_views(statement, checker, guaranteed)
+            if inside and not whole and not isinstance(rule, SaleStatuses)
+            else statement
+        )
+        if isinstance(rule, ExcludeRows):
+            applicable = bool(checker.covered_of(rule) & seen.tables_read) and (
+                not rule.aggregated_only or seen.aggregated
+            )
+            if applicable and whole:
+                entry = {"applicable": True, "result": "satisfied_by_definition"}
+            elif seen.fires_exclude(rule):
+                broken = [rule.id]
+        elif isinstance(rule, SaleStatuses):
+            try:
+                outcome, applicable, entry = _status(
+                    checker, statement, rule, scopes, frozenset(inside), reads
+                )
+            except StatusUndetermined:
+                undetermined.append(rule.id)
+                checks[rule.id] = {"applicable": True, "result": "undetermined"}
+                continue
+            if outcome in VIOLATIONS:
+                broken = [f"{rule.id}:{outcome}"]
+        else:
+            fx = _Rate(seen, checker, rule)
+            applicable = fx.applicable()
+            if applicable and whole:
+                entry = {"applicable": True, "result": "satisfied_by_definition"}
+            else:
+                broken = [rule.id] if seen.fires_rate(rule) else []
+                if applicable and not broken and not fx.excused():
+                    found, rule_handling = fx.judge()
+                    broken = [f"{rule.id}:{sub}" for sub in found]
+                    if not broken:
+                        handling = handling or rule_handling
+                        if fx.shape_unverified():
+                            unverified.append(FX_DEFAULT_SHAPE_UNVERIFIED)
+        violations += broken
+        if entry is None:
+            entry = {
+                "applicable": applicable,
+                "result": "violated"
+                if broken
+                else "satisfied"
+                if applicable
+                else "not_applicable",
+            }
+        checks[rule.id] = entry
+    if handling == UNGUARDED_LEFT_JOIN:
+        unverified.append(FX_MISSING_RATE_HANDLING)
+    return Evaluation(
+        tuple(violations),
+        checks,
+        handling,
+        tuple(undetermined),
+        tuple(dict.fromkeys(unverified)),
+    )
+
+
+def _status(
+    checker: DefaultsChecker,
+    statement: _Statement,
+    rule: SaleStatuses,
+    scopes: dict[str, frozenset[str]],
+    inside: frozenset[int],
+    reads: dict,
+) -> tuple[str, bool, dict | None]:
+    """``(outcome, applicable, check entry)`` of a ``sale_statuses`` rule; the entry is only
+    given when it is not the plain ``satisfied`` / ``not_applicable`` / ``violated`` one."""
+    confirmed = scopes.get(rule.id)
+    target = confirmed if confirmed is not None else fold_all(rule.values)
+    outside = [read for key, read in reads.items() if key not in inside]
+    aggregated_ok = not rule.aggregated_only or statement.aggregated
+    if reads and not outside and aggregated_ok:
+        return (
+            SATISFIED,
+            True,
+            {"applicable": True, "result": "satisfied_by_definition"},
+        )
+    outcome = judge(statement, checker, rule, target, inside).outcome
+    if outcome == NOT_APPLICABLE:
+        return outcome, False, None
+    if outcome == SATISFIED and confirmed is not None:
+        return (
+            outcome,
+            True,
+            {
+                "applicable": True,
+                "result": "satisfied_by_caller_scope",
+                "scope": display(rule, confirmed),
+            },
+        )
+    return outcome, True, None
 
 
 def _numeric_literal(node: exp.Expression) -> bool:
@@ -380,6 +543,55 @@ class _Rate:
                 ):
                     return True
             child, parent = parent, parent.parent
+        return False
+
+    def _safe_default(self, node: exp.Expression | None) -> bool:
+        """Nothing, NULL or a plain number: a default that cannot quietly stand in for a rate."""
+        if node is None:
+            return True
+        node = _unparen(node)
+        return isinstance(node, exp.Null) or _numeric_literal(node)
+
+    def shape_unverified(self) -> bool:
+        """A conditional over a rate whose default or test is not one the checks above read.
+
+        ``COALESCE`` / ``IF`` / ``CASE`` over a rate-tainted expression is read only in its plain
+        forms: a numeric (or NULL) default, and a ``IS [NOT] NULL`` test. A non-literal or nested
+        default (``COALESCE(rate, 2 - 1)``, a ``CASE`` inside a ``CASE``) and a ``CASE`` on the
+        rate that is not such a test (``CASE WHEN rate > 0 ...``) are not judged, so they are
+        reported rather than passed on trust.
+        """
+        for node in self.st.ast.find_all(exp.Coalesce, exp.If):
+            if isinstance(node, exp.Coalesce):
+                args = [node.this, *node.expressions]
+                if any(self._is_rate(a) for a in args) and any(
+                    not self._is_rate(a) and not self._safe_default(a) for a in args
+                ):
+                    return True
+                continue
+            condition = _unparen(node.this)
+            if not self._is_rate(condition):
+                continue
+            absent = condition
+            inverse = isinstance(condition, exp.Not)
+            if inverse:
+                absent = _unparen(condition.this)
+            if not (
+                isinstance(absent, exp.Is)
+                and isinstance(absent.expression, exp.Null)
+                and self._is_rate(absent.this)
+            ):
+                return True
+            if inverse:
+                owner = node.parent
+                branch = isinstance(owner, exp.Case) and any(
+                    node is i for i in owner.args.get("ifs") or []
+                )
+                other = owner.args.get("default") if branch else node.args.get("false")
+            else:
+                other = node.args.get("true")
+            if not self._safe_default(other):
+                return True
         return False
 
     # -- verdict --------------------------------------------------------

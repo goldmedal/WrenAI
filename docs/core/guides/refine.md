@@ -102,7 +102,7 @@ Rule ids are unique across the project; files are read in sorted order under
 `knowledge/rules/` and the legacy `instructions.md` is read last, which fixes the order of
 the ids a host sees.
 
-Two kinds exist. Declarations are never inferred from the prose, and an invalid one makes
+Three kinds exist. Declarations are never inferred from the prose, and an invalid one makes
 `wren context validate` fail and `governed-stdio` refuse to start, so a typo cannot
 silently turn enforcement off.
 
@@ -127,6 +127,18 @@ silently turn enforcement off.
   and a cast of the rate date to a date or timestamp type, such as `rate.date::date` or
   `CAST(rate.date AS DATE)`, is looked through).
   Same-day equality and an unbounded latest rate do not.
+- **`sale_statuses`**: statements that read the status column's model must keep exactly the
+  declared set of status values (`values`) out of the column's whole value set (`domain`,
+  or else the `enum_values` the column lists). The check computes which values the
+  statement's filters still return (`=`, `<>`, `IN`, `NOT IN`, `IS [NOT] NULL`, with
+  `AND` / `OR` / `NOT` and `LOWER`, `UPPER` or `TRIM` around the column; case is ignored)
+  rather than looking for a filter, so `NOT IN ('cancelled')` keeps every other value in
+  the domain. `overridable_by_caller: true` lets a host that supports it take a confirmed
+  set from the user instead.
+
+A `semantics:` list in the same front-matter (`{id, models, note}`) names meanings no check
+reads, such as a fiscal calendar; a host reports the id as unverified whenever a query touches
+one of its models.
 
 Optional fields: `when: aggregated` limits a rule to statements that use an aggregate
 function or `GROUP BY`, so exploration queries are not refused. `unless` lists SQL facts
