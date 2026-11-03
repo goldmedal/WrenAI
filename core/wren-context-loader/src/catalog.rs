@@ -103,6 +103,10 @@ struct ViewMetaFile {
     /// Ids of declared default rules the view's definition guarantees (carried, not interpreted).
     #[serde(default)]
     guarantees: Option<Vec<serde_yaml::Value>>,
+    /// Declared output columns, `[{name, type, description?}]`. Kept raw so one malformed entry
+    /// is a diagnostic for the host to refuse, not a view that silently drops out of the catalog.
+    #[serde(default)]
+    columns: Option<serde_yaml::Value>,
     #[serde(default)]
     properties: Properties,
 }
@@ -183,6 +187,11 @@ pub struct CatalogView {
     /// `views/<name>/metadata.yml`. Carried as authored; omitted when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub guarantees: Vec<String>,
+    /// Output columns the view declares in `columns:` (name, type and description only). They
+    /// are authored, not derived from the view's SQL; a host that can parse the statement checks
+    /// them. Omitted when the view declares none.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub columns: Vec<CatalogColumn>,
 }
 
 /// One business meaning no host check covers (`semantics:` in a rule file's front-matter), bound to
@@ -230,6 +239,12 @@ pub enum CatalogDiagnostic {
         path: String,
         entry: String,
     },
+    ViewColumnsInvalid {
+        /// Always `view_columns_invalid`.
+        kind: &'static str,
+        path: String,
+        entry: String,
+    },
 }
 
 impl std::fmt::Display for CatalogDiagnostic {
@@ -240,6 +255,9 @@ impl std::fmt::Display for CatalogDiagnostic {
                 write!(f, "{path}: {kind}: {entry}")
             }
             CatalogDiagnostic::SemanticsInvalid { kind, path, entry } => {
+                write!(f, "{path}: {kind}: {entry}")
+            }
+            CatalogDiagnostic::ViewColumnsInvalid { kind, path, entry } => {
                 write!(f, "{path}: {kind}: {entry}")
             }
         }
@@ -258,6 +276,14 @@ impl CatalogDiagnostic {
     fn semantics_invalid(path: &str, entry: impl Into<String>) -> Self {
         CatalogDiagnostic::SemanticsInvalid {
             kind: "semantics_invalid",
+            path: path.to_string(),
+            entry: entry.into(),
+        }
+    }
+
+    fn view_columns_invalid(path: &str, entry: impl Into<String>) -> Self {
+        CatalogDiagnostic::ViewColumnsInvalid {
+            kind: "view_columns_invalid",
             path: path.to_string(),
             entry: entry.into(),
         }
@@ -313,6 +339,11 @@ pub struct CapabilityCatalog {
     /// it could not tell its caller which meanings a result leaves unchecked.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub semantics_invalid: bool,
+    /// True when a view's `columns:` declaration could not be read in full (not a list, a
+    /// malformed or duplicate entry). All or nothing: every view's `columns` is then empty. A host
+    /// must refuse to run: it would show a worker columns the project did not fully declare.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub view_columns_invalid: bool,
     /// Files that did not parse, by kind; the catalog is still emitted without them.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub diagnostics: Vec<CatalogDiagnostic>,
@@ -471,6 +502,83 @@ fn cube(c: CubeFile) -> CatalogCube {
     }
 }
 
+const VIEW_COLUMN_DESCRIPTION_MAX: usize = 400;
+
+fn valid_view_column_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// A short, single-line rendering of an author-supplied value for a diagnostic.
+fn quoted(text: &str) -> String {
+    let flat: String = text.chars().filter(|c| !c.is_control()).take(40).collect();
+    format!("{flat:?}")
+}
+
+/// Read a view's `columns:` list. Only `name`, `type` and `description` are kept; any other key
+/// of an entry is dropped like every unnamed authored field. The error names the entry by
+/// position and says what is wrong, never repeating a description.
+fn view_columns(raw: Option<&serde_yaml::Value>) -> Result<Vec<CatalogColumn>, String> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let serde_yaml::Value::Sequence(entries) = raw else {
+        return Err("columns must be a list".to_string());
+    };
+    let mut columns: Vec<CatalogColumn> = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let at = format!("columns[{index}]");
+        let serde_yaml::Value::Mapping(map) = entry else {
+            return Err(format!("{at}: must be a mapping with name and type"));
+        };
+        let field = |key: &str| map.get(serde_yaml::Value::String(key.to_string()));
+        let name = match field("name") {
+            Some(serde_yaml::Value::String(name)) if valid_view_column_name(name) => name.clone(),
+            Some(serde_yaml::Value::String(name)) => {
+                return Err(format!(
+                    "{at}: name {} must match ^[a-z0-9_]+$",
+                    quoted(name)
+                ))
+            }
+            _ => return Err(format!("{at}: name must be a string matching ^[a-z0-9_]+$")),
+        };
+        let r#type = match field("type") {
+            Some(serde_yaml::Value::String(t)) if !t.trim().is_empty() => t.clone(),
+            _ => return Err(format!("{at}: type must be a non-empty string")),
+        };
+        let description = match field("description") {
+            None | Some(serde_yaml::Value::Null) => None,
+            Some(serde_yaml::Value::String(d))
+                if d.chars().count() <= VIEW_COLUMN_DESCRIPTION_MAX =>
+            {
+                Some(d.clone())
+            }
+            Some(serde_yaml::Value::String(_)) => {
+                return Err(format!(
+                    "{at}: description is longer than {VIEW_COLUMN_DESCRIPTION_MAX} characters"
+                ))
+            }
+            Some(_) => return Err(format!("{at}: description must be a string")),
+        };
+        if columns.iter().any(|c| c.name == name) {
+            return Err(format!("{at}: duplicate column name {}", quoted(&name)));
+        }
+        columns.push(CatalogColumn {
+            name,
+            r#type,
+            description,
+            not_null: None,
+            is_calculated: None,
+            is_hidden: None,
+            relationship: None,
+            enum_values: Vec::new(),
+        });
+    }
+    Ok(columns)
+}
+
 /// Build the capability catalog from read project sources. Parse failures of individual files
 /// are recorded in `diagnostics` and the file is skipped; the catalog never fails as a whole.
 pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
@@ -550,19 +658,39 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
     }
 
     let mut views = Vec::new();
+    let mut view_columns_invalid = false;
     for (index, (meta_yml, _sql_yml)) in sources.views.iter().enumerate() {
         match serde_yaml::from_str::<ViewMetaFile>(meta_yml) {
-            Ok(v) => views.push(CatalogView {
-                name: v.name,
-                description: v.properties.description,
-                guarantees: v
-                    .guarantees
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|id| id.as_str().map(str::to_owned))
-                    .collect(),
-            }),
+            Ok(v) => {
+                let columns = match view_columns(v.columns.as_ref()) {
+                    Ok(columns) => columns,
+                    Err(reason) => {
+                        view_columns_invalid = true;
+                        diagnostics.push(CatalogDiagnostic::view_columns_invalid(
+                            &format!("views/{}/metadata.yml", v.name),
+                            reason,
+                        ));
+                        Vec::new()
+                    }
+                };
+                views.push(CatalogView {
+                    name: v.name,
+                    description: v.properties.description,
+                    guarantees: v
+                        .guarantees
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|id| id.as_str().map(str::to_owned))
+                        .collect(),
+                    columns,
+                });
+            }
             Err(e) => diagnostics.push(CatalogDiagnostic::Message(format!("view[{index}]: {e}"))),
+        }
+    }
+    if view_columns_invalid {
+        for view in &mut views {
+            view.columns.clear();
         }
     }
 
@@ -582,6 +710,7 @@ pub fn capability_catalog(sources: &ProjectSources) -> CapabilityCatalog {
         denied_columns_invalid: false,
         semantics: Vec::new(),
         semantics_invalid: false,
+        view_columns_invalid,
         diagnostics,
     }
 }
