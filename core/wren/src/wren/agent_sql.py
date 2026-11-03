@@ -222,13 +222,16 @@ def view_output_columns(body, schema: dict) -> list[str] | None:
     """The output column names of a view body, or ``None`` when they are not stable names.
 
     ``*`` and ``t.*`` (also with ``EXCLUDE`` / ``REPLACE``) expand over the bound models'
-    columns. Only an aliased projection, a bare column and a star count as named: any other
-    unaliased projection (``SUM(x)``, ``id::BIGINT``, ``CAST(...)``, a literal,
+    columns. Only an aliased projection, a bare column and a star count as named, in every
+    ``SELECT`` of the statement (a derived table's unnamed cast reaches the output through an
+    outer ``*``): any other unaliased projection (``SUM(x)``, ``id::BIGINT``, ``CAST(...)``, a literal,
     ``COLUMNS(...)``) is named by DuckDB in a way sqlglot does not reproduce, and a name that
     appears twice cannot be declared. The answer is ``None``, never a guess from the text.
     """
     if any(
-        not isinstance(item, exp.Alias | exp.Column | exp.Star) for item in body.selects
+        not isinstance(item, exp.Alias | exp.Column | exp.Star)
+        for select in body.find_all(exp.Select)
+        for item in select.expressions
     ):
         return None
     try:

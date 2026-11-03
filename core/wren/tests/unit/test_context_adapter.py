@@ -1314,3 +1314,27 @@ def test_a_denied_name_matches_a_views_column_whatever_its_case():
     ]
     everything = json.dumps([r.list(1), r.read(["contacts"]), r.structure_document()])
     assert "email" not in everything.lower()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT * FROM (SELECT id::BIGINT FROM orders) s",
+        "SELECT s.* FROM (SELECT CAST(id AS BIGINT) FROM orders) s",
+        "SELECT c.* FROM orders a JOIN (SELECT id::BIGINT FROM customers) c ON TRUE",
+    ],
+)
+def test_an_unaliased_cast_inside_a_derived_table_is_not_a_stable_name(
+    real_project, statement
+):
+    edit_view_columns(real_project, [{"name": "id", "type": "BIGINT"}])
+    set_view_statement(real_project, statement)
+    assert load_snapshot(real_project).unverified_views == ("usd_line_value",)
+
+
+def test_an_aliased_cast_inside_a_derived_table_is_a_stable_name(real_project):
+    edit_view_columns(real_project, [{"name": "id", "type": "BIGINT"}])
+    set_view_statement(
+        real_project, "SELECT * FROM (SELECT id::BIGINT AS id FROM orders) s"
+    )
+    assert load_snapshot(real_project).unverified_views == ()
