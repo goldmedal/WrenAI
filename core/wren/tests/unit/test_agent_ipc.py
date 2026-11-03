@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
+
 from wren.agent_ipc import PROTOCOL, RuntimeIPC
 
 FAKE_RUNTIME = Path(__file__).parent / "fixtures/fake_runtime.js"

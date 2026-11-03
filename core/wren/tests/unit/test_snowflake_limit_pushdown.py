@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
+
 from wren.connector.base import strip_trailing_semicolon as _strip_trailing_semicolon
 from wren.connector.snowflake import SnowflakeConnector
 

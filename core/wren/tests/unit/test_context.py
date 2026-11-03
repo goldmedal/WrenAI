@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from wren.context import (
     _convert_keys,
     _snake_to_camel,
@@ -1491,6 +1492,7 @@ _PROJECT_FILE = "wren_project.yml"
 import base64  # noqa: E402
 
 import orjson  # noqa: E402
+
 from wren.context import validate_manifest  # noqa: E402
 from wren.model.data_source import DataSource  # noqa: E402
 

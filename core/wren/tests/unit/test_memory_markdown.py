@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import yaml
 from typer.testing import CliRunner
+
 from wren.cli import app
 from wren.memory.markdown import (
     load_query_pairs,

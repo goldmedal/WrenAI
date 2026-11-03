@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
+
 from wren.connector.clickhouse import (
     ClickHouseConnector,
     _build_clickhouse_arrow_table,

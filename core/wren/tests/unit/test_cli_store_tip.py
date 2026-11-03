@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pyarrow as pa
 import pytest
 from typer.testing import CliRunner
+
 from wren.cli import app
 
 pytestmark = pytest.mark.unit

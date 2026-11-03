@@ -19,6 +19,7 @@ import base64
 import orjson
 import pytest
 from sqlglot import parse_one
+
 from wren.config import WrenConfig
 from wren.mdl import get_manifest_extractor, get_session_context, to_json_base64
 from wren.mdl.cte_rewriter import CTERewriter

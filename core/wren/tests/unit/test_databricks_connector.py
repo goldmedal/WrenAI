@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from pydantic import SecretStr
+
 from wren.connector.databricks import DatabricksConnector
 from wren.model import (
     DatabricksServicePrincipalConnectionInfo,

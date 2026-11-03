@@ -7,6 +7,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+
 from wren import context_adapter as adapter
 from wren.context_adapter import (
     ContextChanged,

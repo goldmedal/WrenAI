@@ -10,6 +10,7 @@ import base64
 
 import orjson
 import pytest
+
 from wren import WrenEngine
 from wren.config import WrenConfig
 from wren.model.data_source import DataSource

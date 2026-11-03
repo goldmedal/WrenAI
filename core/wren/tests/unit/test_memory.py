@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from wren.memory.schema_indexer import (
     describe_schema,
     extract_schema_items,
@@ -945,6 +946,7 @@ class TestMarkdownSourcedIndex:
             "sentence_transformers", reason="wren[memory] extras not installed"
         )
         from typer.testing import CliRunner  # noqa: PLC0415
+
         from wren.cli import app  # noqa: PLC0415
         from wren.memory.markdown import parse_query_markdown  # noqa: PLC0415
         from wren.memory.store import MemoryStore  # noqa: PLC0415

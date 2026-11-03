@@ -9,6 +9,7 @@ the same on Windows, macOS, and Linux.
 from __future__ import annotations
 
 import pytest
+
 from wren import profile as profile_mod
 from wren.profile import (
     MissingSecretError,

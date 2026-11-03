@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+
 from wren.cli import app
 from wren.context import build_json, load_rules, validate_project
 from wren.declared_defaults import (

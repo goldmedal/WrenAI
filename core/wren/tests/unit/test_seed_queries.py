@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from wren.memory.seed_queries import (
     SEED_TAG,
     _relationship_key_columns,

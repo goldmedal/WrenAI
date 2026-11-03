@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
+
 from wren import cli
 from wren import governed_stdio as transport
 from wren.cli import app

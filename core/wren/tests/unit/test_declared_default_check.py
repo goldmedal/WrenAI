@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlglot import parse_one
+
 from wren.context import build_json
 from wren.declared_default_check import DefaultsChecker, _Statement
 from wren.declared_defaults import read_declared_defaults

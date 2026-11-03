@@ -12,6 +12,7 @@ import time
 
 import pytest
 from typer.testing import CliRunner
+
 from wren.cli import app
 from wren.memory.markdown import write_query_markdown
 from wren.memory.watch import (

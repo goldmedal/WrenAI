@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
+
 from wren.cli import app
 
 runner = CliRunner()

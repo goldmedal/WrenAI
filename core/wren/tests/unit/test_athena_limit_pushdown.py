@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+
 from wren.connector.athena import AthenaConnector
 from wren.connector.base import strip_trailing_semicolon as _strip_trailing_semicolon
 

@@ -7,8 +7,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import wren.profile as profile_mod
 import yaml
+
+import wren.profile as profile_mod
 from wren.cli import _resolve_engine_profile
 
 

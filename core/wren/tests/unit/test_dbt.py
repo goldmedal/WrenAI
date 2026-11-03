@@ -6,6 +6,7 @@ import json
 
 import pytest
 import yaml
+
 from wren.dbt import (
     DbtLoadError,
     convert_dbt_project_to_wren_project,

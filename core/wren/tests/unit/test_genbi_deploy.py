@@ -7,10 +7,11 @@ import types
 from pathlib import Path
 
 import pytest
-import wren.genbi.providers.cloudflare as cloudflare
-import wren.genbi.providers.vercel as vercel
 import yaml
 from typer.testing import CliRunner
+
+import wren.genbi.providers.cloudflare as cloudflare
+import wren.genbi.providers.vercel as vercel
 from wren.cli import app
 from wren.genbi.tokens import resolve_token
 

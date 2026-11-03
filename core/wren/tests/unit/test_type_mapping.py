@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import pytest
+
 from wren.type_mapping import (
     parse_type,
     parse_types,

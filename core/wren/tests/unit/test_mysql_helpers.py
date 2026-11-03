@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pyarrow as pa
 import pytest
+
 from wren.connector.mysql import (
     _apply_limit,
     _arrow_decimal_from_mysql_field,

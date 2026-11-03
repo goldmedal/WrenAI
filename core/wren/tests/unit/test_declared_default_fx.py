@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from sqlglot import exp, parse_one
+
 from wren.context import build_json
 from wren.declared_default_check import DefaultsChecker
 from wren.declared_default_fx import evaluate

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from typer.testing import CliRunner
+
 from wren import skills_delivery
 from wren.cli import app
 

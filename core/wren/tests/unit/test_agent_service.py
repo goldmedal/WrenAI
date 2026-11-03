@@ -928,6 +928,7 @@ def test_legacy_service_config_names_every_key_and_a_preset_query_scope(service)
 
 def test_the_agent_presets_command_refuses_a_legacy_file_too(tmp_path):
     from typer.testing import CliRunner  # noqa: PLC0415
+
     from wren.serve_cli import serve_app  # noqa: PLC0415
 
     config = tmp_path / "service.yml"
@@ -1316,6 +1317,7 @@ def test_http_transport_serves_capabilities_behind_token(service):
     import httpx  # noqa: PLC0415
     from mcp import ClientSession  # noqa: PLC0415
     from mcp.client.streamable_http import streamablehttp_client  # noqa: PLC0415
+
     from wren.agent_service import http_server  # noqa: PLC0415
 
     s = service(
@@ -2352,6 +2354,7 @@ def test_the_setup_presets_are_the_four_modes_and_only_narrow(service, tmp_path)
             assert len(statements) == 1 + len(module.PRESET_WITHHELD[name])
             assert all(x.lstrip().startswith("forbid(") for x in statements[1:])
     from typer.testing import CliRunner  # noqa: PLC0415
+
     from wren.serve_cli import serve_app  # noqa: PLC0415
 
     out = CliRunner().invoke(
