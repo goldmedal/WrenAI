@@ -691,7 +691,7 @@ class ContextReader:
         A view has no owner model the adapter can resolve, so a denied name is dropped
         wherever it appears; descriptions lose sentences that name a denied column likewise.
         """
-        names = {column for _, column in self.denied}
+        names = {column.lower() for _, column in self.denied}
         scope = self._scope("view", view)
         out = []
         for column in view.get("columns") or []:

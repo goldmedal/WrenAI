@@ -175,8 +175,9 @@ A view's `metadata.yml` may list its output columns so an agent sees them withou
 view's SQL: `columns: [{name, type, description}]`, where `name` matches `^[a-z0-9_]+$`, `type`
 is not empty and `description` (optional) is at most 400 characters. The list is yours to
 keep in step with the view's `statement`. A host that can parse the statement refuses to
-start when the declared names differ from the statement's output, and a malformed or
-duplicate entry is reported as `view_columns_invalid`. Views without `columns` behave as before.
+start when the declared names differ from the statement's output (a statement whose output
+names are not stable, such as an unaliased `id::BIGINT` or `COLUMNS(...)`, is not checked), and a
+malformed or duplicate entry is reported as `view_columns_invalid`. Views without `columns` behave as before.
 
 ### 2. Let `usage` compound from every confirmed answer
 

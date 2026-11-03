@@ -1241,3 +1241,76 @@ def test_a_malformed_columns_declaration_in_a_real_project_refuses_to_start(
     edit_view_columns(real_project, columns)
     with pytest.raises(ViewColumnsInvalid):
         load_snapshot(real_project)
+
+
+@pytest.mark.parametrize(
+    ("projection", "declared"),
+    [
+        ("id::BIGINT", "id"),
+        ("CAST(id AS BIGINT)", "id"),
+        ("TRY_CAST(id AS BIGINT)", "id"),
+        ("'a'", "a"),
+        ("DATE '2020-01-01'", "x"),
+    ],
+)
+def test_an_unaliased_cast_or_literal_projection_is_not_a_stable_name(
+    real_project, projection, declared
+):
+    edit_view_columns(
+        real_project,
+        [
+            {"name": declared, "type": "INTEGER"},
+            {"name": "customer_id", "type": "INTEGER"},
+        ],
+    )
+    set_view_statement(real_project, f"SELECT {projection}, customer_id FROM invoices")
+    assert load_snapshot(real_project).unverified_views == ("usd_line_value",)
+
+
+def test_an_aliased_cast_and_a_bare_column_are_stable_names(real_project):
+    edit_view_columns(
+        real_project,
+        [{"name": "id", "type": "BIGINT"}, {"name": "customer_id", "type": "INTEGER"}],
+    )
+    set_view_statement(
+        real_project, "SELECT id::BIGINT AS id, i.customer_id FROM invoices i"
+    )
+    assert load_snapshot(real_project).unverified_views == ()
+
+
+def test_a_denied_name_matches_a_views_column_whatever_its_case():
+    r = reader(
+        {
+            "models": [
+                model("customers", "Customers.", ("id", "EMAIL")),
+                model("orders", "Orders.", ("id",)),
+            ],
+            "views": [
+                {
+                    "name": "contacts",
+                    "description": "Contacts.",
+                    "columns": [
+                        {"name": "id", "type": "INTEGER"},
+                        {
+                            "name": "email",
+                            "type": "VARCHAR",
+                            "description": "The address. Never share it.",
+                        },
+                        {
+                            "name": "note",
+                            "type": "VARCHAR",
+                            "description": "Free text. Mirrors the EMAIL column.",
+                        },
+                    ],
+                }
+            ],
+        },
+        denied=[("customers", "EMAIL")],
+    )
+    view = r.read(["contacts"])["items"][0]
+    assert view["columns"] == [
+        {"name": "id", "type": "INTEGER"},
+        {"name": "note", "type": "VARCHAR", "description": "Free text."},
+    ]
+    everything = json.dumps([r.list(1), r.read(["contacts"]), r.structure_document()])
+    assert "email" not in everything.lower()
