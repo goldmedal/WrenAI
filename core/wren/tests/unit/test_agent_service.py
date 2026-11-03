@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from wren.agent_service import (  # noqa: E402
     UNAVAILABLE_REASONS,
     Ask,
     BudgetExhausted,
+    Conflict,
     Continue,
     Ref,
     StatusScopeUnresolved,
@@ -287,6 +289,106 @@ def test_idempotency_conflict_and_ownership(service):
     s.close(r.session_id)
     with pytest.raises(ValueError, match="session_expired"):
         execute(s, r)
+
+
+def settled(s, sql_text=COUNTS["orders"]):
+    """A session already at revision 1, and the request that got it there."""
+    r = request(s).model_copy(update={"sql": sql_text})
+    assert execute(s, r)["status"] == "completed"
+    return r
+
+
+def sent(s, r):
+    """What the planner receives for ``r`` (the MCP tool body: ``safe`` around ``execute``)."""
+    return asyncio.run(safe(s.execute, r, direct={"sql": r.sql}))
+
+
+def conflicts(s):
+    return [e for e in s.audit if e.get("event") == "conflict"]
+
+
+def test_a_stale_revision_is_a_conflict_that_names_the_session_revision(service):
+    s = service()
+    first = settled(s)
+    stale = first.model_copy(update={"request_id": "two", "expected_revision": 0})
+    assert sent(s, stale) == {"status": "conflict", "reason": "revision", "revision": 1}
+    # The response is what a planner can act on: the new id, the revision it was given.
+    again = stale.model_copy(update={"request_id": "three", "expected_revision": 1})
+    done = sent(s, again)
+    assert done["status"] == "completed" and done["revision"] == 2
+    assert [
+        (e["reason"], e["expected_revision"], e["revision"]) for e in conflicts(s)
+    ] == [("revision", 0, 1)]
+
+
+def test_a_request_id_reused_for_another_request_is_a_conflict_with_its_own_reason(
+    service,
+):
+    s = service()
+    first = settled(s)
+    changed = first.model_copy(update={"sql": COUNTS["customers"]})
+    assert sent(s, changed) == {
+        "status": "conflict",
+        "reason": "request_id",
+        "revision": 1,
+    }
+    assert sent(s, first)["status"] == "completed"
+    (entry,) = conflicts(s)
+    assert entry["request_id"] == "one" and entry["reason"] == "request_id"
+
+
+def test_a_call_that_arrives_while_the_session_is_busy_is_a_busy_conflict(
+    service, monkeypatch
+):
+    s = service()
+    entered, finish = threading.Event(), threading.Event()
+    r = ask_request(s)
+
+    def invoke(callback):
+        entered.set()
+        assert finish.wait(5)
+        return count(callback)
+
+    install_invoker(monkeypatch, s, invoke)
+    with concurrent.futures.ThreadPoolExecutor() as pool:
+        active = pool.submit(s.execute, r)
+        assert entered.wait(5)
+        parallel = r.model_copy(update={"request_id": "parallel"})
+        out = asyncio.run(safe(s.execute, parallel))
+        finish.set()
+        assert active.result()["status"] == "completed"
+    assert out == {"status": "conflict", "reason": "busy", "revision": 0}
+    (entry,) = conflicts(s)
+    assert (entry["request_id"], entry["reason"], entry["expected_revision"]) == (
+        "parallel",
+        "busy",
+        0,
+    )
+
+
+def test_a_conflict_still_reads_as_the_conflict_value_error(service):
+    s = service()
+    first = settled(s)
+    with pytest.raises(Conflict, match="conflict") as raised:
+        execute(
+            s, first.model_copy(update={"request_id": "two", "expected_revision": 0})
+        )
+    assert isinstance(raised.value, ValueError)
+    assert (raised.value.reason, raised.value.revision) == ("revision", 1)
+
+
+def test_a_conflict_response_carries_nothing_but_status_reason_and_revision(service):
+    s = service()
+    first = settled(s)
+    stale = first.model_copy(update={"request_id": "two", "expected_revision": 5})
+    assert set(sent(s, stale)) == {"status", "reason", "revision"}
+
+
+def test_the_other_session_errors_keep_their_bare_shape(service):
+    s = service()
+    r = request(s)
+    s.close(r.session_id)
+    assert sent(s, r) == {"status": "session_expired"}
 
 
 def test_context_version_invalidates_old_evidence(service):
@@ -948,6 +1050,98 @@ def test_execution_fields_map_to_the_runtime_contract():
 def test_invalid_execution_values_are_refused(execution):
     with pytest.raises(ValueError, match="invalid_execution_config"):
         execution_from_config({"execution": execution})
+
+
+def test_as_of_is_a_host_side_date_and_never_part_of_the_runtime_limits():
+    assert execution_from_config({}).as_of is None
+    fixed = execution_from_config({"execution": {"as_of": "2026-06-30"}})
+    assert fixed.as_of == "2026-06-30"
+    assert fixed.limits == {"deadlineMs": 120000}
+    # A bare 2026-06-30 in YAML is a date object, a quoted one is text.
+    parsed = yaml.safe_load("execution:\n  as_of: 2026-06-30\n")
+    assert execution_from_config(parsed).as_of == "2026-06-30"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-6-30",
+        "2026-06-31",
+        "2026-06-30T00:00:00",
+        "30/06/2026",
+        "",
+        20260630,
+        True,
+        None,
+        datetime(2026, 6, 30, 12, 0),
+    ],
+)
+def test_a_malformed_as_of_fails_the_start(value):
+    with pytest.raises(ValueError, match="invalid_execution_config: as_of"):
+        execution_from_config({"execution": {"as_of": value}})
+
+
+def test_the_start_fails_on_a_malformed_as_of(service):
+    with pytest.raises(ValueError, match="invalid_execution_config: as_of"):
+        service(updates={"execution": {"as_of": "last friday"}})
+
+
+def test_capabilities_report_a_fixed_as_of_and_the_clock_otherwise(service):
+    assert service().capabilities_public()["as_of"] == "clock"
+    fixed = service(updates={"execution": {"as_of": "2026-06-30"}})
+    assert fixed.capabilities_public()["as_of"] == "2026-06-30"
+    assert fixed.open()["as_of"] == "2026-06-30"
+
+
+def test_the_worker_request_and_the_audit_carry_the_fixed_as_of(service, monkeypatch):
+    s = service(updates={"execution": {"as_of": "2026-06-30"}})
+    seen = []
+    worker_sees(monkeypatch, s, count, seen)
+    r = ask_request(s)
+    done = s.execute(r)
+    assert seen[0]["as_of"] == "2026-06-30"
+    assert set(seen[0]) == {
+        "capability",
+        "question",
+        "previous",
+        "context_index",
+        "as_of",
+    }
+    assert [e["as_of"] for e in events_named(s, "task_completed")] == ["2026-06-30"]
+    assert "as_of" not in done
+    internal = s.sessions[r.session_id]["evidence"][done["evidence_ref"]]["internal"]
+    assert internal["as_of"] == "2026-06-30"
+    assert "as_of" not in json.dumps(done["evidence"])
+
+
+def test_an_unset_as_of_is_the_host_utc_date_of_each_task(service, monkeypatch):
+    s = service()
+    seen = []
+    worker_sees(monkeypatch, s, count, seen)
+    monkeypatch.setattr("wren.agent_service.today_utc", lambda: "2031-02-03")
+    s.execute(ask_request(s))
+    monkeypatch.setattr("wren.agent_service.today_utc", lambda: "2031-02-04")
+    again = ask_request(s).model_copy(update={"request_id": "ask-2"})
+    s.execute(again)
+    assert [r["as_of"] for r in seen] == ["2031-02-03", "2031-02-04"]
+    assert [e["as_of"] for e in events_named(s, "task_completed")] == [
+        "2031-02-03",
+        "2031-02-04",
+    ]
+
+
+def test_the_clock_default_is_todays_utc_date():
+    from wren.agent_service import today_utc  # noqa: PLC0415
+
+    assert today_utc() == datetime.now(timezone.utc).date().isoformat()
+
+
+def test_a_failed_task_records_the_as_of_it_ran_under(service, monkeypatch):
+    s = service(updates={"execution": {"as_of": "2026-06-30"}})
+    worker_sees(monkeypatch, s, lambda callback: {"value": 1})
+    with pytest.raises(ValueError, match="invalid_evidence"):
+        s.execute(ask_request(s))
+    assert events_named(s, "task_failed")[-1]["as_of"] == "2026-06-30"
 
 
 def test_execution_limits_passthrough(service, monkeypatch):

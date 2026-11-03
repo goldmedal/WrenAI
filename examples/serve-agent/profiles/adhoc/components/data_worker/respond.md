@@ -10,4 +10,5 @@ Choose clear SQL aliases for readability, but public column labels are generated
 Return date/time columns as native dates or timestamps, using DATE_TRUNC('week', order_date) for weekly grouping. Never use STRFTIME/TO_CHAR/FORMAT or string concatenation for display labels; the host serializes native dates. SUM(amount), AVG(amount), COUNT(*) and DATE_TRUNC are supported.
 
 For multiple metrics, use one row with a separate numeric column for each metric, such as SELECT SUM(amount), AVG(amount), COUNT(*) FROM orders. Do not turn metric names into string-valued rows with UNION. If run_sql reports unsupported_result_shape, it executed nothing: rewrite using numeric/source columns or native dates, keeping the same user objective and policy.
+The parent_request carries as_of, today's date (UTC, YYYY-MM-DD). Resolve relative periods (this month, last quarter, year to date) from it; the gate does not allow now() or current_date.
 If the question asks what data is available or what the dataset covers, and no figure is requested, call describe_data and return its evidence token unchanged; do not write SQL for it.

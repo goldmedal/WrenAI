@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -104,6 +105,7 @@ class Execution:
     limits: dict
     deadline_ms: int = DEFAULT_DEADLINE_MS
     max_sql_attempts: int = DEFAULT_MAX_SQL_ATTEMPTS
+    as_of: str | None = None
 
     @property
     def call_timeout_s(self) -> float:
@@ -114,11 +116,13 @@ def execution_from_config(config: dict) -> Execution:
     """Validate ``execution`` and turn it into the runtime's ``init.limits`` (camelCase).
 
     Every field may be omitted. ``thinking: default`` sends no ``enableThinking`` key, so the
-    provider's own default applies. ``max_sql_attempts`` is a host-side budget and is not sent.
+    provider's own default applies. ``max_sql_attempts`` and ``as_of`` are host-side and are
+    not sent in ``limits``; ``as_of`` is a ``YYYY-MM-DD`` date (UTC) that stands for "today"
+    in every task, and without it each task takes the host clock's UTC date.
     """
     raw = config.get("execution")
     raw = {} if raw is None else raw
-    allowed = {*EXECUTION_INT_FIELDS, "thinking", "max_sql_attempts"}
+    allowed = {*EXECUTION_INT_FIELDS, "thinking", "max_sql_attempts", "as_of"}
     if not isinstance(raw, dict) or set(raw) - allowed:
         bad = sorted(set(raw) - allowed) if isinstance(raw, dict) else ["execution"]
         raise ValueError(f"invalid_execution_config: {', '.join(bad)}")
@@ -149,7 +153,42 @@ def execution_from_config(config: dict) -> Execution:
         if "max_sql_attempts" in raw
         else DEFAULT_MAX_SQL_ATTEMPTS
     )
-    return Execution(limits, limits["deadlineMs"], attempts)
+    return Execution(limits, limits["deadlineMs"], attempts, anchor_date(raw))
+
+
+def anchor_date(raw: dict) -> str | None:
+    """The configured ``as_of`` as an ISO date, ``None`` when the host clock should answer.
+
+    A bare ``2026-06-30`` in YAML is read as a date, a quoted one as text; both are accepted,
+    a timestamp or any other shape is not."""
+    if "as_of" not in raw:
+        return None
+    value = raw["as_of"]
+    if type(value) is date:
+        return value.isoformat()
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            return date.fromisoformat(value).isoformat()
+        except ValueError:
+            pass
+    raise ValueError("invalid_execution_config: as_of must be a YYYY-MM-DD date")
+
+
+def today_utc() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+class Conflict(ValueError):
+    """A request that cannot run against the session as it stands.
+
+    ``str()`` stays ``"conflict"``; ``reason`` is ``revision`` (the request's
+    ``expected_revision`` is not the session's), ``request_id`` (the id was used for a
+    different request) or ``busy`` (another call of the session is still running), and
+    ``revision`` is the session's revision when it was refused."""
+
+    def __init__(self, reason: str, revision: int):
+        super().__init__("conflict")
+        self.reason, self.revision = reason, revision
 
 
 class BudgetExhausted(RuntimeError):
@@ -729,6 +768,7 @@ class Service:
                 if self.allowed(None, "invoke_component", "capability", c["id"])
             ],
             "contract": "session revision; reply_to result_ref; continue_task after needs_clarification",
+            "as_of": self.execution.as_of or "clock",
             "policy_preset": self.config.get(
                 "policy_preset", {"name": None, "available": []}
             ),
@@ -836,10 +876,25 @@ class Service:
             "evidence": self.project_evidence(s, request.evidence_ref),
         }
 
+    def conflict(self, s, request, reason: str) -> Conflict:
+        """The refusal to send back, with its audit entry (the response says no more than
+        the reason and the session's own revision)."""
+        exc = Conflict(reason, s["revision"])
+        self.record(
+            {
+                "event": "conflict",
+                "request_id": request.request_id,
+                "reason": reason,
+                "expected_revision": request.expected_revision,
+                "revision": exc.revision,
+            }
+        )
+        return exc
+
     def execute(self, request: Ask | SQL, *, direct=None, continuation=None):
         s = self.session(request.session_id)
         if not s["lock"].acquire(blocking=False):
-            raise ValueError("conflict")
+            raise self.conflict(s, request, "busy")
         try:
             return self._execute(s, request, direct, continuation)
         finally:
@@ -864,7 +919,7 @@ class Service:
         cached = s["cache"].get(request.request_id)
         if cached:
             if cached[0] != payload:
-                raise ValueError("conflict")
+                raise self.conflict(s, request, "request_id")
             self.require(s, "receive_answer", "answer.approved", request.capability)
             saved = s["results"].get(cached[1].get("result_ref"), {})
             for model, columns in saved.get("sources", {}).items():
@@ -873,7 +928,7 @@ class Service:
                 )
             return cached[1]
         if request.expected_revision != s["revision"]:
-            raise ValueError("conflict")
+            raise self.conflict(s, request, "revision")
         if len(s["cache"]) >= 64:
             raise ValueError("session_limit")
         context = {}
@@ -907,6 +962,7 @@ class Service:
                     }
                 )
         budget = SqlBudget(self.execution.max_sql_attempts)
+        as_of = self.execution.as_of or today_utc()
         resolution = None
         if continuation:
             pending = s["pending"].get(continuation["ref"])
@@ -1111,6 +1167,7 @@ class Service:
                     if over:
                         raise stop(*over) from None
                     return {"error": "query_unavailable", "hint": UNAVAILABLE_HINT}
+                internal["as_of"] = as_of
                 for rule_id, check in prepared.checks.items():
                     if check["result"] == "satisfied_by_caller_scope":
                         internal["caller_scope"] = {
@@ -1235,6 +1292,7 @@ class Service:
                                 "question": request.question,
                                 "previous": context,
                                 "context_index": self.project.reader.list(1)["text"],
+                                "as_of": as_of,
                             },
                             ensure_ascii=False,
                         ),
@@ -1274,6 +1332,7 @@ class Service:
                             "turns": None,
                             "tool_calls": None,
                             "sql_attempts": budget.attempts,
+                            "as_of": as_of,
                         }
                     )
                     raise ValueError("invalid_evidence")
@@ -1347,6 +1406,7 @@ class Service:
                                 "turns": None,
                                 "tool_calls": None,
                                 "sql_attempts": budget.attempts,
+                                "as_of": as_of,
                             }
                         )
                         raise
@@ -1366,6 +1426,7 @@ class Service:
                         "event": "task_completed",
                         "request_id": request.request_id,
                         "status": response["status"],
+                        "as_of": as_of,
                     }
                 )
                 return response
@@ -1380,6 +1441,7 @@ class Service:
                         "turns": usage.get("turns"),
                         "tool_calls": usage.get("tool_calls"),
                         "sql_attempts": budget.attempts,
+                        "as_of": as_of,
                     }
                 )
             if policy_denied:
@@ -1463,9 +1525,11 @@ async def safe(fn, *args, **kwargs):
         raise
     except PermissionError:
         return {"status": "denied"}
+    except Conflict as exc:
+        return {"status": "conflict", "reason": exc.reason, "revision": exc.revision}
     except ValueError as exc:
         code = str(exc)
-        if code in {"conflict", "session_expired", "context_changed"}:
+        if code in {"session_expired", "context_changed"}:
             return {"status": code}
         return {"status": "unavailable", "reason": unavailable_reason(exc)}
     except Exception as exc:
