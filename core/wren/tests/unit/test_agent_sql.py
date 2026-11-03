@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 
 import pytest
+import sqlglot
+import yaml
+from sqlglot.optimizer.qualify import qualify
 
 pytest.importorskip("mcp")
 from wren.agent_service import Ask, Ref, build_mcp, create_service  # noqa: E402
@@ -18,6 +21,9 @@ from wren.agent_sql import (  # noqa: E402
     QueryShapeError,
 )
 from wren.context import build_json  # noqa: E402
+from wren.declared_default_check import _Statement  # noqa: E402
+from wren.declared_default_fx import VIEW_MARK, evaluate  # noqa: E402
+from wren.declared_default_status import _Status, display  # noqa: E402
 
 needs_policy_runtime = pytest.mark.skipif(
     Path(os.getenv("WARBLE_SERVICE", "")).name == "fake_runtime.js",
@@ -1610,3 +1616,154 @@ def test_an_alias_or_cte_named_like_a_cube_is_not_the_cube(adhoc, sql):
     s = adhoc(files=VIEWS)
     prepared = s.sql.prepare(sql)
     assert prepared.checks[STATUS]["result"] == "satisfied"
+
+
+# -- a status filter written outside the view or derived table that reads the status model ------
+
+ORDER_VALUE_BODY = """SELECT order_id, customer_id, status, is_test, usd_amount FROM (
+  SELECT o.id AS order_id, o.customer_id AS customer_id, o.status AS status, o.is_test AS is_test,
+         CASE WHEN i.currency = 'USD' THEN i.amount ELSE i.amount * r.rate_to_usd END AS usd_amount,
+         ROW_NUMBER() OVER (PARTITION BY i.id ORDER BY r.rate_date DESC) AS rn
+  FROM invoices i
+  JOIN orders o ON o.customer_id = i.customer_id
+  LEFT JOIN fx_rates r ON r.currency = i.currency AND r.rate_date <= i.invoice_date
+) ranked WHERE rn = 1"""
+ORDER_VALUE = {
+    "views/order_value/metadata.yml": "name: order_value\nguarantees: [convert-invoices-to-usd]\n",
+    "views/order_value/sql.yml": yaml.safe_dump({"statement": ORDER_VALUE_BODY}),
+}
+NOT_TEST = "NOT v.is_test"
+
+
+def status_result(s, sql):
+    """The count-paid-and-shipped verdict of sql as prepare computes it (the statement
+    after view expansion), whatever the other declared rules say about the statement."""
+    tree, _ = s.sql._expand_views(sqlglot.parse_one(sql, read="duckdb"))
+    evaluation = evaluate(s.sql.checker, tree, None)
+    found = [r for r in evaluation.violations if r.split(":")[0] == STATUS]
+    if found:
+        return found[0].split(":", 1)[1]
+    return evaluation.checks[STATUS]["result"]
+
+
+def outer_filter_statements(source):
+    def sql(where):
+        return f"SELECT SUM(v.usd_amount) FROM {source} v WHERE {NOT_TEST}{where}"
+
+    return {
+        "in": sql(" AND v.status IN ('paid', 'shipped')"),
+        "lower-in": sql(" AND lower(v.status) IN ('paid', 'shipped')"),
+        "eq-or": sql(" AND (v.status = 'paid' OR v.status = 'shipped')"),
+        "not-in": sql(" AND v.status NOT IN ('cancelled', 'pending')"),
+        "subset": sql(" AND v.status = 'paid'"),
+        "superset": sql(" AND v.status <> 'cancelled'"),
+        "none": sql(""),
+    }
+
+
+DERIVED_ORDER_VALUE = f"({ORDER_VALUE_BODY})"
+EXPECTED_OUTER_FILTER = {
+    "in": "satisfied",
+    "lower-in": "satisfied",
+    "eq-or": "satisfied",
+    "not-in": "satisfied",
+    "subset": "subset",
+    "superset": "superset",
+    "none": "missing",
+}
+
+
+@pytest.mark.parametrize("name", EXPECTED_OUTER_FILTER)
+def test_a_status_filter_on_a_view_column_counts_for_the_read_inside_the_view(
+    adhoc, name
+):
+    s = adhoc(files=ORDER_VALUE)
+    sql = outer_filter_statements("order_value")[name]
+    assert status_result(s, sql) == EXPECTED_OUTER_FILTER[name]
+
+
+@pytest.mark.parametrize("name", EXPECTED_OUTER_FILTER)
+def test_a_status_filter_on_a_derived_table_column_counts_for_the_read_inside_it(
+    adhoc, name
+):
+    s = adhoc(files=ORDER_VALUE)
+    sql = outer_filter_statements(DERIVED_ORDER_VALUE)[name]
+    assert status_result(s, sql) == EXPECTED_OUTER_FILTER[name]
+
+
+@pytest.mark.parametrize("name", EXPECTED_OUTER_FILTER)
+def test_a_status_filter_on_a_cte_column_counts_for_the_read_inside_it(adhoc, name):
+    s = adhoc(files=ORDER_VALUE)
+    sql = outer_filter_statements("ov")[name]
+    cte = f"WITH ov AS ({ORDER_VALUE_BODY}) {sql}"
+    assert status_result(s, cte) == EXPECTED_OUTER_FILTER[name]
+
+
+def status_reads(s, sql):
+    """Per read of the status model: whether it sits inside a view, and what its filters keep
+    (``None`` when no filter reaches it)."""
+    tree, _ = s.sql._expand_views(sqlglot.parse_one(sql, read="duckdb"))
+    checker = s.sql.checker
+    qualified = qualify(
+        tree.copy(),
+        dialect="duckdb",
+        schema=checker.schema,
+        validate_qualify_columns=True,
+        identify=False,
+    )
+    rule = next(r for r in checker.rules if r.id == STATUS)
+    status = _Status(_Statement(qualified, checker), checker, rule, frozenset())
+    kept = status.retained()
+    reads = []
+    for read in status.instances:
+        node, view = read, None
+        while node is not None and view is None:
+            view = node.meta.get(VIEW_MARK)
+            node = node.parent
+        entry = kept.get(id(read))
+        reads.append((view, None if entry is None else display(rule, entry[0])))
+    return reads
+
+
+JOINED_BACK = (
+    "SELECT SUM(v.usd_amount) FROM order_value v JOIN orders o ON v.order_id = o.id "
+    "JOIN customers c ON o.customer_id = c.id WHERE {where} AND NOT o.is_test"
+)
+ALL_PASSING = ["paid", "shipped"]
+
+
+def test_a_filter_on_the_model_joined_to_the_view_does_not_reach_the_read_inside_the_view(
+    adhoc,
+):
+    s = adhoc(files=ORDER_VALUE)
+    for status in (
+        "lower(o.status) IN ('paid', 'shipped')",
+        "o.status IN ('paid', 'shipped')",
+    ):
+        sql = JOINED_BACK.format(where=f"{status} AND NOT v.is_test")
+        assert sorted(status_reads(s, sql), key=lambda read: read[0] is None) == [
+            ("order_value", None),
+            (None, ALL_PASSING),
+        ]
+        assert status_result(s, sql) == "missing"
+        assert refused(s, sql).rules == (f"{STATUS}:missing",)
+
+
+def test_each_read_of_the_status_model_needs_its_own_filter(adhoc):
+    s = adhoc(files=ORDER_VALUE)
+    on_view = "lower(v.status) IN ('paid', 'shipped') AND NOT v.is_test"
+    sql = JOINED_BACK.format(where=on_view)
+    assert sorted(status_reads(s, sql), key=lambda read: read[0] is None) == [
+        ("order_value", ALL_PASSING),
+        (None, None),
+    ]
+    assert status_result(s, sql) == "missing"
+    both = JOINED_BACK.format(where=f"{on_view} AND o.status IN ('paid', 'shipped')")
+    assert status_result(s, both) == "satisfied"
+    assert s.sql.prepare(both).checks[STATUS]["result"] == "satisfied"
+
+
+def test_grouping_by_a_view_status_column_filters_nothing(adhoc):
+    s = adhoc(files=ORDER_VALUE)
+    sql = f"SELECT v.status, COUNT(*) FROM order_value v WHERE {NOT_TEST} GROUP BY v.status"
+    assert status_result(s, sql) == "missing"
