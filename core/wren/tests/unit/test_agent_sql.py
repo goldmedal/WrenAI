@@ -2099,3 +2099,134 @@ def test_the_date_windows_of_a_view_statement_follow_the_expanded_body(adhoc):
     )
     assert found == [window("invoices.invoice_date", "2026-01-01", None, True, False)]
     assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+# -- a period must bound every read of the statement ----------------------------------------------
+
+JUNE_BRANCH = f"SELECT COUNT(*) AS n FROM orders WHERE {SCOPED} AND {JUNE}"
+ALL_TIME_BRANCH = f"SELECT COUNT(*) AS n FROM orders WHERE {SCOPED}"
+
+
+def test_an_unwindowed_union_branch_over_a_windowed_model_is_unpinned(adhoc):
+    found, unverified = windows_of(
+        adhoc(), f"{JUNE_BRANCH} UNION ALL {ALL_TIME_BRANCH}"
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_a_june_numerator_over_an_all_time_denominator_is_unpinned(adhoc):
+    s = adhoc()
+    scalar = (
+        f"SELECT (SELECT COUNT(*) FROM orders WHERE {SCOPED} AND {JUNE}) * 1.0 "
+        f"/ (SELECT COUNT(*) FROM orders WHERE {SCOPED}) AS share"
+    )
+    ctes = (
+        f"WITH june AS (SELECT COUNT(*) AS n FROM orders WHERE {SCOPED} AND {JUNE}), "
+        f"everything AS (SELECT COUNT(*) AS n FROM orders WHERE {SCOPED}) "
+        "SELECT june.n * 1.0 / everything.n AS share FROM june, everything"
+    )
+    for sql in (scalar, ctes):
+        found, unverified = windows_of(s, sql)
+        assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+        assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_a_window_beside_an_unreadable_filter_on_another_model_is_unpinned(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"{JUNE_BRANCH} UNION ALL SELECT COUNT(*) AS n FROM invoices "
+        "WHERE DATE_TRUNC('month', invoice_date) = DATE '2026-06-01'",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_two_branches_with_the_same_window_are_one_pinned_window(adhoc):
+    found, unverified = windows_of(adhoc(), f"{JUNE_BRANCH} UNION ALL {JUNE_BRANCH}")
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_window_on_a_derived_column_covers_the_select_it_passes_through(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"WITH base AS (SELECT order_date AS placed, amount FROM orders WHERE {SCOPED}), "
+        "june AS (SELECT amount FROM base WHERE placed >= DATE '2026-06-01') "
+        "SELECT SUM(amount) FROM june",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", None, True, False)]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_model_without_a_window_anywhere_does_not_make_the_period_unpinned(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        "SELECT COUNT(*) FROM orders o JOIN customers c ON o.customer_id = c.id "
+        f"WHERE NOT o.is_test AND o.{SALES} AND o.order_date >= DATE '2026-06-01'",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", None, True, False)]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+# -- null tests inside aggregates are as neutral as in WHERE; HAVING and QUALIFY are scanned ---------
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "COUNT(*) FILTER (WHERE order_date IS NULL)",
+        "COUNT(*) FILTER (WHERE order_date IS NOT NULL)",
+        "SUM(CASE WHEN order_date IS NULL THEN 1 ELSE 0 END)",
+        "SUM(CASE WHEN NOT (order_date IS NULL) THEN 1 ELSE 0 END)",
+    ],
+)
+def test_a_null_test_in_filter_or_case_is_neither_a_window_nor_unverified(adhoc, form):
+    found, unverified = windows_of(adhoc(), f"SELECT {form} FROM orders WHERE {SCOPED}")
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "COUNT(*) FILTER (WHERE order_date IS NULL OR order_date >= DATE '2026-06-01')",
+        "COUNT(*) FILTER (WHERE order_date IS NOT NULL AND order_date >= DATE '2026-06-01')",
+        "SUM(CASE WHEN order_date IS NULL OR order_date < DATE '2026-06-01' THEN 1 ELSE 0 END)",
+    ],
+)
+def test_a_date_comparison_beside_a_null_test_in_an_aggregate_is_still_unpinned(
+    adhoc, form
+):
+    found, unverified = windows_of(adhoc(), f"SELECT {form} FROM orders WHERE {SCOPED}")
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_having_on_a_grouped_date_column_is_a_window(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"SELECT order_date, COUNT(*) FROM orders WHERE {SCOPED} GROUP BY order_date "
+        "HAVING order_date >= DATE '2026-06-01'",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", None, True, False)]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_having_on_an_aggregate_of_a_date_column_is_not_a_window(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"SELECT customer_id, COUNT(*) FROM orders WHERE {SCOPED} GROUP BY customer_id "
+        "HAVING MIN(order_date) >= DATE '2026-06-01'",
+    )
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_qualify_on_a_date_column_is_a_window(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"SELECT amount FROM orders WHERE {SCOPED} QUALIFY order_date >= DATE '2026-06-01'",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", None, True, False)]
+    assert DATE_WINDOW_UNVERIFIED not in unverified

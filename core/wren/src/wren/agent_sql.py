@@ -599,24 +599,34 @@ class AdHocSQL:
         conditions. A date column that is also filtered any other way anywhere in the
         statement (``DATE_TRUNC``, ``EXTRACT``, arithmetic, a non-literal operand, an ``OR``,
         a ``CASE``/``FILTER`` condition, a derived value) is not listed and ``pinned`` is
-        false: the host cannot say which dates the statement keeps. ``IS [NOT] NULL`` and
-        a comparison of two columns in a join condition are not date filters and count for
+        false: the host cannot say which dates the statement keeps. So is a select that
+        reads a model whose date column is windowed in another select (a UNION branch, a CTE,
+        a subquery) without a window of its own on that model: the figure mixes a bounded read
+        with an unbounded one. A window on a column a derived table passes through covers the
+        selects it passes through. The windows found stay listed either way. ``IS [NOT] NULL``
+        and a comparison of two columns in a join condition are not date filters and count for
         nothing either way. Nothing here reads what the worker wrote about its question.
         """
         windows, unpinned = [], set()
+        covered = {}
+        selects = []
         for scope in scopes:
             select = scope.expression
             if not isinstance(select, exp.Select):
                 continue
+            selects.append(scope)
             bounds = {}
             for condition, joined in self._conditions(select):
                 for term in self._conjuncts(condition):
                     taken = self._bounds_of(scope, term)
                     if taken is not None:
-                        for column, side, value, inclusive in taken:
+                        for column, side, value, inclusive, through in taken:
                             self._tighten(
                                 bounds.setdefault(column, {}), side, value, inclusive
                             )
+                            model = self._key(column)[0]
+                            for reached in through:
+                                covered.setdefault(id(reached), set()).add(model)
                     elif not (
                         self._is_null_check(term)
                         or (joined and self._is_join_key(term))
@@ -625,15 +635,28 @@ class AdHocSQL:
             for node in select.find_all(exp.If, exp.Filter):
                 if node.find_ancestor(exp.Select) is select:
                     condition = (
-                        node.this if isinstance(node, exp.If) else node.expression
+                        node.this if isinstance(node, exp.If) else node.expression.this
                     )
-                    unpinned |= self._date_refs(scope, condition)
+                    for term in self._conjuncts(condition):
+                        if not self._is_null_check(term):
+                            unpinned |= self._date_refs(scope, term)
             windows += [self._window(column, sides) for column, sides in bounds.items()]
         listed = {}
         for window in windows:
             if self._key(window["column"]) not in unpinned:
                 listed.setdefault(json.dumps(window, sort_keys=True), window)
-        return list(listed.values()), not unpinned
+        pinned = not unpinned
+        # A figure that mixes a windowed read of a model with an unwindowed read of the same
+        # model (a UNION branch, a CTE, a subquery) is not bounded by the window: fail closed.
+        windowed = {self._key(w["column"])[0] for w in listed.values()}
+        for scope in selects:
+            for source in scope.sources.values():
+                if not isinstance(source, exp.Table):
+                    continue
+                model = source.name.lower()
+                if model in windowed and model not in covered.get(id(scope), ()):
+                    pinned = False
+        return list(listed.values()), pinned
 
     @staticmethod
     def _key(qualified):
@@ -683,13 +706,34 @@ class AdHocSQL:
         )
 
     def _date_column(self, scope, node):
-        """``model.column`` when ``node`` is a plain reference to a date or timestamp column."""
+        """``(model.column, scopes)`` when ``node`` is a plain reference to a date or timestamp
+        column: the base column it reads through derived tables, and the scopes it passes
+        through (the one that holds the model last), which the window therefore covers."""
         if not isinstance(node, exp.Column):
             return None
-        base = self._base_column(scope, node)
-        if base is None or (base[0].lower(), base[1].lower()) not in self.date_columns:
-            return None
-        return f"{base[0]}.{base[1]}"
+        reached, depth = [], 0
+        while depth < 8:
+            source = scope.sources.get(node.table)
+            if isinstance(source, exp.Table):
+                key = (source.name.lower(), node.name.lower())
+                if key not in self.date_columns:
+                    return None
+                return f"{source.name}.{node.name}", [*reached, scope]
+            if not isinstance(source, Scope):
+                return None
+            inner = next(
+                (
+                    child.unalias()
+                    for child in source.expression.selects
+                    if child.alias_or_name == node.name
+                ),
+                None,
+            )
+            if not isinstance(inner, exp.Column):
+                return None
+            reached.append(scope)
+            scope, node, depth = source, inner, depth + 1
+        return None
 
     def _date_refs(self, scope, node, depth=0):
         """The date columns ``node`` reads, followed through derived tables and CTEs."""
@@ -722,16 +766,20 @@ class AdHocSQL:
                 stack.extend(c for c in children if isinstance(c, exp.Expression))
 
     def _bounds_of(self, scope, term):
-        """``[(column, "lower"|"upper", value, inclusive), ...]`` when ``term`` compares a date
+        """``[(column, "lower"|"upper", value, inclusive, scopes), ...]`` when ``term`` compares a date
         column with a date literal and does nothing else, otherwise ``None``."""
         while isinstance(term, exp.Paren):
             term = term.this
         if isinstance(term, exp.Between):
-            column = self._date_column(scope, term.this)
+            found = self._date_column(scope, term.this)
             low = self._literal(term.args.get("low"))
             high = self._literal(term.args.get("high"))
-            if column and low and high:
-                return [(column, "lower", low, True), (column, "upper", high, True)]
+            if found and low and high:
+                column, through = found
+                return [
+                    (column, "lower", low, True, through),
+                    (column, "upper", high, True, through),
+                ]
             return None
         if not isinstance(term, (exp.EQ, exp.GT, exp.GTE, exp.LT, exp.LTE)):
             return None
@@ -739,14 +787,26 @@ class AdHocSQL:
             (term.this, term.expression, False),
             (term.expression, term.this, True),
         ):
-            column = self._date_column(scope, mine)
+            found = self._date_column(scope, mine)
             value = self._literal(other)
-            if not column or not value:
+            if not found or not value:
                 continue
+            column, through = found
             if isinstance(term, exp.EQ):
-                return [(column, "lower", value, True), (column, "upper", value, True)]
+                return [
+                    (column, "lower", value, True, through),
+                    (column, "upper", value, True, through),
+                ]
             side, inclusive = BOUNDS[type(term)]
-            return [(column, FLIPPED[side] if mirrored else side, value, inclusive)]
+            return [
+                (
+                    column,
+                    FLIPPED[side] if mirrored else side,
+                    value,
+                    inclusive,
+                    through,
+                )
+            ]
         return None
 
     @staticmethod

@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from wren.agent_ipc import RuntimeIPC
 from wren.agent_project import Project, contained, discover
 from wren.agent_sql import (
+    DATE_WINDOW_UNVERIFIED,
     AdHocSQL,
     DeclaredDefaultUndetermined,
     PrivateSQL,
@@ -292,11 +293,13 @@ PERIOD_FIELDS = ("lower", "upper", "lower_inclusive", "upper_inclusive")
 
 
 def applied_period(windows) -> dict | None:
-    """The one date range the host read from the statement, or ``None``.
+    """The date range the host read from a statement whose every read it could bound, or ``None``.
 
     That is the window of a statement with exactly one, or with several that agree on both
-    bounds (and their boundary flags). Several windows that differ, no window, and a window the
-    host could not pin down all give ``None``; the column name never leaves with it."""
+    bounds (and their boundary flags). Several windows that differ and no window give ``None``;
+    ``project_evidence`` also gives ``None`` when the statement carries ``date_window_unverified``
+    (a filter the host could not read, or a read of a windowed model that has no window of its
+    own). The column name never leaves with it."""
     shapes = {tuple(w[k] for k in PERIOD_FIELDS) for w in windows or []}
     if len(shapes) != 1:
         return None
@@ -694,7 +697,9 @@ class Service:
                 raise ValueError("invalid_evidence")
             projection = {
                 "mandatory_scope": copy.deepcopy(saved["conditions"]),
-                "applied_period": applied_period(
+                "applied_period": None
+                if DATE_WINDOW_UNVERIFIED in unverified
+                else applied_period(
                     (internal.get("observed") or {}).get("date_windows")
                 ),
             }

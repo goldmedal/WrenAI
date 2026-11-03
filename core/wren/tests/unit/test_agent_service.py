@@ -2182,6 +2182,36 @@ def test_two_windows_give_a_period_only_when_they_agree(service):
     assert other["evidence"]["applied_period"] is None
 
 
+ALL_TIME = "SELECT COUNT(*) AS n FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped')"
+JUNE_COUNT = DATED.replace("COUNT(*)", "COUNT(*) AS n")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        f"{JUNE_COUNT} UNION ALL {ALL_TIME}",
+        f"{JUNE_COUNT} UNION ALL SELECT COUNT(*) AS n FROM invoices "
+        "WHERE DATE_TRUNC('month', invoice_date) = DATE '2026-06-01'",
+    ],
+)
+def test_a_period_that_does_not_bound_the_whole_statement_is_not_published(
+    service, statement
+):
+    s = service(example_presets=True, preset="full")
+    evidence = execute(s, sql_request(s, statement))["evidence"]
+    assert evidence["applied_period"] is None
+    assert evidence["has_unverified_semantics"] is True
+    assert evidence["unverified"][0] == "date_window_unverified"
+    assert evidence["observed"]["date_windows"] == [JUNE_WINDOW]
+
+
+def test_a_statement_every_branch_of_which_has_the_window_publishes_it(service):
+    s = service(example_presets=True, preset="full")
+    done = execute(s, sql_request(s, f"{JUNE_COUNT} UNION ALL {JUNE_COUNT}"))
+    assert done["evidence"]["applied_period"] == JUNE_PERIOD
+    assert done["evidence"]["observed"]["date_windows"] == [JUNE_WINDOW]
+
+
 def test_the_period_needs_both_bounds_and_their_flags_to_agree():
     shape = {"lower": "2026-06-01", "upper": "2026-07-01"}
     closed = {**shape, "lower_inclusive": True, "upper_inclusive": True}
