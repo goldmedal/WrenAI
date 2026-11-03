@@ -10,10 +10,12 @@ import pytest
 import sqlglot
 import yaml
 from sqlglot.optimizer.qualify import qualify
+from sqlglot.optimizer.scope import traverse_scope
 
 pytest.importorskip("mcp")
 from wren.agent_service import Ask, Ref, build_mcp, create_service  # noqa: E402
 from wren.agent_sql import (  # noqa: E402
+    AdHocSQL,
     DeclaredDefaultMissing,
     DeclaredDefaultUndetermined,
     QueryDenied,
@@ -2228,5 +2230,132 @@ def test_qualify_on_a_date_column_is_a_window(adhoc):
         adhoc(),
         f"SELECT amount FROM orders WHERE {SCOPED} QUALIFY order_date >= DATE '2026-06-01'",
     )
+    assert found == [window("orders.order_date", "2026-06-01", None, True, False)]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+# -- coverage is per consuming edge ---------------------------------------------------------------
+
+BASE_CTE = (
+    "WITH base AS (SELECT id, customer_id, order_date, amount FROM orders "
+    f"WHERE {SCOPED})"
+)
+JUNE_ON_BASE = "order_date >= DATE '2026-06-01' AND order_date < DATE '2026-07-01'"
+
+
+def test_a_shared_cte_filtered_by_one_consumer_only_is_unpinned(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"{BASE_CTE} SELECT COUNT(*) AS n FROM base WHERE {JUNE_ON_BASE} "
+        "UNION ALL SELECT COUNT(*) AS n FROM base",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_a_ratio_of_two_consumers_of_one_cte_is_unpinned(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"{BASE_CTE}, jn AS (SELECT COUNT(*) AS jc FROM base WHERE {JUNE_ON_BASE}), "
+        "an AS (SELECT COUNT(*) AS ac FROM base) "
+        "SELECT jn.jc * 1.0 / an.ac AS share FROM jn, an",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_two_consumers_of_one_cte_with_the_same_window_are_pinned(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"{BASE_CTE} SELECT COUNT(*) AS n FROM base WHERE {JUNE_ON_BASE} "
+        f"UNION ALL SELECT COUNT(*) AS n FROM base WHERE {JUNE_ON_BASE}",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_two_consumers_of_one_cte_with_different_windows_list_both(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"{BASE_CTE} SELECT COUNT(*) AS n FROM base WHERE {JUNE_ON_BASE} "
+        "UNION ALL SELECT COUNT(*) AS n FROM base "
+        "WHERE order_date >= DATE '2026-05-01' AND order_date < DATE '2026-06-01'",
+    )
+    assert found == [
+        window("orders.order_date", "2026-06-01", "2026-07-01"),
+        window("orders.order_date", "2026-05-01", "2026-06-01"),
+    ]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_filter_inside_a_shared_cte_bounds_every_consumer(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"WITH june AS (SELECT amount FROM orders WHERE {SCOPED} AND {JUNE}) "
+        "SELECT COUNT(*) AS n FROM june UNION ALL SELECT COUNT(*) AS n FROM june",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_cte_filtered_by_its_only_consumer_through_a_derived_table_is_pinned(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"{BASE_CTE} SELECT COUNT(*) AS n FROM "
+        "(SELECT order_date FROM base) t "
+        "WHERE t.order_date >= DATE '2026-06-01' AND t.order_date < DATE '2026-07-01'",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_cte_that_nothing_reads_does_not_matter(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"WITH unused AS (SELECT id FROM orders WHERE {SCOPED}) "
+        f"SELECT COUNT(*) AS n FROM orders WHERE {SCOPED} AND {JUNE}",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def _windows_over_a_mixed_case_model(sql):
+    """``_date_windows`` on a statement over a model whose catalog name is ``Orders``."""
+    schema = {"Orders": {"order_date": "DATE", "amount": "INT"}}
+    tree = qualify(
+        sqlglot.parse_one(sql, read="duckdb"),
+        dialect="duckdb",
+        schema=schema,
+        validate_qualify_columns=True,
+        identify=True,
+    )
+    checker = AdHocSQL.__new__(AdHocSQL)
+    checker.date_columns = frozenset({("orders", "order_date")})
+    found, pinned = checker._date_windows(list(traverse_scope(tree)))
+    return len(found), pinned
+
+
+def test_the_case_of_a_model_name_does_not_change_the_verdict():
+    june = (
+        "SELECT SUM(amount) AS n FROM Orders WHERE order_date >= DATE '2026-06-01' "
+        "AND order_date < DATE '2026-07-01'"
+    )
+    everything = "SELECT SUM(amount) AS n FROM Orders"
+    assert _windows_over_a_mixed_case_model(f"{june} UNION ALL {june}") == (1, True)
+    assert _windows_over_a_mixed_case_model(f"{june} UNION ALL {everything}") == (
+        1,
+        False,
+    )
+
+
+def test_a_self_join_is_judged_per_model_not_per_alias(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        "SELECT COUNT(*) AS n FROM orders o JOIN orders p ON p.customer_id = o.customer_id "
+        "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped') "
+        "AND NOT p.is_test AND p.status IN ('paid', 'shipped') "
+        "AND o.order_date >= DATE '2026-06-01'",
+    )
+    # Documented limit: the window on one alias counts for the model, p is not checked apart.
     assert found == [window("orders.order_date", "2026-06-01", None, True, False)]
     assert DATE_WINDOW_UNVERIFIED not in unverified

@@ -37,7 +37,7 @@ import sqlglot
 from pydantic import BaseModel, ConfigDict, Field
 from sqlglot import exp
 from sqlglot.optimizer.qualify import qualify
-from sqlglot.optimizer.scope import Scope, traverse_scope
+from sqlglot.optimizer.scope import Scope, ScopeType, traverse_scope
 
 from wren.declared_default_check import DefaultsChecker
 from wren.declared_default_fx import VIEW_MARK, evaluate
@@ -602,13 +602,14 @@ class AdHocSQL:
         false: the host cannot say which dates the statement keeps. So is a select that
         reads a model whose date column is windowed in another select (a UNION branch, a CTE,
         a subquery) without a window of its own on that model: the figure mixes a bounded read
-        with an unbounded one. A window on a column a derived table passes through covers the
-        selects it passes through. The windows found stay listed either way. ``IS [NOT] NULL``
+        with an unbounded one; coverage is judged per consuming edge (see
+        ``_every_read_bounded``), so one consumer's filter on a shared CTE does not bound
+        another consumer of it. The windows found stay listed either way. ``IS [NOT] NULL``
         and a comparison of two columns in a join condition are not date filters and count for
         nothing either way. Nothing here reads what the worker wrote about its question.
         """
         windows, unpinned = [], set()
-        covered = {}
+        marked = {}
         selects = []
         for scope in scopes:
             select = scope.expression
@@ -620,13 +621,13 @@ class AdHocSQL:
                 for term in self._conjuncts(condition):
                     taken = self._bounds_of(scope, term)
                     if taken is not None:
-                        for column, side, value, inclusive, through in taken:
+                        for column, side, value, inclusive, edge in taken:
                             self._tighten(
                                 bounds.setdefault(column, {}), side, value, inclusive
                             )
-                            model = self._key(column)[0]
-                            for reached in through:
-                                covered.setdefault(id(reached), set()).add(model)
+                            marked.setdefault((id(scope), edge), set()).add(
+                                self._key(column)[0]
+                            )
                     elif not (
                         self._is_null_check(term)
                         or (joined and self._is_join_key(term))
@@ -645,18 +646,114 @@ class AdHocSQL:
         for window in windows:
             if self._key(window["column"]) not in unpinned:
                 listed.setdefault(json.dumps(window, sort_keys=True), window)
-        pinned = not unpinned
-        # A figure that mixes a windowed read of a model with an unwindowed read of the same
-        # model (a UNION branch, a CTE, a subquery) is not bounded by the window: fail closed.
-        windowed = {self._key(w["column"])[0] for w in listed.values()}
-        for scope in selects:
-            for source in scope.sources.values():
-                if not isinstance(source, exp.Table):
-                    continue
-                model = source.name.lower()
-                if model in windowed and model not in covered.get(id(scope), ()):
-                    pinned = False
+        pinned = not unpinned and self._every_read_bounded(
+            scopes,
+            selects,
+            marked,
+            {self._key(w["column"])[0] for w in listed.values()},
+        )
         return list(listed.values()), pinned
+
+    @staticmethod
+    def _every_read_bounded(scopes, selects, marked, windowed):
+        """Whether every select that reads a windowed model is bounded by a window for it.
+
+        Coverage is per consuming edge. A filter marks only the first hop it reads through:
+        the consumer's own source, a table (judged per model, so a self-join counts as one
+        read) or a CTE, derived table or view body. A select is *bounded* for a model when each
+        source of it that leads there is marked by its own filter or is itself bounded; it is
+        *fine* when it is bounded, or when it has consumers and each of them marks the edge to it
+        or is fine. A CTE two selects read is therefore bounded only for the consumer that
+        filters it, and the other consumer fails the statement.
+        """
+        if not windowed:
+            return True
+
+        def used(scope):
+            """The sources a select actually reads (FROM and JOIN), not the CTEs merely in
+            scope."""
+            aliases = {alias for alias, _ in scope.references}
+            return [s for alias, s in scope.sources.items() if alias in aliases]
+
+        parents = {}
+        for scope in scopes:
+            for source in used(scope):
+                if isinstance(source, Scope):
+                    parents.setdefault(id(source), {})[id(scope)] = scope
+            for branch in scope.union_scopes:
+                parents.setdefault(id(branch), {})[id(scope)] = scope
+        reach_cache, bounded_cache, fine_cache = {}, {}, {}
+
+        def reach(scope):
+            if id(scope) not in reach_cache:
+                found = set()
+                for source in used(scope):
+                    if isinstance(source, Scope):
+                        found |= reach(source)
+                    elif isinstance(source, exp.Table):
+                        found.add(source.name.lower())
+                for branch in scope.union_scopes:
+                    found |= reach(branch)
+                reach_cache[id(scope)] = found & windowed
+            return reach_cache[id(scope)]
+
+        def bounded(scope, model):
+            slot = (id(scope), model)
+            if slot not in bounded_cache:
+                if scope.union_scopes:
+                    ok = all(
+                        bounded(b, model)
+                        for b in scope.union_scopes
+                        if model in reach(b)
+                    )
+                else:
+                    ok = True
+                    seen = set()
+                    for source in used(scope):
+                        if isinstance(source, Scope):
+                            edge = ("s", id(source))
+                            leads = model in reach(source)
+                        else:
+                            edge = ("t", source.name.lower())
+                            leads = edge[1] == model
+                        if not leads or edge in seen:
+                            continue
+                        seen.add(edge)
+                        if model not in marked.get((id(scope), edge), ()) and not (
+                            isinstance(source, Scope) and bounded(source, model)
+                        ):
+                            ok = False
+                bounded_cache[slot] = ok
+            return bounded_cache[slot]
+
+        def fine(scope, model):
+            slot = (id(scope), model)
+            if slot not in fine_cache:
+                fine_cache[slot] = False  # a scope is never its own consumer
+                owners = parents.get(id(scope), {}).values()
+                fine_cache[slot] = bounded(scope, model) or (
+                    bool(owners)
+                    and all(
+                        fine(owner, model)
+                        if scope in owner.union_scopes
+                        else model in marked.get((id(owner), ("s", id(scope))), ())
+                        or fine(owner, model)
+                        for owner in owners
+                    )
+                )
+            return fine_cache[slot]
+
+        def read(scope):
+            """A CTE nothing reads has no effect on the figure."""
+            unused = scope.scope_type in (ScopeType.CTE, ScopeType.DERIVED_TABLE)
+            return not unused or id(scope) in parents
+
+        return all(
+            fine(scope, model)
+            for scope in selects
+            if read(scope)
+            for model in reach(scope)
+        )
 
     @staticmethod
     def _key(qualified):
@@ -706,21 +803,22 @@ class AdHocSQL:
         )
 
     def _date_column(self, scope, node):
-        """``(model.column, scopes)`` when ``node`` is a plain reference to a date or timestamp
-        column: the base column it reads through derived tables, and the scopes it passes
-        through (the one that holds the model last), which the window therefore covers."""
+        """``(model.column, edge)`` when ``node`` is a plain reference to a date or timestamp
+        column: the base column it reads through derived tables, and the first hop it reads
+        through (a table, or the CTE, derived table or view body the select consumes)."""
         if not isinstance(node, exp.Column):
             return None
-        reached, depth = [], 0
+        first, depth = None, 0
         while depth < 8:
             source = scope.sources.get(node.table)
             if isinstance(source, exp.Table):
                 key = (source.name.lower(), node.name.lower())
                 if key not in self.date_columns:
                     return None
-                return f"{source.name}.{node.name}", [*reached, scope]
+                return f"{source.name}.{node.name}", first or ("t", key[0])
             if not isinstance(source, Scope):
                 return None
+            first = first or ("s", id(source))
             inner = next(
                 (
                     child.unalias()
@@ -731,7 +829,6 @@ class AdHocSQL:
             )
             if not isinstance(inner, exp.Column):
                 return None
-            reached.append(scope)
             scope, node, depth = source, inner, depth + 1
         return None
 
@@ -766,7 +863,7 @@ class AdHocSQL:
                 stack.extend(c for c in children if isinstance(c, exp.Expression))
 
     def _bounds_of(self, scope, term):
-        """``[(column, "lower"|"upper", value, inclusive, scopes), ...]`` when ``term`` compares a date
+        """``[(column, "lower"|"upper", value, inclusive, edge), ...]`` when ``term`` compares a date
         column with a date literal and does nothing else, otherwise ``None``."""
         while isinstance(term, exp.Paren):
             term = term.this
