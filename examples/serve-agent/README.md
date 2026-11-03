@@ -115,7 +115,7 @@ A service configuration that still carries `dataset`, `adhoc`, `metadata`, `rule
 
 ### Execution limits
 
-`execution` holds the limits the host passes to the runtime as `init.limits`: `deadline_ms` (5000-600000, default 120000), `max_tokens`, `thinking` (`on`, `off` or `default`; `default` sends nothing so the provider's own setting applies), `max_turns`, `max_tool_calls`, `provider_max_retries` and `provider_max_retry_delay_ms`; `max_sql_attempts` (default 6, the cap on a task's SQL statements; see [Why a `run_sql` statement is refused](#why-a-run_sql-statement-is-refused)) is a host-side budget. All are optional. Unless `WREN_IPC_CALL_TIMEOUT_S` is set, the host waits `deadline_ms / 1000 + 40` seconds for one runtime call. If that wait ends first, the host sends `cancel` for the task, answers any late tool call with a refusal, keeps the runtime running and reports `unavailable` with reason `timeout`. A runtime that predates `init.limits` ignores them, so on such a runtime the deadline and thinking settings have no effect.
+`execution` holds the limits the host passes to the runtime as `init.limits`: `deadline_ms` (5000-600000, default 120000), `max_tokens`, `thinking` (`on`, `off` or `default`; `default` sends nothing so the provider's own setting applies), `max_turns`, `max_tool_calls`, `provider_max_retries` and `provider_max_retry_delay_ms`; `max_sql_attempts` (default 6, the cap on a task's SQL statements; see [Why a `run_sql` statement is refused](#why-a-run_sql-statement-is-refused)) is a host-side budget. All are optional, and so is `as_of`, a `YYYY-MM-DD` date (UTC) that stands for today in every task (see [Today's date for the worker](#todays-date-for-the-worker)); a value in any other form fails startup (`invalid_execution_config: as_of`). Unless `WREN_IPC_CALL_TIMEOUT_S` is set, the host waits `deadline_ms / 1000 + 40` seconds for one runtime call. If that wait ends first, the host sends `cancel` for the task, answers any late tool call with a refusal, keeps the runtime running and reports `unavailable` with reason `timeout`. A runtime that predates `init.limits` ignores them, so on such a runtime the deadline and thinking settings have no effect.
 
 A runtime that reports usage sends one `calls` entry per provider attempt (a retried 429 is its own entry) with every reply. The host never forwards it: it goes to the audit only, as one `model_call {request_id, turn, elapsed_ms, input, output, reasoning, cache_read, stop_reason, raw_stop_reason, tool_calls, status}` event per entry, written before the task's `task_completed` or `task_failed`. `input` excludes `cache_read`. An entry is recorded only if it has exactly those ten fields, every number is a non-negative integer and every label matches `[a-z0-9_]{0,32}`; anything else is dropped and counted in one `model_calls_dropped {request_id, count}` event. A runtime that sends no usage produces no `model_call` events, and that is not an error. When a task fails, `task_failed` also carries `turns` and `tool_calls` (the runtime's own counters when it reports them, otherwise `null`) and `sql_attempts` (the host's count of the task's SQL statements); `detail` keeps the runtime's exact failure code, for example `service_unavailable:turn_limit`.
 
@@ -148,14 +148,15 @@ A completed `ask_data` (or direct `run_sql`) answer and `get_evidence` carry the
 | `receive_answer` kind | Fields | Content |
 | --- | --- | --- |
 | none: part of `answer.approved` | `mandatory_scope` | `{"kind": "project_defaults", "declared_defaults_enforced": <bool>}`: whether the project declares default rules the host enforces on every statement (`false` for a project with none). It names no rule. A host-written text result carries `{}` |
+| none: part of `answer.approved` | `applied_period` | The one date range the host read from the statement: `{lower, upper, lower_inclusive, upper_inclusive}` (ISO 8601 dates or timestamps; an absent bound is `null`), or `null`. It is set when the statement has exactly one date window, or several with identical bounds and flags, and is `null` for none, for windows that differ, and when a date filter could not be pinned down. It carries dates and flags only, never a column name or rule text, which is why every preset shows it |
 | `answer.evidence.checks_summary` | `checks_summary`, `has_unverified_semantics` | `all_satisfied` when at least one declared rule applied to the statement, otherwise `none_applicable`: no rule id, no count. `has_unverified_semantics` says whether anything no check covers was touched, not which |
 | `answer.evidence.checks` | `checks` | `{<rule id>: {applicable, result, scope?}}` for every declared rule; `result` is `satisfied`, `satisfied_by_definition`, `satisfied_by_caller_scope` (then `scope` lists the confirmed statuses) or `not_applicable` |
-| `answer.evidence.observed` | `observed` | What the statement reads, taken from its tree: `models`, `columns` per model, `joins` (model pairs), `aggregated`, `filters` (`{column, operator}`, never a literal) and `status_literals` (the values a status column was compared with, only values the project lists for it). A denied column never appears |
+| `answer.evidence.observed` | `observed` | What the statement reads, taken from its tree: `models`, `columns` per model, `joins` (model pairs), `aggregated`, `filters` (`{column, operator}`, never a literal), `status_literals` (the values a status column was compared with, only values the project lists for it) and `date_windows` (see below). A denied column never appears, in `date_windows` either |
 | `answer.evidence.unverified` | `unverified` | The ids of the meanings no check covers that the statement touches (see [Declared default rules](#declared-default-rules)) |
 
 | Preset | Fields in `evidence` |
 | --- | --- |
-| `hidden` | `mandatory_scope`, `checks_summary`, `has_unverified_semantics` |
+| `hidden` | `mandatory_scope`, `applied_period`, `checks_summary`, `has_unverified_semantics` |
 | `structure` | hidden + `observed` |
 | `rules` | hidden + `checks` + `unverified` |
 | `full` | all of them |
@@ -164,6 +165,7 @@ For one statement, `SELECT c.region, COUNT(*) FROM orders o JOIN customers c ON 
 
 ```json
 {"mandatory_scope": {"kind": "project_defaults", "declared_defaults_enforced": true},
+ "applied_period": null,
  "checks_summary": "all_satisfied", "has_unverified_semantics": true}
 ```
 
@@ -178,9 +180,22 @@ and `full` returns that plus
               "joins": [["customers", "orders"]], "aggregated": true,
               "filters": [{"column": "orders.is_test", "operator": "is false"},
                           {"column": "orders.status", "operator": "in"}],
-              "status_literals": {"orders.status": ["paid", "shipped"]}},
+              "status_literals": {"orders.status": ["paid", "shipped"]},
+              "date_windows": []},
  "unverified": ["fiscal_calendar_bounds"]}
 ```
+
+#### The date range a statement applied
+
+The host reads the range from the statement's tree; it never takes the worker's word for it. For each select and each date or timestamp column, the comparisons of that column with a date literal (`>=`, `>`, `<`, `<=`, `=`, `BETWEEN`; `DATE '2026-06-01'`, `CAST('2026-06-01' AS DATE)` or an ISO string) in its `WHERE`, `HAVING`, `QUALIFY` and join conditions make one window. A column filtered any other way anywhere in the statement (`DATE_TRUNC`, `EXTRACT`, arithmetic such as `+ INTERVAL`, a non-literal operand, an `OR`, a `NOT`, `IN`, a `CASE` or `FILTER` condition, a value derived from it in a CTE) is not listed, and the statement carries `date_window_unverified` in `unverified` (and `has_unverified_semantics` is true), ahead of the ids a project declares. A null test (`IS [NOT] NULL`, for example a soft-delete column) and a comparison of two columns in a join condition are not date filters and count for nothing either way. A window ranks nothing: `ROW_NUMBER() OVER (... ORDER BY order_date)` is not a date filter.
+
+```json
+"observed": {"date_windows": [{"column": "orders.order_date", "lower": "2026-06-01", "upper": "2026-07-01",
+                               "lower_inclusive": true, "upper_inclusive": false}]}
+"applied_period": {"lower": "2026-06-01", "upper": "2026-07-01", "lower_inclusive": true, "upper_inclusive": false}
+```
+
+`date_windows` follows `observed` (`structure`, `full`); `applied_period` is shown to every preset. Windows over the same column in different selects (the branches of a `UNION`, a CTE and its caller) are listed separately, equal ones once. A date literal that is not a bound, and a bound the statement did not apply as a literal, never appear. The planner's skill compares `applied_period` with the period the user asked for and says so when they differ.
 
 What this lets a planner conclude: a statement that broke a declared rule never ran, so the evidence it holds describes a statement that passed. A violated or undetermined verdict is never part of evidence (they exist only in the worker's rejection and the audit), so a worker that was refused and corrected its statement leaves no trace there. `checks_summary` is only two-valued, and "has a status filter: yes" is not a field in any preset because it cannot tell excluding cancelled orders from counting only paid ones. `all_satisfied` and an empty `unverified` still do not mean the question was understood: evidence says how the statement was checked, not that it answered what was asked. Failed attempts are not disclosed at all; a planner learns only a coarse `unavailable.reason`.
 
@@ -203,7 +218,7 @@ Every mode answers "what data is there" without showing structure. Each profile'
 
 ### Why a task was unavailable
 
-An `unavailable` response carries a coarse `reason` so a planner can tell which side failed without receiving anything private: `provider` (the private model platform answered with an error or a broken stream), `timeout` (the invocation hit a deadline, was cancelled, or the host's own wait for the runtime ran out), `worker` (the private agent's output or limits: invalid final output, turn/tool/output limits, a tool failure, a spent SQL budget, or a final value that is not the host's evidence token), or `service` (the host or runtime itself, or a runtime that reports no diagnostic code). A `provider` or `timeout` reason is a signal to retry the identical request later; a `worker` reason is a signal to reformulate. Only `unavailable` has a reason; `denied`, `conflict`, `session_expired` and `context_changed` stay as they are.
+An `unavailable` response carries a coarse `reason` so a planner can tell which side failed without receiving anything private: `provider` (the private model platform answered with an error or a broken stream), `timeout` (the invocation hit a deadline, was cancelled, or the host's own wait for the runtime ran out), `worker` (the private agent's output or limits: invalid final output, turn/tool/output limits, a tool failure, a spent SQL budget, or a final value that is not the host's evidence token), or `service` (the host or runtime itself, or a runtime that reports no diagnostic code). A `provider` or `timeout` reason is a signal to retry the identical request later; a `worker` reason is a signal to reformulate. Only `unavailable` has a reason; `denied`, `session_expired` and `context_changed` stay as they are, and `conflict` has its own (see [Why a request conflicts](#why-a-request-conflicts)).
 
 The four values are a deliberate projection: the operator's `audit_path` records the exact code per request (`task_failed {request_id, reason, detail, turns, tool_calls, sql_attempts}`), still without provider text, SQL or credentials, and that finer code, with the `model_call` usage, is what an operator reads to tell a model that ran out of room from one that ran out of time. The planner is not given it. The mapping:
 
@@ -237,6 +252,22 @@ The four values are a deliberate projection: the operator's `audit_path` records
 
 Any other code, a runtime error with no code, and an unexpected failure are `service`. A runtime that predates the per-attempt usage report names its failures the same way; it just sends no usage.
 
+### Why a request conflicts
+
+A `conflict` answer is `{"status": "conflict", "reason": <reason>, "revision": <int>}`, and `revision` is the session's own revision when the request was refused. Sessions are bound to their caller, so it discloses nothing about anyone else's state.
+
+| `reason` | Cause | What the planner does |
+| --- | --- | --- |
+| `revision` | `expected_revision` is not the session's revision | resend the same question, capability and `reply_to` once, with a new request ID and `expected_revision` set to the returned `revision` |
+| `request_id` | the ID was already used for a different request | use a new ID |
+| `busy` | another call of the session is still running | wait for that call to answer and continue from its revision; the returned `revision` may be advanced by it at any moment, so it is a hint, not a promise |
+
+The session is neither closed nor reopened, and a revision is never guessed. The operator's audit gets one `conflict {request_id, reason, expected_revision, revision}` event per refusal. `session_expired` and `context_changed` stay as they are.
+
+### Today's date for the worker
+
+The gate does not allow `now()` or `current_date`, so the worker needs the date from the host: every task's worker request carries `as_of`, the configured `execution.as_of` or, when that is not set, the host clock's UTC date taken as the task starts. The three example profiles' `data_worker/respond.md` tell the worker to resolve relative periods from it. `capabilities` reports `as_of` too (the fixed date, or `"clock"`), so a planner can tell the data's reference date from its own clock; a completed answer does not repeat it. The date is recorded in the audit's `task_completed` and `task_failed` events and in the internal evidence, and nowhere else.
+
 ### Declared default rules
 
 A rule file may declare defaults in its front-matter (`defaults:`); the host checks every statement against them before it can run. `exclude_rows` requires the statement to exclude the flagged rows of every model it covers. It accepts no outer-join ON predicate at all: put the exclusion in `WHERE`, or in the ON of an INNER or comma join. It is also not scope-aware (a named residual): an exclusion inside a nested inner-join group, a subquery or a CTE that the statement outer-joins is accepted although it does not reach the preserved side's rows, so put the exclusion in the outer `WHERE`. `require_rate_join` requires an aggregate over a listed amount column to join the rate model on the amount's currency and on-or-before the amount's date; two optional keys tighten it: `match: single` requires the rate source to yield one row per amount row (an `ASOF JOIN`, or a derived source that keeps the newest row per amount through `ROW_NUMBER() ... ORDER BY date DESC` = 1; an ordinary `date <=` join is refused as `rate_multi_match`), and `base_currency: USD` names the currency whose amounts need no rate. With a base currency, an inner join of the rate model is refused (`base_currency_dropped`: the base-currency rows have no rate row and would vanish), and so is any literal default of a rate column outside a branch that only the base currency reaches (`rate_default_literal`: `COALESCE(rate, 1)` would turn a missing EUR rate into 1). A LEFT join that takes the base currency from the amount itself (`CASE WHEN currency = 'USD' THEN amount ELSE amount * rate END`) satisfies the rule; a LEFT join with neither guard nor default also passes, and the host records `observed.fx_missing_rate_handling = "unguarded_left_join"` so a later stage can say that the missing-rate behaviour was not verified.
@@ -269,7 +300,7 @@ The default analysis/counts offer is described as a row count of one model; raw 
 
 Rules in prose help the agent select the domain definition. Tool execution mints an internal evidence token, and only an exact valid token can produce a public result. The result excludes internal SQL and rule text. Evidence does not certify the model selected the user's intended question; the planner must still check what was counted.
 
-Session storage is in memory, with 30-minute idle and 8-hour maximum lifetime, one active mutation per session and bounded request history. Repeating the identical request ID replays an authorized response; changing its payload conflicts. Configuration or metadata changes invalidate context; restart after configuration changes. Old references do not survive restart or transfer between sessions.
+Session storage is in memory, with 30-minute idle and 8-hour maximum lifetime, one active mutation per session and bounded request history. Repeating the identical request ID replays an authorized response; changing its payload conflicts (`reason: request_id`), as does a stale `expected_revision` (`reason: revision`) or a call that arrives while another is running (`reason: busy`). Configuration or metadata changes invalidate context; restart after configuration changes. Old references do not survive restart or transfer between sessions.
 
 An optional operator-only `audit_path` records bounded decision and query diagnostics, one JSON line per event, written and flushed as each event happens, so a killed process still leaves its trail. The first event is `context_loaded` (`digest`, `loader_identity`, `models`, `pages`, `budget_bytes`, `first_page_bytes`). It must name a new file and may contain private query conditions; never expose it as a resource or place it in shared public artifacts. It is disabled by default.
 
@@ -362,7 +393,7 @@ The private worker may repair a rejected result shape using fixed feedback, but
 no rejected SQL is executed. Use wide numeric columns for multiple metrics and
 native dates instead of literal metric-name rows or formatted date strings.
 Model-generated aliases and string literals do not become public column labels.
-`mandatory_scope` no longer carries a date range, because the service injects none; it reports whether the project's declared defaults are enforced (see [What a result's evidence tells the planner](#what-a-results-evidence-tells-the-planner)).
+`mandatory_scope` no longer carries a date range, because the service injects none; it reports whether the project's declared defaults are enforced, and `applied_period` reports the range the statement itself set (see [What a result's evidence tells the planner](#what-a-results-evidence-tells-the-planner)).
 Follow-ups must pass `reply_to`; original questions and authorized prior
 results remain available to the private worker within the session.
 
