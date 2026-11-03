@@ -286,7 +286,23 @@ OBSERVED_FIELDS = (
     "aggregated",
     "filters",
     "status_literals",
+    "date_windows",
 )
+PERIOD_FIELDS = ("lower", "upper", "lower_inclusive", "upper_inclusive")
+
+
+def applied_period(windows) -> dict | None:
+    """The one date range the host read from the statement, or ``None``.
+
+    That is the window of a statement with exactly one, or with several that agree on both
+    bounds (and their boundary flags). Several windows that differ, no window, and a window the
+    host could not pin down all give ``None``; the column name never leaves with it."""
+    shapes = {tuple(w[k] for k in PERIOD_FIELDS) for w in windows or []}
+    if len(shapes) != 1:
+        return None
+    return dict(zip(PERIOD_FIELDS, shapes.pop(), strict=True))
+
+
 MODEL_CALL_COUNTS = {
     "turn": "turn",
     "elapsedMs": "elapsed_ms",
@@ -676,7 +692,12 @@ class Service:
                 for c in checks.values()
             ):
                 raise ValueError("invalid_evidence")
-            projection = {"mandatory_scope": copy.deepcopy(saved["conditions"])}
+            projection = {
+                "mandatory_scope": copy.deepcopy(saved["conditions"]),
+                "applied_period": applied_period(
+                    (internal.get("observed") or {}).get("date_windows")
+                ),
+            }
             if permitted[EVIDENCE_SUMMARY]:
                 applicable = any(c.get("applicable") is True for c in checks.values())
                 projection["checks_summary"] = (
@@ -719,6 +740,10 @@ class Service:
             }
         if "filters" in facts:
             facts["filters"] = [f for f in facts["filters"] if not hidden(f["column"])]
+        if "date_windows" in facts:
+            facts["date_windows"] = [
+                w for w in facts["date_windows"] if not hidden(w["column"])
+            ]
         if "status_literals" in facts:
             facts["status_literals"] = {
                 column: values

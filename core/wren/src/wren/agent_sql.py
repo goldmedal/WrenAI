@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import date, datetime
+import re
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import NamedTuple
 
@@ -106,6 +107,7 @@ FORM_CODES = frozenset(
 )
 MAX_JOINS = 4
 DUPLICATE_AGGREGATION = "duplicate_aggregation"
+DATE_WINDOW_UNVERIFIED = "date_window_unverified"
 RULE_VIOLATION = "rule_violation"
 NO_VERDICT = "no_verdict"
 OPERATORS = {
@@ -123,6 +125,23 @@ OPERATORS = {
     exp.NullSafeEQ: "is not distinct from",
     exp.NullSafeNEQ: "is distinct from",
 }
+DATE_TYPE = re.compile(r"\s*(date|datetime|timestamp\w*)\b", re.IGNORECASE)
+DATE_LITERAL = re.compile(
+    r"(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?))?"
+)
+TEMPORAL_CASTS = {
+    exp.DataType.Type.DATE,
+    exp.DataType.Type.DATETIME,
+    exp.DataType.Type.TIMESTAMP,
+    exp.DataType.Type.TIMESTAMPNTZ,
+}
+BOUNDS = {
+    exp.GT: ("lower", False),
+    exp.GTE: ("lower", True),
+    exp.LT: ("upper", False),
+    exp.LTE: ("upper", True),
+}
+FLIPPED = {"lower": "upper", "upper": "lower"}
 NEGATED = {"=": "<>", "<>": "=", "<": ">=", ">=": "<", ">": "<=", "<=": ">"}
 
 
@@ -182,6 +201,12 @@ class AdHocSQL:
         }
         self.semantics = list(catalog.get("semantics") or [])
         self.declared_defaults = bool(snapshot.declarations)
+        self.date_columns = frozenset(
+            (model.lower(), column.lower())
+            for model, columns in self.schema.items()
+            for column, kind in columns.items()
+            if DATE_TYPE.match(str(kind))
+        )
         self.views, self.broken_views = self._read_views(snapshot, catalog)
         self.checker = DefaultsChecker(
             snapshot.declarations,
@@ -489,6 +514,9 @@ class AdHocSQL:
             if self._duplicate_aggregation(scopes):
                 observed["duplicate_aggregation"] = True
                 unverified.append(DUPLICATE_AGGREGATION)
+            observed["date_windows"], windows_pinned = self._date_windows(scopes)
+            if not windows_pinned:
+                unverified.append(DATE_WINDOW_UNVERIFIED)
             touched = {name.lower() for name in sources} | set(views_read)
             unverified += [
                 entry["id"]
@@ -561,6 +589,215 @@ class AdHocSQL:
             "filters": filters,
             "status_literals": {k: sorted(v) for k, v in sorted(literals.items())},
         }
+
+    def _date_windows(self, scopes):
+        """The date ranges the statement itself puts on a date column, read from the AST.
+
+        Returns ``(windows, pinned)``. A window is listed per select and column from the
+        comparisons of that column with a date or timestamp literal (``>=``, ``>``, ``<``,
+        ``<=``, ``=``, ``BETWEEN``) in its ``WHERE``, ``HAVING``, ``QUALIFY`` and join
+        conditions. A date column that is also filtered any other way anywhere in the
+        statement (``DATE_TRUNC``, ``EXTRACT``, arithmetic, a non-literal operand, an ``OR``,
+        a ``CASE``/``FILTER`` condition, a derived value) is not listed and ``pinned`` is
+        false: the host cannot say which dates the statement keeps. ``IS [NOT] NULL`` and
+        a comparison of two columns in a join condition are not date filters and count for
+        nothing either way. Nothing here reads what the worker wrote about its question.
+        """
+        windows, unpinned = [], set()
+        for scope in scopes:
+            select = scope.expression
+            if not isinstance(select, exp.Select):
+                continue
+            bounds = {}
+            for condition, joined in self._conditions(select):
+                for term in self._conjuncts(condition):
+                    taken = self._bounds_of(scope, term)
+                    if taken is not None:
+                        for column, side, value, inclusive in taken:
+                            self._tighten(
+                                bounds.setdefault(column, {}), side, value, inclusive
+                            )
+                    elif not (
+                        self._is_null_check(term)
+                        or (joined and self._is_join_key(term))
+                    ):
+                        unpinned |= self._date_refs(scope, term)
+            for node in select.find_all(exp.If, exp.Filter):
+                if node.find_ancestor(exp.Select) is select:
+                    condition = (
+                        node.this if isinstance(node, exp.If) else node.expression
+                    )
+                    unpinned |= self._date_refs(scope, condition)
+            windows += [self._window(column, sides) for column, sides in bounds.items()]
+        listed = {}
+        for window in windows:
+            if self._key(window["column"]) not in unpinned:
+                listed.setdefault(json.dumps(window, sort_keys=True), window)
+        return list(listed.values()), not unpinned
+
+    @staticmethod
+    def _key(qualified):
+        model, _, column = qualified.partition(".")
+        return model.lower(), column.lower()
+
+    @staticmethod
+    def _conditions(select):
+        """``(condition, is_join_condition)`` for every filter position of a select."""
+        for key in ("where", "having", "qualify"):
+            clause = select.args.get(key)
+            if clause is not None:
+                yield clause.this, False
+        for join in select.args.get("joins") or []:
+            if join.args.get("on") is not None:
+                yield join.args["on"], True
+
+    @staticmethod
+    def _conjuncts(node):
+        while isinstance(node, exp.Paren):
+            node = node.this
+        if isinstance(node, exp.And):
+            yield from AdHocSQL._conjuncts(node.this)
+            yield from AdHocSQL._conjuncts(node.expression)
+        else:
+            yield node
+
+    @staticmethod
+    def _is_null_check(term):
+        """``col IS NULL`` / ``col IS NOT NULL``: a state test (a soft-delete or cancellation
+        timestamp), which cannot move the range of dates a statement keeps."""
+        while isinstance(term, (exp.Paren, exp.Not)):
+            term = term.this
+        return (
+            isinstance(term, exp.Is)
+            and isinstance(term.expression, exp.Null)
+            and isinstance(term.this, exp.Column)
+        )
+
+    @staticmethod
+    def _is_join_key(term):
+        """A comparison of two columns in a join condition: the join, not a date filter."""
+        while isinstance(term, exp.Paren):
+            term = term.this
+        return isinstance(term, exp.Binary) and all(
+            isinstance(side, exp.Column) for side in (term.this, term.expression)
+        )
+
+    def _date_column(self, scope, node):
+        """``model.column`` when ``node`` is a plain reference to a date or timestamp column."""
+        if not isinstance(node, exp.Column):
+            return None
+        base = self._base_column(scope, node)
+        if base is None or (base[0].lower(), base[1].lower()) not in self.date_columns:
+            return None
+        return f"{base[0]}.{base[1]}"
+
+    def _date_refs(self, scope, node, depth=0):
+        """The date columns ``node`` reads, followed through derived tables and CTEs."""
+        found = set()
+        for column in self._columns_read(node):
+            source = scope.sources.get(column.table)
+            if isinstance(source, exp.Table):
+                if (source.name.lower(), column.name.lower()) in self.date_columns:
+                    found.add((source.name.lower(), column.name.lower()))
+            elif isinstance(source, Scope) and depth < 8:
+                for child in source.expression.selects:
+                    if child.alias_or_name == column.name:
+                        found |= self._date_refs(source, child.unalias(), depth + 1)
+        return found
+
+    @staticmethod
+    def _columns_read(node):
+        """The columns whose values ``node`` computes from. A window function's ``PARTITION BY``
+        and ``ORDER BY`` pick rows (a ranking over a date is not a date filter) and are skipped."""
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if isinstance(current, exp.Column):
+                yield current
+                continue
+            for key, child in current.args.items():
+                if isinstance(current, exp.Window) and key in ("partition_by", "order"):
+                    continue
+                children = child if isinstance(child, list) else [child]
+                stack.extend(c for c in children if isinstance(c, exp.Expression))
+
+    def _bounds_of(self, scope, term):
+        """``[(column, "lower"|"upper", value, inclusive), ...]`` when ``term`` compares a date
+        column with a date literal and does nothing else, otherwise ``None``."""
+        while isinstance(term, exp.Paren):
+            term = term.this
+        if isinstance(term, exp.Between):
+            column = self._date_column(scope, term.this)
+            low = self._literal(term.args.get("low"))
+            high = self._literal(term.args.get("high"))
+            if column and low and high:
+                return [(column, "lower", low, True), (column, "upper", high, True)]
+            return None
+        if not isinstance(term, (exp.EQ, exp.GT, exp.GTE, exp.LT, exp.LTE)):
+            return None
+        for mine, other, mirrored in (
+            (term.this, term.expression, False),
+            (term.expression, term.this, True),
+        ):
+            column = self._date_column(scope, mine)
+            value = self._literal(other)
+            if not column or not value:
+                continue
+            if isinstance(term, exp.EQ):
+                return [(column, "lower", value, True), (column, "upper", value, True)]
+            side, inclusive = BOUNDS[type(term)]
+            return [(column, FLIPPED[side] if mirrored else side, value, inclusive)]
+        return None
+
+    @staticmethod
+    def _literal(node):
+        """``(sort_key, iso_text)`` of a date or timestamp literal, otherwise ``None``.
+
+        The forms are ``DATE '…'`` / ``CAST('…' AS DATE|TIMESTAMP)`` and a bare ISO string a
+        date column is compared with. Anything computed (an interval, a function, a column)
+        is not a literal."""
+        while isinstance(node, exp.Paren):
+            node = node.this
+        only_date = False
+        if isinstance(node, exp.Cast) and node.to.this in TEMPORAL_CASTS:
+            only_date = node.to.this == exp.DataType.Type.DATE
+            node = node.this
+        if not (isinstance(node, exp.Literal) and node.is_string):
+            return None
+        found = DATE_LITERAL.fullmatch(node.this.strip())
+        if found is None or (only_date and found.group(2)):
+            return None
+        try:
+            day = date.fromisoformat(found.group(1))
+            clock = time.fromisoformat(found.group(2)) if found.group(2) else None
+        except ValueError:
+            return None
+        if clock is None:
+            return datetime.combine(day, time.min), day.isoformat()
+        stamp = datetime.combine(day, clock)
+        return stamp, stamp.isoformat()
+
+    @staticmethod
+    def _tighten(sides, side, value, inclusive):
+        """Keep the narrower of two bounds on the same side; at a tie the exclusive one wins."""
+        kept = sides.get(side)
+        if kept is not None:
+            if kept[0][0] == value[0]:
+                inclusive = kept[1] and inclusive
+            elif (value[0] < kept[0][0]) == (side == "lower"):
+                return
+        sides[side] = (value, inclusive)
+
+    @staticmethod
+    def _window(column, sides):
+        window = {"column": column}
+        for side in ("lower", "upper"):
+            bound = sides.get(side)
+            window[side] = bound[0][1] if bound else None
+        for side in ("lower", "upper"):
+            bound = sides.get(side)
+            window[f"{side}_inclusive"] = bool(bound and bound[1])
+        return window
 
     @staticmethod
     def _model_of(scope, node):

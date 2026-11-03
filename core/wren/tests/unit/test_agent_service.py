@@ -27,6 +27,7 @@ from wren.agent_service import (  # noqa: E402
     Continue,
     Ref,
     StatusScopeUnresolved,
+    applied_period,
     build_mcp,
     create_service,
     execution_from_config,
@@ -1960,15 +1961,22 @@ JOINED = (
     "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped') GROUP BY c.region"
 )
 EVIDENCE_FIELDS = {
-    "hidden": {"mandatory_scope", "checks_summary", "has_unverified_semantics"},
+    "hidden": {
+        "mandatory_scope",
+        "applied_period",
+        "checks_summary",
+        "has_unverified_semantics",
+    },
     "structure": {
         "mandatory_scope",
+        "applied_period",
         "checks_summary",
         "has_unverified_semantics",
         "observed",
     },
     "rules": {
         "mandatory_scope",
+        "applied_period",
         "checks_summary",
         "has_unverified_semantics",
         "checks",
@@ -1976,6 +1984,7 @@ EVIDENCE_FIELDS = {
     },
     "full": {
         "mandatory_scope",
+        "applied_period",
         "checks_summary",
         "has_unverified_semantics",
         "checks",
@@ -2056,6 +2065,7 @@ def test_each_preset_projects_its_own_evidence_fields_and_get_evidence_agrees(
         }
         assert evidence["observed"]["joins"] == [["customers", "orders"]]
         assert evidence["observed"]["aggregated"] is True
+        assert evidence["observed"]["date_windows"] == []
         assert evidence["observed"]["status_literals"] == {
             "orders.status": ["paid", "shipped"]
         }
@@ -2076,6 +2086,7 @@ def test_hidden_evidence_names_no_rule_model_column_or_count(service):
             "kind": "project_defaults",
             "declared_defaults_enforced": True,
         },
+        "applied_period": None,
         "checks_summary": "all_satisfied",
         "has_unverified_semantics": True,
     }
@@ -2093,6 +2104,128 @@ def test_hidden_evidence_names_no_rule_model_column_or_count(service):
         "answer.evidence.observed",
         "answer.evidence.unverified",
     }
+
+
+DATED = (
+    "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped') "
+    "AND order_date >= DATE '2026-06-01' AND order_date < DATE '2026-07-01'"
+)
+JUNE_WINDOW = {
+    "column": "orders.order_date",
+    "lower": "2026-06-01",
+    "upper": "2026-07-01",
+    "lower_inclusive": True,
+    "upper_inclusive": False,
+}
+JUNE_PERIOD = {k: v for k, v in JUNE_WINDOW.items() if k != "column"}
+
+
+@pytest.mark.parametrize("preset", PRESET_NAMES)
+@needs_policy_runtime
+def test_the_applied_period_is_shown_to_every_preset_and_the_window_only_with_observed(
+    service, preset
+):
+    s = service(example_presets=True, preset=preset)
+    r = sql_request(s, DATED)
+    done = execute(s, r)
+    evidence = done["evidence"]
+    assert set(evidence) == EVIDENCE_FIELDS[preset]
+    assert evidence["applied_period"] == JUNE_PERIOD
+    assert evidence_of(s, r, done)["evidence"] == evidence
+    if "observed" in evidence:
+        assert evidence["observed"]["date_windows"] == [JUNE_WINDOW]
+    else:
+        assert "order_date" not in json.dumps(evidence)
+    assert "date_window_unverified" not in json.dumps(evidence)
+
+
+def test_a_filter_the_host_cannot_pin_leaves_no_applied_period_and_says_so(service):
+    s = service(example_presets=True, preset="full")
+    done = execute(
+        s,
+        sql_request(
+            s,
+            "SELECT COUNT(*) FROM orders WHERE NOT is_test AND status IN ('paid', 'shipped') "
+            "AND DATE_TRUNC('month', order_date) = DATE '2026-06-01'",
+        ),
+    )
+    evidence = done["evidence"]
+    assert evidence["applied_period"] is None
+    assert evidence["has_unverified_semantics"] is True
+    assert evidence["observed"]["date_windows"] == []
+    assert evidence["unverified"][0] == "date_window_unverified"
+
+
+def test_no_date_filter_is_no_period_and_not_unverified(service):
+    s = service(example_presets=True, preset="full")
+    done = execute(s, request(s))
+    assert done["evidence"]["applied_period"] is None
+    assert done["evidence"]["observed"]["date_windows"] == []
+    assert "date_window_unverified" not in done["evidence"]["unverified"]
+
+
+def test_two_windows_give_a_period_only_when_they_agree(service):
+    s = service(example_presets=True, preset="full")
+    joined = (
+        "SELECT COUNT(*) FROM orders o JOIN invoices i ON o.customer_id = i.customer_id "
+        "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped') "
+        "AND o.order_date >= DATE '2026-06-01' AND o.order_date < DATE '2026-07-01' "
+        "AND i.invoice_date >= {lower} AND i.invoice_date < DATE '2026-07-01'"
+    )
+    same = execute(s, sql_request(s, joined.format(lower="DATE '2026-06-01'")))
+    assert len(same["evidence"]["observed"]["date_windows"]) == 2
+    assert same["evidence"]["applied_period"] == JUNE_PERIOD
+    other = execute(s, sql_request(s, joined.format(lower="DATE '2026-05-01'")))
+    assert len(other["evidence"]["observed"]["date_windows"]) == 2
+    assert other["evidence"]["applied_period"] is None
+
+
+def test_the_period_needs_both_bounds_and_their_flags_to_agree():
+    shape = {"lower": "2026-06-01", "upper": "2026-07-01"}
+    closed = {**shape, "lower_inclusive": True, "upper_inclusive": True}
+    open_ = {**shape, "lower_inclusive": True, "upper_inclusive": False}
+    column = {"column": "orders.order_date"}
+    assert applied_period([]) is None and applied_period(None) is None
+    assert applied_period([{**column, **open_}]) == open_
+    assert applied_period([{**column, **open_}, {"column": "x.y", **open_}]) == open_
+    assert applied_period([{**column, **open_}, {"column": "x.y", **closed}]) is None
+    unbounded = {**open_, "lower": None, "lower_inclusive": False}
+    assert applied_period([{**column, **open_}, {**column, **unbounded}]) is None
+    assert applied_period([{**column, **unbounded}]) == unbounded
+
+
+def test_a_denied_date_column_is_dropped_from_the_windows_but_the_period_stays(
+    service,
+):
+    rules = service.root / "knowledge/rules/conventions.md"
+    text = rules.read_text()
+    assert "denied_columns: [customers.email]" in text
+    rules.write_text(
+        text.replace(
+            "denied_columns: [customers.email]",
+            "denied_columns: [customers.email, orders.order_date]",
+        )
+    )
+    s = service(example_presets=True, preset="full")
+    r = sql_request(s, COUNTS["orders"])
+    done = execute(s, r)
+    saved = s.sessions[r.session_id]["evidence"][done["evidence_ref"]]
+    saved["internal"]["observed"]["date_windows"] = [
+        JUNE_WINDOW,
+        {**JUNE_WINDOW, "column": "orders.status"},
+    ]
+    del saved["projection"]
+    evidence = evidence_of(s, r, done)["evidence"]
+    assert evidence["observed"]["date_windows"] == [
+        {**JUNE_WINDOW, "column": "orders.status"}
+    ]
+    assert evidence["applied_period"] == JUNE_PERIOD
+    saved["internal"]["observed"]["date_windows"] = [JUNE_WINDOW]
+    del saved["projection"]
+    again = evidence_of(s, r, done)["evidence"]
+    assert again["observed"]["date_windows"] == []
+    assert again["applied_period"] == JUNE_PERIOD
+    assert "order_date" not in json.dumps(again["applied_period"])
 
 
 def test_each_evidence_kind_is_authorized_once_per_reference(service):
@@ -2137,7 +2270,8 @@ def test_a_policy_can_withhold_every_evidence_kind_and_the_scope_still_shows(ser
         "mandatory_scope": {
             "kind": "project_defaults",
             "declared_defaults_enforced": True,
-        }
+        },
+        "applied_period": None,
     }
 
 
@@ -2296,6 +2430,7 @@ def test_a_project_with_no_declared_default_says_so_in_the_scope(service):
             "kind": "project_defaults",
             "declared_defaults_enforced": False,
         },
+        "applied_period": None,
         "checks_summary": "none_applicable",
         "has_unverified_semantics": False,
     }
@@ -2691,6 +2826,7 @@ def test_describe_data_answers_what_data_exists_with_no_column_names(
         assert column not in done["result"]["text"]
     assert done["evidence"] == {
         "mandatory_scope": {},
+        "applied_period": None,
         "checks_summary": "none_applicable",
         "has_unverified_semantics": False,
     }

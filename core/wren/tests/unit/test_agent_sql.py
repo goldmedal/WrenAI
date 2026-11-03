@@ -640,9 +640,20 @@ def test_checks_and_observed_come_from_the_qualified_statement(adhoc):
             {"column": "orders.order_date", "operator": ">="},
         ],
         "status_literals": {"orders.status": ["paid", "shipped"]},
+        "date_windows": [
+            {
+                "column": "orders.order_date",
+                "lower": "2026-01-05",
+                "upper": None,
+                "lower_inclusive": True,
+                "upper_inclusive": False,
+            }
+        ],
     }
     text = json.dumps(internal["observed"])
-    assert "email" not in text and "SELECT" not in text and "2026" not in text
+    assert "email" not in text and "SELECT" not in text
+    # A date literal reaches the record only as a window bound, from the AST.
+    assert text.count("2026") == 1
 
 
 FORM_ERRORS = [
@@ -1767,3 +1778,324 @@ def test_grouping_by_a_view_status_column_filters_nothing(adhoc):
     s = adhoc(files=ORDER_VALUE)
     sql = f"SELECT v.status, COUNT(*) FROM order_value v WHERE {NOT_TEST} GROUP BY v.status"
     assert status_result(s, sql) == "missing"
+
+
+# -- date windows: the range the statement itself puts on a date column ------------------------
+
+DATE_WINDOW_UNVERIFIED = "date_window_unverified"
+JUNE = "order_date >= DATE '2026-06-01' AND order_date < DATE '2026-07-01'"
+
+
+def window(column, lower, upper, lower_inclusive=True, upper_inclusive=False):
+    return {
+        "column": column,
+        "lower": lower,
+        "upper": upper,
+        "lower_inclusive": lower_inclusive,
+        "upper_inclusive": upper_inclusive,
+    }
+
+
+def windows_of(s, sql):
+    prepared = s.sql.prepare(sql)
+    return prepared.observed["date_windows"], prepared.unverified
+
+
+def test_a_half_open_literal_range_is_one_window(adhoc):
+    found, unverified = windows_of(
+        adhoc(), f"SELECT COUNT(*) FROM orders WHERE {SCOPED} AND {JUNE}"
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_statement_with_no_date_filter_has_no_window_and_nothing_unverified(adhoc):
+    found, unverified = windows_of(
+        adhoc(), f"SELECT COUNT(*) FROM orders WHERE {SCOPED}"
+    )
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_between_is_inclusive_at_both_ends(adhoc):
+    found, _ = windows_of(
+        adhoc(),
+        f"SELECT COUNT(*) FROM orders WHERE {SCOPED} "
+        "AND order_date BETWEEN DATE '2026-06-01' AND DATE '2026-06-30'",
+    )
+    assert found == [
+        window("orders.order_date", "2026-06-01", "2026-06-30", True, True)
+    ]
+
+
+def test_a_filter_inside_a_cte_or_a_subquery_is_found(adhoc):
+    s = adhoc()
+    cte = (
+        f"WITH june AS (SELECT amount FROM orders WHERE {SCOPED} AND {JUNE}) "
+        "SELECT SUM(amount) FROM june"
+    )
+    assert windows_of(s, cte)[0] == [
+        window("orders.order_date", "2026-06-01", "2026-07-01")
+    ]
+    nested = f"SELECT COUNT(*) FROM (SELECT id FROM orders WHERE {SCOPED} AND {JUNE}) t"
+    assert windows_of(s, nested)[0] == [
+        window("orders.order_date", "2026-06-01", "2026-07-01")
+    ]
+
+
+def test_the_filter_on_a_cte_column_is_a_window_on_the_model_column_it_passes(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"WITH o AS (SELECT order_date AS placed, amount FROM orders WHERE {SCOPED}) "
+        "SELECT SUM(amount) FROM o WHERE placed >= DATE '2026-06-01'",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", None, True, False)]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        "DATE '2026-06-01' <= order_date AND DATE '2026-07-01' > order_date",
+        "order_date >= '2026-06-01' AND order_date < '2026-07-01'",
+        "order_date >= CAST('2026-06-01' AS DATE) AND order_date < CAST('2026-07-01' AS DATE)",
+        "order_date >= TIMESTAMP '2026-06-01' AND order_date < TIMESTAMP '2026-07-01'",
+        "(order_date >= DATE '2026-06-01') AND (order_date < DATE '2026-07-01')",
+    ],
+)
+def test_the_literal_forms_that_read_as_the_same_range(adhoc, predicate):
+    found, _ = windows_of(
+        adhoc(), f"SELECT COUNT(*) FROM orders WHERE {SCOPED} AND {predicate}"
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+
+
+def test_a_timestamp_literal_keeps_its_time_and_an_equality_is_closed_both_ends(
+    adhoc,
+):
+    s = adhoc()
+    found, _ = windows_of(
+        s,
+        f"SELECT COUNT(*) FROM orders WHERE {SCOPED} "
+        "AND order_date >= TIMESTAMP '2026-06-01 08:30:00' AND order_date <= '2026-06-02'",
+    )
+    assert found == [
+        window("orders.order_date", "2026-06-01T08:30:00", "2026-06-02", True, True)
+    ]
+    day, _ = windows_of(
+        s,
+        f"SELECT COUNT(*) FROM orders WHERE {SCOPED} AND order_date = DATE '2026-06-15'",
+    )
+    assert day == [window("orders.order_date", "2026-06-15", "2026-06-15", True, True)]
+
+
+def test_two_bounds_on_one_side_keep_the_narrower_and_a_tie_keeps_the_exclusive(
+    adhoc,
+):
+    s = adhoc()
+    narrower, _ = windows_of(
+        s,
+        f"SELECT COUNT(*) FROM orders WHERE {SCOPED} AND order_date >= DATE '2026-01-01' "
+        "AND order_date >= DATE '2026-03-01' AND order_date < DATE '2026-09-01' "
+        "AND order_date < DATE '2026-07-01'",
+    )
+    assert narrower == [window("orders.order_date", "2026-03-01", "2026-07-01")]
+    tie, _ = windows_of(
+        s,
+        f"SELECT COUNT(*) FROM orders WHERE {SCOPED} AND order_date >= DATE '2026-03-01' "
+        "AND order_date > DATE '2026-03-01'",
+    )
+    assert tie == [window("orders.order_date", "2026-03-01", None, False, False)]
+
+
+def test_the_branches_of_a_union_are_listed_separately_and_an_equal_one_once(adhoc):
+    s = adhoc()
+    branch = "SELECT amount FROM orders WHERE {scoped} AND order_date >= DATE '{a}' AND order_date < DATE '{b}'"
+    differing = " UNION ALL ".join(
+        branch.format(scoped=SCOPED, a=a, b=b)
+        for a, b in (("2026-05-01", "2026-06-01"), ("2026-06-01", "2026-07-01"))
+    )
+    found, _ = windows_of(s, f"SELECT SUM(amount) FROM ({differing}) u")
+    assert found == [
+        window("orders.order_date", "2026-05-01", "2026-06-01"),
+        window("orders.order_date", "2026-06-01", "2026-07-01"),
+    ]
+    same = " UNION ALL ".join(
+        branch.format(scoped=SCOPED, a="2026-06-01", b="2026-07-01") for _ in range(2)
+    )
+    assert windows_of(s, f"SELECT SUM(amount) FROM ({same}) u")[0] == [
+        window("orders.order_date", "2026-06-01", "2026-07-01")
+    ]
+
+
+UNPINNED = [
+    f"DATE_TRUNC('month', order_date) = DATE '2026-06-01' AND {SALES}",
+    f"EXTRACT(month FROM order_date) = 6 AND {SALES}",
+    f"order_date >= DATE '2026-06-01' + INTERVAL 1 MONTH AND {SALES}",
+    f"(order_date >= DATE '2026-06-01' OR order_date < DATE '2025-01-01') AND {SALES}",
+    f"order_date NOT BETWEEN DATE '2026-06-01' AND DATE '2026-06-30' AND {SALES}",
+    f"order_date IN (DATE '2026-06-01', DATE '2026-06-02') AND {SALES}",
+    f"order_date >= (SELECT MIN(invoice_date) FROM invoices) AND {SALES}",
+    f"order_date <> DATE '2026-06-01' AND {SALES}",
+]
+
+
+@pytest.mark.parametrize("predicate", UNPINNED)
+def test_a_date_filter_the_host_cannot_pin_is_not_a_window_and_is_unverified(
+    adhoc, predicate
+):
+    found, unverified = windows_of(
+        adhoc(), f"SELECT COUNT(*) FROM orders WHERE NOT is_test AND {predicate}"
+    )
+    assert found == []
+    # Before the semantics ids; the sample project declares one for orders.
+    assert unverified == [DATE_WINDOW_UNVERIFIED, "fiscal_calendar_bounds"]
+
+
+@pytest.mark.parametrize("test", ["order_date IS NOT NULL", "NOT (order_date IS NULL)"])
+def test_a_null_test_on_a_date_column_is_neither_a_window_nor_unverified(adhoc, test):
+    s = adhoc()
+    found, unverified = windows_of(
+        s, f"SELECT COUNT(*) FROM orders WHERE {SCOPED} AND {test}"
+    )
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+    both, unverified = windows_of(
+        s, f"SELECT COUNT(*) FROM orders WHERE {SCOPED} AND {test} AND {JUNE}"
+    )
+    assert both == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_literal_range_does_not_survive_another_kind_of_filter_on_the_same_column(
+    adhoc,
+):
+    found, unverified = windows_of(
+        adhoc(),
+        f"SELECT COUNT(*) FROM orders WHERE {SCOPED} AND {JUNE} "
+        "AND DATE_TRUNC('month', order_date) = DATE '2026-06-01'",
+    )
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_a_date_column_compared_with_another_column_in_where_is_unverified(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        f"SELECT COUNT(*) FROM orders o JOIN invoices i ON o.customer_id = i.customer_id "
+        f"WHERE NOT o.is_test AND o.{SALES} AND o.order_date >= i.invoice_date",
+    )
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_a_date_compared_with_a_column_in_a_join_condition_is_the_join_not_a_filter(
+    adhoc,
+):
+    found, unverified = windows_of(
+        adhoc(),
+        f"SELECT COUNT(*) FROM orders o JOIN invoices i ON o.customer_id = i.customer_id "
+        f"AND o.order_date >= i.invoice_date WHERE NOT o.is_test AND o.{SALES}",
+    )
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_literal_in_a_join_condition_is_a_window(adhoc):
+    found, _ = windows_of(
+        adhoc(),
+        "SELECT COUNT(*) FROM customers c JOIN orders o ON o.customer_id = c.id "
+        "AND o.order_date >= DATE '2026-06-01' WHERE NOT o.is_test AND o.status IN ('paid', 'shipped')",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", None, True, False)]
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "SUM(CASE WHEN order_date >= DATE '2026-06-01' THEN amount ELSE 0 END)",
+        "SUM(amount) FILTER (WHERE order_date >= DATE '2026-06-01')",
+    ],
+)
+def test_a_date_condition_inside_an_aggregate_is_not_a_window_and_is_unverified(
+    adhoc, form
+):
+    found, unverified = windows_of(adhoc(), f"SELECT {form} FROM orders WHERE {SCOPED}")
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_a_value_derived_from_a_date_column_carries_its_unverified_filter_outward(
+    adhoc,
+):
+    found, unverified = windows_of(
+        adhoc(),
+        "WITH m AS (SELECT DATE_TRUNC('month', order_date) AS month, amount FROM orders "
+        f"WHERE {SCOPED}) SELECT SUM(amount) FROM m WHERE month >= DATE '2026-06-01'",
+    )
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_ranking_rows_by_a_date_is_not_a_date_filter(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        "SELECT COUNT(*) FROM (SELECT customer_id, ROW_NUMBER() OVER "
+        f"(PARTITION BY customer_id ORDER BY order_date DESC) AS rn FROM orders WHERE {SCOPED}) t "
+        "WHERE rn = 1",
+    )
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_non_date_column_compared_with_a_date_looking_string_is_ignored(adhoc):
+    found, unverified = windows_of(
+        adhoc(), "SELECT COUNT(*) FROM customers WHERE region >= '2026-06-01'"
+    )
+    assert found == []
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_two_columns_with_different_ranges_are_two_windows(adhoc):
+    s = adhoc()
+    sql = (
+        "SELECT COUNT(*) FROM orders o JOIN invoices i ON o.customer_id = i.customer_id "
+        "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped') "
+        "AND o.order_date >= DATE '2026-06-01' AND o.order_date < DATE '2026-07-01' "
+        "AND i.invoice_date >= DATE '2026-05-01' AND i.invoice_date < DATE '2026-06-01'"
+    )
+    found, unverified = windows_of(s, sql)
+    assert found == [
+        window("orders.order_date", "2026-06-01", "2026-07-01"),
+        window("invoices.invoice_date", "2026-05-01", "2026-06-01"),
+    ]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
+
+
+def test_a_pinned_column_stays_listed_beside_an_unpinned_one(adhoc):
+    found, unverified = windows_of(
+        adhoc(),
+        "SELECT COUNT(*) FROM orders o JOIN invoices i ON o.customer_id = i.customer_id "
+        "WHERE NOT o.is_test AND o.status IN ('paid', 'shipped') "
+        "AND DATE_TRUNC('month', o.order_date) = DATE '2026-06-01' "
+        "AND i.invoice_date >= DATE '2026-06-01'",
+    )
+    assert found == [window("invoices.invoice_date", "2026-06-01", None, True, False)]
+    assert DATE_WINDOW_UNVERIFIED in unverified
+
+
+def test_a_window_comes_from_the_ast_not_from_text_the_statement_carries(adhoc):
+    found, _ = windows_of(
+        adhoc(),
+        f"SELECT COUNT(*) FROM orders WHERE {SCOPED} AND {JUNE} /* order_date >= DATE '1999-01-01' */",
+    )
+    assert found == [window("orders.order_date", "2026-06-01", "2026-07-01")]
+
+
+def test_the_date_windows_of_a_view_statement_follow_the_expanded_body(adhoc):
+    s = adhoc()
+    found, unverified = windows_of(
+        s, "SELECT COUNT(*) FROM usd_line_value WHERE invoice_date >= DATE '2026-01-01'"
+    )
+    assert found == [window("invoices.invoice_date", "2026-01-01", None, True, False)]
+    assert DATE_WINDOW_UNVERIFIED not in unverified
