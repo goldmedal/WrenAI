@@ -22,6 +22,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from wren.agent_sql import model_schema, read_view_bodies, view_output_columns
 from wren.declared_defaults import (
     DeclarationError,
     ExcludeRows,
@@ -100,6 +101,10 @@ class DeclaredDefaultsInvalid(ContextError):
 
 class SemanticsInvalid(ContextError):
     code = "semantics_invalid"
+
+
+class ViewColumnsInvalid(ContextError):
+    code = "view_columns_invalid"
 
 
 class ContextChanged(ContextError):
@@ -216,6 +221,7 @@ class Snapshot:
     denied: frozenset
     declarations: tuple
     manifest: dict = field(default_factory=dict)
+    unverified_views: tuple = ()
 
 
 def load_snapshot(project_root: Path, loader: Path | None = None) -> Snapshot:
@@ -272,6 +278,8 @@ def load_snapshot(project_root: Path, loader: Path | None = None) -> Snapshot:
         raise DeniedColumnsInvalid(_denied_problems(catalog))
     if catalog.get("semantics_invalid") is True:
         raise SemanticsInvalid(_semantics_problems(catalog))
+    if catalog.get("view_columns_invalid") is True:
+        raise ViewColumnsInvalid(_view_columns_problems(catalog))
     after = project_digest(root)
     if before != after:
         raise ContextChanged("the project changed while it was being read")
@@ -280,6 +288,7 @@ def load_snapshot(project_root: Path, loader: Path | None = None) -> Snapshot:
     denied = _denied(catalog)
     manifest = _read_manifest(root)
     _check_consistent(catalog, manifest)
+    unverified_views = _check_view_columns(catalog, manifest)
     _check_denied_exist(denied, catalog)
     _check_semantics(catalog, denied)
     try:
@@ -298,6 +307,7 @@ def load_snapshot(project_root: Path, loader: Path | None = None) -> Snapshot:
         denied=denied,
         declarations=declarations,
         manifest=manifest,
+        unverified_views=unverified_views,
     )
 
 
@@ -337,6 +347,49 @@ def _check_semantics(catalog: dict, denied: frozenset) -> None:
             raise SemanticsInvalid(f"{entry['id']}: unknown model or view {unknown[0]}")
         if _mentions_denied(f"{entry['id']} {entry['note']}", anywhere, denied):
             raise SemanticsInvalid(f"{entry['id']}: names a denied column")
+
+
+def _view_columns_problems(catalog: dict) -> str:
+    entries = [
+        f"{d.get('path')}: {d.get('entry')}"
+        for d in catalog.get("diagnostics") or []
+        if isinstance(d, dict) and d.get("kind") == "view_columns_invalid"
+    ]
+    return "; ".join(entries)[:400] or "unreadable view columns declaration"
+
+
+def _check_view_columns(catalog: dict, manifest: dict) -> tuple:
+    """Every declared view column list must be exactly what the view's statement outputs.
+
+    The names are compared with the statement parsed the way a query reads it. A view the
+    host cannot read, or whose output has no stable names (``COLUMNS(...)``, an unaliased
+    expression, a repeated name), is not checked: it is returned so the start-up audit says
+    so. Messages name columns, never the statement.
+    """
+    declared = {
+        v["name"]: [c["name"] for c in v["columns"]]
+        for v in catalog.get("views") or []
+        if v.get("columns")
+    }
+    if not declared:
+        return ()
+    schema = model_schema(catalog.get("models") or [])
+    usable, _ = read_view_bodies(schema, catalog, manifest)
+    unverified = []
+    for name, names in declared.items():
+        body = usable.get(name.lower())
+        actual = view_output_columns(body, schema) if body is not None else None
+        if actual is None:
+            unverified.append(name)
+            continue
+        if {n.lower() for n in names} != set(actual):
+            only_declared = sorted({n.lower() for n in names} - set(actual))
+            only_output = sorted(set(actual) - {n.lower() for n in names})
+            raise ContextInconsistent(
+                f"view {name} declares columns that differ from what its statement "
+                f"outputs (declared only: {only_declared}; statement only: {only_output})"
+            )
+    return tuple(unverified)
 
 
 def _denied_problems(catalog: dict) -> str:
@@ -632,6 +685,24 @@ class ContextReader:
             if not c.get("is_hidden") and (model["name"], c["name"]) not in self.denied
         ]
 
+    def _view_columns(self, view: dict) -> list[dict]:
+        """The view's declared columns, minus any whose name is a denied column of any model.
+
+        A view has no owner model the adapter can resolve, so a denied name is dropped
+        wherever it appears; descriptions lose sentences that name a denied column likewise.
+        """
+        names = {column for _, column in self.denied}
+        scope = self._scope("view", view)
+        out = []
+        for column in view.get("columns") or []:
+            if column["name"].lower() in names:
+                continue
+            entry = {"name": column["name"], "type": column["type"]}
+            if description := _prose(column.get("description"), scope, self.denied):
+                entry["description"] = description
+            out.append(entry)
+        return out
+
     def _defaults_for(self, model: str) -> list[str]:
         ids = []
         for declaration in self.snapshot.declarations:
@@ -885,6 +956,7 @@ class ContextReader:
                 view.get("description"), self._scope("view", view), self.denied
             ),
             "guarantees": list(view.get("guarantees") or []),
+            "columns": self._view_columns(view),
         }
         return {k: v for k, v in item.items() if v not in (None, [])}
 
@@ -909,7 +981,8 @@ class ContextReader:
         return "\n".join(lines)
 
     def structure_document(self) -> str:
-        """``schema.structure``: every item line and each model's column table. No SQL, no rules."""
+        """``schema.structure``: every item line and the column table of each model and of each view
+        that declares columns. No SQL, no rules."""
         out = ["# Structure", ""]
         for prefix, description, tag in self._lines:
             out.append(f"- {prefix}{description}{tag}")
@@ -923,6 +996,21 @@ class ContextReader:
             ]
             for column in self._columns(model):
                 text = _prose(column.get("description"), name, self.denied) or ""
+                out.append(
+                    f"| {column['name']} | {column['type']} | {text.replace('|', '/')} |"
+                )
+        for name, view in self._views.items():
+            if not (columns := self._view_columns(view)):
+                continue
+            out += [
+                "",
+                f"## {name}",
+                "",
+                "| column | type | description |",
+                "| --- | --- | --- |",
+            ]
+            for column in columns:
+                text = column.get("description", "")
                 out.append(
                     f"| {column['name']} | {column['type']} | {text.replace('|', '/')} |"
                 )

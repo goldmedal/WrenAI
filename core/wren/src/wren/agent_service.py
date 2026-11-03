@@ -1924,6 +1924,8 @@ def _assemble_service(
         fd = os.open(audit_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         service.audit_sink = os.fdopen(fd, "w")
     service.record(reader.loaded_event())
+    for view in snapshot.unverified_views:
+        service.record({"event": "view_columns_unverified", "view": view})
     if not snapshot.declarations:
         # Nothing is enforced for this project: say so where the operator will read it.
         service.record({"event": "declared_defaults_missing_in_project"})

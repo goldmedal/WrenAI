@@ -169,6 +169,15 @@ verdict: the engine runs it and reports its own error. Only `governed-stdio` enf
 declarations; `wren query` does not. A project without declarations behaves exactly as
 before.
 
+#### Declaring a view's columns
+
+A view's `metadata.yml` may list its output columns so an agent sees them without parsing the
+view's SQL: `columns: [{name, type, description}]`, where `name` matches `^[a-z0-9_]+$`, `type`
+is not empty and `description` (optional) is at most 400 characters. The list is yours to
+keep in step with the view's `statement`. A host that can parse the statement refuses to
+start when the declared names differ from the statement's output, and a malformed or
+duplicate entry is reported as `view_columns_invalid`. Views without `columns` behave as before.
+
 ### 2. Let `usage` compound from every confirmed answer
 
 The day-to-day `usage` guide stores confirmed answers automatically:

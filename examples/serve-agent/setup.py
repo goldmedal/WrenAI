@@ -280,6 +280,28 @@ def prepare(destination: Path):
                     "description": "One row per invoice with its value in USD at the latest rate on or before the invoice date."
                 },
                 "guarantees": ["convert-invoices-to-usd"],
+                "columns": [
+                    {
+                        "name": "invoice_id",
+                        "type": "INTEGER",
+                        "description": "The invoice this row values.",
+                    },
+                    {
+                        "name": "customer_id",
+                        "type": "INTEGER",
+                        "description": "The customer who was invoiced.",
+                    },
+                    {
+                        "name": "invoice_date",
+                        "type": "DATE",
+                        "description": "Invoice date (UTC).",
+                    },
+                    {
+                        "name": "usd_value",
+                        "type": "DOUBLE",
+                        "description": "The invoice value in USD.",
+                    },
+                ],
             },
             sort_keys=False,
         )

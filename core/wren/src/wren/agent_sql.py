@@ -162,6 +162,95 @@ class PrivateSQL(BaseModel):
     sql: str = Field(min_length=1, max_length=16384)
 
 
+def model_schema(models) -> dict:
+    """``model -> {column: type}`` over the non-hidden columns of the catalog's models."""
+    return {
+        m["name"]: {
+            c["name"]: c["type"]
+            for c in m.get("columns") or []
+            if not c.get("is_hidden")
+        }
+        for m in models
+    }
+
+
+def read_view_bodies(schema: dict, catalog: dict, manifest: dict | None):
+    """The views the catalog lists, as parsed bodies over models: ``(usable, broken)``.
+
+    A body that does not parse as one query, or that reads anything but a bound model, is
+    broken: a statement that reads it is refused as ``unsupported_source`` rather than run
+    through a definition the host could not check.
+    """
+    statements = {
+        v["name"].lower(): v.get("statement")
+        for v in ((manifest or {}).get("views") or [])
+        if isinstance(v, dict) and isinstance(v.get("name"), str)
+    }
+    usable, broken = {}, set()
+    for view in catalog.get("views") or []:
+        name = view["name"].lower()
+        statement = statements.get(name)
+        try:
+            if not isinstance(statement, str):
+                raise ValueError("no statement")
+            body = sqlglot.parse_one(statement, read="duckdb")
+            if not isinstance(body, exp.Query):
+                raise ValueError("not a query")
+            qualify(
+                body.copy(),
+                dialect="duckdb",
+                schema=schema,
+                validate_qualify_columns=True,
+                identify=False,
+            )
+            if any(
+                t.db or t.catalog or t.name not in schema
+                for t in body.find_all(exp.Table)
+            ):
+                raise ValueError("reads more than models")
+        except Exception:  # noqa: BLE001 - any unreadable view is unusable, never trusted
+            broken.add(name)
+            continue
+        usable[name] = body
+    return usable, broken
+
+
+_GENERATED_ALIAS = re.compile(r"_col_\d+")
+
+
+def view_output_columns(body, schema: dict) -> list[str] | None:
+    """The output column names of a view body, or ``None`` when they are not stable names.
+
+    ``*`` and ``t.*`` (also with ``EXCLUDE`` / ``REPLACE``) expand over the bound models'
+    columns. A projection that has no name of its own (``SUM(x)`` without ``AS``,
+    ``COLUMNS(...)``) or a name that appears twice has no stable output name: the answer is
+    ``None``, never a guess from the text.
+    """
+    try:
+        qualified = qualify(
+            body.copy(),
+            dialect="duckdb",
+            schema=schema,
+            validate_qualify_columns=True,
+            identify=False,
+        )
+        names = list(qualified.named_selects)
+    except Exception:  # noqa: BLE001 - an unresolvable body has no known output
+        return None
+    if (
+        not names
+        or any(not n or _GENERATED_ALIAS.fullmatch(n) for n in names)
+        or len(set(names)) != len(names)
+        or any(
+            isinstance(inner := select.unalias(), exp.Star | exp.Columns)
+            or (isinstance(inner, exp.Column) and isinstance(inner.this, exp.Star))
+            for select in qualified.selects
+        )
+    ):
+        return None
+    return names
+
+
 class AdHocSQL:
     """Plans and runs private SQL over the models of the bound Wren project.
 
@@ -175,14 +264,7 @@ class AdHocSQL:
         self.project = project
         snapshot = project.snapshot
         models = snapshot.catalog.get("models") or []
-        self.schema = {
-            m["name"]: {
-                c["name"]: c["type"]
-                for c in m.get("columns") or []
-                if not c.get("is_hidden")
-            }
-            for m in models
-        }
+        self.schema = model_schema(models)
         if not self.schema:
             raise ValueError("invalid_sql_models")
         self.denied = frozenset((m.lower(), c.lower()) for m, c in snapshot.denied)
@@ -229,44 +311,10 @@ class AdHocSQL:
         }
 
     def _read_views(self, snapshot, catalog):
-        """The views the catalog lists, as parsed bodies over models: ``(usable, broken)``.
-
-        A body that does not parse as one query, or that reads anything but a bound model, is
-        broken: a statement that reads it is refused as ``unsupported_source`` rather than run
-        through a definition the host could not check.
-        """
-        statements = {
-            v["name"].lower(): v.get("statement")
-            for v in ((getattr(snapshot, "manifest", None) or {}).get("views") or [])
-            if isinstance(v, dict) and isinstance(v.get("name"), str)
-        }
-        usable, broken = {}, set()
-        for view in catalog.get("views") or []:
-            name = view["name"].lower()
-            statement = statements.get(name)
-            try:
-                if not isinstance(statement, str):
-                    raise ValueError("no statement")
-                body = sqlglot.parse_one(statement, read="duckdb")
-                if not isinstance(body, exp.Query):
-                    raise ValueError("not a query")
-                qualify(
-                    body.copy(),
-                    dialect="duckdb",
-                    schema=self.schema,
-                    validate_qualify_columns=True,
-                    identify=False,
-                )
-                if any(
-                    t.db or t.catalog or t.name not in self.schema
-                    for t in body.find_all(exp.Table)
-                ):
-                    raise ValueError("reads more than models")
-            except Exception:  # noqa: BLE001 - any unreadable view is unusable, never trusted
-                broken.add(name)
-                continue
-            usable[name] = body
-        return usable, broken
+        """The views the catalog lists, as parsed bodies over models: ``(usable, broken)``."""
+        return read_view_bodies(
+            self.schema, catalog, getattr(snapshot, "manifest", None)
+        )
 
     def _expand_views(self, tree):
         """Replace every reference to a view by its marked body; return the names read."""

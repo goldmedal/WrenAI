@@ -273,6 +273,66 @@ def test_a_project_with_declared_defaults_does_not_warn(service, tmp_path):
     assert "declared_defaults_missing_in_project" not in sink.read_text()
 
 
+def audit_events(sink: Path, event: str) -> list[dict]:
+    return [
+        e
+        for e in map(json.loads, sink.read_text().splitlines())
+        if e.get("event") == event
+    ]
+
+
+def test_a_view_whose_declared_columns_match_its_statement_starts_without_a_warning(
+    service, tmp_path
+):
+    sink = tmp_path / "verified.jsonl"
+    s = service(updates={"audit_path": str(sink)})
+    assert audit_events(sink, "view_columns_unverified") == []
+    view = s.project.reader.read(["usd_line_value"])["items"][0]
+    assert [c["name"] for c in view["columns"]] == [
+        "invoice_id",
+        "customer_id",
+        "invoice_date",
+        "usd_value",
+    ]
+    assert "## usd_line_value" in s.project.documents["structure"]["content"]
+
+
+def test_a_view_the_host_cannot_read_stably_starts_and_is_named_in_the_audit(
+    service, tmp_path
+):
+    manifest = service.root / "target/mdl.json"
+    built = json.loads(manifest.read_text())
+    built["views"][0]["statement"] = "SELECT COLUMNS('i.*') FROM invoices i"
+    manifest.write_text(json.dumps(built))
+    sink = tmp_path / "unverified.jsonl"
+    service(updates={"audit_path": str(sink)})
+    unverified = audit_events(sink, "view_columns_unverified")
+    assert [{k: v for k, v in e.items() if k != "t"} for e in unverified] == [
+        {"event": "view_columns_unverified", "view": "usd_line_value"}
+    ]
+
+
+def test_declared_view_columns_that_disagree_with_the_statement_refuse_to_start(
+    service,
+):
+    path = service.root / "views/usd_line_value/metadata.yml"
+    meta = yaml.safe_load(path.read_text())
+    meta["columns"] = [c for c in meta["columns"] if c["name"] != "usd_value"]
+    path.write_text(yaml.safe_dump(meta, sort_keys=False))
+    with pytest.raises(ValueError, match="context_inconsistent") as raised:
+        service()
+    assert "statement only: ['usd_value']" in str(raised.value)
+
+
+def test_a_malformed_view_columns_declaration_refuses_to_start(service):
+    path = service.root / "views/usd_line_value/metadata.yml"
+    meta = yaml.safe_load(path.read_text())
+    meta["columns"] = [{"name": "Invoice Id", "type": "INTEGER"}]
+    path.write_text(yaml.safe_dump(meta, sort_keys=False))
+    with pytest.raises(ValueError, match="view_columns_invalid"):
+        service()
+
+
 def test_idempotency_conflict_and_ownership(service):
     s = service()
     r = request(s)

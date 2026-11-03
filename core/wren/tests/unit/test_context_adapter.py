@@ -7,6 +7,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 from wren import context_adapter as adapter
 from wren.context_adapter import (
@@ -21,6 +22,7 @@ from wren.context_adapter import (
     DeniedColumnsInvalid,
     SemanticsInvalid,
     Snapshot,
+    ViewColumnsInvalid,
     load_snapshot,
     project_digest,
     resolve_loader,
@@ -962,3 +964,280 @@ def test_a_sale_statuses_rule_is_listed_on_its_model_and_in_the_rules_summary():
         "rule knowledge/rules/a.md: defaults: paid-and-shipped; columns: orders.status"
         in text
     )
+
+
+# --- declared view columns ---------------------------------------------------------------------
+
+PAID_COLUMNS = [
+    {"name": "order_id", "type": "INTEGER", "description": "The order."},
+    {"name": "amount", "type": "DOUBLE"},
+]
+
+
+def view_reader(
+    columns=PAID_COLUMNS, denied=(), budget=4096, description="Paid orders."
+):
+    return reader(
+        {
+            "models": [
+                model("orders", "Orders.", ("id", "amount")),
+                model("customers", "Customers.", ("id", "email")),
+            ],
+            "views": [
+                {
+                    "name": "paid_orders",
+                    "description": description,
+                    "guarantees": ["exclude-test-orders"],
+                    **({"columns": columns} if columns is not None else {}),
+                },
+                {"name": "plain_orders", "description": "No declared columns."},
+            ],
+        },
+        budget=budget,
+        denied=denied,
+    )
+
+
+def test_read_returns_a_views_declared_columns_and_omits_them_when_undeclared():
+    r = view_reader()
+    paid, plain = r.read(["paid_orders", "plain_orders"])["items"]
+    assert paid == {
+        "kind": "view",
+        "name": "paid_orders",
+        "description": "Paid orders.",
+        "guarantees": ["exclude-test-orders"],
+        "columns": [
+            {"name": "order_id", "type": "INTEGER", "description": "The order."},
+            {"name": "amount", "type": "DOUBLE"},
+        ],
+    }
+    assert plain == {
+        "kind": "view",
+        "name": "plain_orders",
+        "description": "No declared columns.",
+    }
+
+
+def test_the_list_lines_and_first_page_do_not_change_with_declared_columns():
+    with_columns, without = view_reader(), view_reader(columns=None)
+    assert with_columns.list(1) == without.list(1)
+    assert with_columns.first_page_bytes() == without.first_page_bytes()
+    assert (
+        "view paid_orders: Paid orders. [guarantees: exclude-test-orders]"
+        in with_columns.list(1)["text"]
+    )
+
+
+def test_structure_has_a_column_table_for_a_view_that_declares_columns_only():
+    document = view_reader().structure_document()
+    assert (
+        "## paid_orders\n\n| column | type | description |\n| --- | --- | --- |\n"
+        "| order_id | INTEGER | The order. |\n| amount | DOUBLE |  |\n"
+    ) in document
+    assert "## plain_orders" not in document
+    undeclared = view_reader(columns=None).structure_document()
+    assert "## paid_orders" not in undeclared
+    assert document.startswith(undeclared.split("\n## ")[0])
+
+
+def test_a_denied_name_is_dropped_from_a_views_columns_whichever_model_owns_it():
+    r = view_reader(
+        columns=[
+            {"name": "order_id", "type": "INTEGER"},
+            {"name": "email", "type": "VARCHAR", "description": "Contact address."},
+            {
+                "name": "amount",
+                "type": "DOUBLE",
+                "description": "Order value. Joined on customers.email. Shown in USD.",
+            },
+            {
+                "name": "note",
+                "type": "VARCHAR",
+                "description": "Free text. The email column is not here.",
+            },
+        ],
+        denied=[("customers", "email")],
+        description="Paid orders. Contact email is private.",
+    )
+    view = r.read(["paid_orders"])["items"][0]
+    assert view["description"] == "Paid orders."
+    assert view["columns"] == [
+        {"name": "order_id", "type": "INTEGER"},
+        {
+            "name": "amount",
+            "type": "DOUBLE",
+            "description": "Order value. Shown in USD.",
+        },
+        {"name": "note", "type": "VARCHAR", "description": "Free text."},
+    ]
+    everything = json.dumps(
+        [r.list(1), r.read(["paid_orders"]), r.structure_document()]
+    )
+    assert "email" not in everything.lower()
+
+
+def test_a_view_whose_only_columns_are_denied_reads_as_undeclared():
+    r = view_reader(
+        columns=[{"name": "email", "type": "VARCHAR"}],
+        denied=[("customers", "email")],
+    )
+    assert "columns" not in r.read(["paid_orders"])["items"][0]
+    assert "## paid_orders" not in r.structure_document()
+
+
+def test_an_invalid_view_columns_declaration_refuses_to_start(tmp_path):
+    root = project_dir(tmp_path)
+    catalog = good_catalog(
+        root,
+        view_columns_invalid=True,
+        diagnostics=[
+            {
+                "kind": "view_columns_invalid",
+                "path": "views/paid/metadata.yml",
+                "entry": "columns[0]: type must be a non-empty string",
+            }
+        ],
+    )
+    loader = fake_loader(tmp_path, GOOD_PREPARED, catalog)
+    with pytest.raises(
+        ViewColumnsInvalid,
+        match="view_columns_invalid: views/paid/metadata.yml: columns.0.: type must",
+    ):
+        load_snapshot(root, loader)
+    flag_only = fake_loader(
+        tmp_path, GOOD_PREPARED, good_catalog(root, view_columns_invalid=True)
+    )
+    with pytest.raises(ViewColumnsInvalid, match="unreadable view columns"):
+        load_snapshot(root, flag_only)
+
+
+def edit_view_columns(root: Path, columns):
+    path = root / "views/usd_line_value/metadata.yml"
+    meta = yaml.safe_load(path.read_text())
+    meta["columns"] = columns
+    path.write_text(yaml.safe_dump(meta, sort_keys=False))
+
+
+def set_view_statement(root: Path, statement: str):
+    manifest = root / "target/mdl.json"
+    built = json.loads(manifest.read_text())
+    built["views"][0]["statement"] = statement
+    manifest.write_text(json.dumps(built))
+
+
+def test_the_real_loader_carries_and_verifies_the_fixtures_view_columns(real_project):
+    snap = load_snapshot(real_project)
+    assert [c["name"] for c in snap.catalog["views"][0]["columns"]] == [
+        "invoice_id",
+        "customer_id",
+        "invoice_date",
+        "usd_value",
+    ]
+    assert snap.unverified_views == ()
+
+
+@pytest.mark.parametrize(
+    ("columns", "declared_only", "statement_only"),
+    [
+        (
+            [
+                {"name": "invoice_id", "type": "INTEGER"},
+                {"name": "customer_id", "type": "INTEGER"},
+                {"name": "invoice_date", "type": "DATE"},
+            ],
+            [],
+            ["usd_value"],
+        ),
+        (
+            [
+                {"name": c, "type": "INTEGER"}
+                for c in (
+                    "invoice_id",
+                    "customer_id",
+                    "invoice_date",
+                    "usd_value",
+                    "rate",
+                )
+            ],
+            ["rate"],
+            [],
+        ),
+        (
+            [
+                {"name": c, "type": "INTEGER"}
+                for c in ("invoice_id", "customer_id", "invoice_date", "value")
+            ],
+            ["value"],
+            ["usd_value"],
+        ),
+    ],
+)
+def test_declared_columns_that_differ_from_the_statements_output_refuse_to_start(
+    real_project, columns, declared_only, statement_only
+):
+    edit_view_columns(real_project, columns)
+    with pytest.raises(ContextInconsistent) as raised:
+        load_snapshot(real_project)
+    message = str(raised.value)
+    assert message.startswith("context_inconsistent: view usd_line_value")
+    assert f"declared only: {declared_only}" in message
+    assert f"statement only: {statement_only}" in message
+    assert "SELECT" not in message and "FROM" not in message
+
+
+def test_a_declaration_may_use_any_case_and_order_but_not_miss_a_column(real_project):
+    columns = [
+        {"name": c, "type": "INTEGER"}
+        for c in ("usd_value", "invoice_date", "customer_id", "invoice_id")
+    ]
+    edit_view_columns(real_project, columns)
+    assert load_snapshot(real_project).unverified_views == ()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT COLUMNS('i.*') FROM invoices i",
+        "SELECT id, amount * 2 FROM invoices",
+        "SELECT a.id, b.id FROM invoices a JOIN invoices b ON a.id = b.id",
+        "SELECT id FROM not_a_model",
+        "SELECT id FROM invoices; SELECT id FROM orders",
+    ],
+)
+def test_a_view_the_host_cannot_read_stably_is_unverified_not_refused(
+    real_project, statement
+):
+    set_view_statement(real_project, statement)
+    snap = load_snapshot(real_project)
+    assert snap.unverified_views == ("usd_line_value",)
+
+
+def test_a_view_without_declared_columns_is_neither_checked_nor_unverified(
+    real_project,
+):
+    edit_view_columns(real_project, [])
+    set_view_statement(real_project, "SELECT COLUMNS('i.*') FROM invoices i")
+    snap = load_snapshot(real_project)
+    assert snap.unverified_views == ()
+    assert "columns" not in snap.catalog["views"][0]
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        "invoice_id",
+        [{"name": "Invoice-Id", "type": "INTEGER"}],
+        [{"name": "invoice_id"}],
+        [
+            {"name": "invoice_id", "type": "INTEGER"},
+            {"name": "invoice_id", "type": "INTEGER"},
+        ],
+        [{"name": "invoice_id", "type": "INTEGER", "description": "x" * 401}],
+    ],
+)
+def test_a_malformed_columns_declaration_in_a_real_project_refuses_to_start(
+    real_project, columns
+):
+    edit_view_columns(real_project, columns)
+    with pytest.raises(ViewColumnsInvalid):
+        load_snapshot(real_project)
